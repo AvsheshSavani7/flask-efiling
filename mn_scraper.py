@@ -1,0 +1,63 @@
+import undetected_chromedriver as uc
+import time
+
+
+def scrape_mn_documents(wait_time=20, url="https://efiling.web.commerce.state.mn.us/documents?doSearch=true&dockets=24-198"):
+    """
+    Scrape Minnesota e-filing documents for a given docket number.
+
+    Args:
+        wait_time (int): Time to wait for page load in seconds
+        url (str): The URL to scrape
+        wait_time (int): Time to wait for page load in seconds
+
+    Returns:
+        str: HTML content of the scraped page
+    """
+    options = uc.ChromeOptions()
+    # Add headless mode for server deployment
+    # options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1200x600")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-plugins")
+    options.add_argument("--disable-images")
+    # Replace with your real UA if needed
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+
+    # Optional: Use a persistent profile for cookie/session reuse (uncomment below if desired)
+    # options.user_data_dir = "/tmp/uc-profile"
+
+    # Start undetected Chrome
+    driver = uc.Chrome(options=options)
+
+    try:
+        # Load the page
+        driver.get(url)
+
+        # Wait for page to load / JS challenges (adjust as needed)
+        time.sleep(wait_time)
+
+        # If you want to wait for a specific element:
+        # from selenium.webdriver.common.by import By
+        # from selenium.webdriver.support.ui import WebDriverWait
+        # from selenium.webdriver.support import expected_conditions as EC
+        # WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+
+        # Get page HTML
+        html = driver.page_source
+
+        return html
+
+    finally:
+        driver.quit()
+
+
+if __name__ == "__main__":
+    # For testing the function directly
+    html_content = scrape_mn_documents()
+    with open("page.html", "w", encoding="utf-8") as f:
+        f.write(html_content)
