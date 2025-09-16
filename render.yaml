@@ -2,7 +2,7 @@ services:
   - type: web
     name: mn-scraper-api
     env: docker
-    plan: free
+    plan: started
     dockerfilePath: ./Dockerfile
     envVars:
       - key: FLASK_ENV
