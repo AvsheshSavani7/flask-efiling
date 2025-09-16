@@ -45,7 +45,11 @@ def scrape_documents_post():
         url = data.get(
             'url', 'https://efiling.web.commerce.state.mn.us/documents?doSearch=true&dockets=24-198')
 
+        logger.info(
+            f"Starting scrape for URL: {url} with wait_time: {wait_time}")
         html_content = scrape_mn_documents(wait_time, url)
+        logger.info(
+            f"Scraping completed successfully. Content length: {len(html_content)}")
 
         return jsonify({
             "success": True,

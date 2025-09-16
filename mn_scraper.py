@@ -1,6 +1,10 @@
 import undetected_chromedriver as uc
 import time
 import os
+import logging
+
+# Suppress undetected-chromedriver logs
+logging.getLogger('undetected_chromedriver').setLevel(logging.WARNING)
 
 
 def scrape_mn_documents(wait_time=20, url="https://efiling.web.commerce.state.mn.us/documents?doSearch=true&dockets=24-198"):
