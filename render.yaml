@@ -3,6 +3,7 @@ services:
     name: mn-scraper-api
     env: python
     plan: free
+    runtime: python-3.11
     buildCommand: pip install -r requirements.txt
     startCommand: python app.py
     envVars:
