@@ -1,13 +1,13 @@
 services:
   - type: web
     name: mn-scraper-api
-    env: python
+    env: docker
     plan: free
-    runtime: python-3.11
-    buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
+    dockerfilePath: ./Dockerfile
     envVars:
       - key: FLASK_ENV
         value: production
       - key: PORT
         value: 10000
+      - key: DISPLAY
+        value: :99

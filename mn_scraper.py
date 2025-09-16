@@ -1,5 +1,6 @@
 import undetected_chromedriver as uc
 import time
+import os
 
 
 def scrape_mn_documents(wait_time=20, url="https://efiling.web.commerce.state.mn.us/documents?doSearch=true&dockets=24-198"):
@@ -15,15 +16,22 @@ def scrape_mn_documents(wait_time=20, url="https://efiling.web.commerce.state.mn
         str: HTML content of the scraped page
     """
     options = uc.ChromeOptions()
-    # Add headless mode for server deployment
-    # options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1200x600")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-plugins")
-    options.add_argument("--disable-images")
+
+    # Check if running in Docker/container environment
+    if os.environ.get('DISPLAY'):
+        # Running with virtual display (Docker)
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1200x600")
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-plugins")
+        options.add_argument("--disable-images")
+        # Don't add --headless, let it use the virtual display
+    else:
+        # Running locally, use normal options
+        options.add_argument("--window-size=1200x600")
+
     # Replace with your real UA if needed
     options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
