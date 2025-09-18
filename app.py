@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from mn_doc_scraper import parse_mn_documents
 from mn_scraper import scrape_mn_documents
 import logging
 import os
@@ -22,13 +23,12 @@ def home():
             "POST /scrape": {
                 "body": {
                     "url": "string (optional, default: https://efiling.web.commerce.state.mn.us/documents?doSearch=true&dockets=24-198)",
-                    "wait_time": "integer (optional, default: 20)"
-                }
-            },
-            "POST /scrape": {
-                "body": {
-                    "url": "string (optional, default: https://efiling.web.commerce.state.mn.us/documents?doSearch=true&dockets=24-198)",
-                    "wait_time": "integer (optional, default: 20)"
+                    "wait_time": "integer (optional, default: 20)",
+                    "type": "string (optional, 'html' or 'document', default: 'html')"
+                },
+                "description": {
+                    "html": "Returns HTML content of the scraped page",
+                    "document": "Downloads and extracts text content from documents (PDF, Word, etc.)"
                 }
             }
         }
@@ -42,17 +42,21 @@ def scrape_documents_post():
         data = request.get_json() or {}
 
         wait_time = data.get('wait_time', 20)
+        type = data.get('type', 'html')
         url = data.get(
             'url', 'https://efiling.web.commerce.state.mn.us/documents?doSearch=true&dockets=24-198')
 
-        html_content = scrape_mn_documents(wait_time, url)
-
-        return jsonify({
-            "success": True,
-            "url": url,
-            "content_length": len(html_content),
-            "html_content": html_content
-        }), 200
+        if type == 'html':
+            html_content = scrape_mn_documents(wait_time, url)
+            return jsonify({
+                "success": True,
+                "url": url,
+                "content_length": len(html_content),
+                "html_content": html_content
+            }), 200
+        elif type == 'document':
+            result = parse_mn_documents(wait_time, url)
+            return jsonify(result), 200 if result.get("success") else 500
 
     except Exception as e:
         logger.error(f"Error during scraping: {str(e)}")

@@ -3,3 +3,7 @@ flask==2.3.3
 selenium==4.15.2
 gunicorn==21.2.0
 setuptools==69.0.3
+beautifulsoup4==4.12.2
+PyPDF2==3.0.1
+python-docx==0.8.11
+requests==2.31.0
