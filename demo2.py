@@ -6,7 +6,7 @@ from playwright_stealth import Stealth
 from bs4 import BeautifulSoup
 
 TARGET_URL = "https://efiling.web.commerce.state.mn.us/documents?doSearch=true&dockets=24-198"
-API_KEY = "0d568f572a6a66a2cc234191a7f8d488"  # <-- INSERT YOUR 2Captcha key here
+API_KEY = "1cc2815b0dfbc0b37d0218bc5f4325d1"  # <-- INSERT YOUR 2Captcha key here
 
 CAPTCHA_SOLVER_URL = "http://2captcha.com/in.php"
 CAPTCHA_RESULT_URL = "http://2captcha.com/res.php"
