@@ -12,8 +12,6 @@ RUN apt-get update && apt-get install -y \
     fluxbox \
     wmctrl \
     fonts-liberation \
-    fonts-unifont \
-    fonts-ubuntu \
     libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
@@ -52,6 +50,12 @@ COPY requirements.txt .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Install additional fonts that might be needed
+RUN apt-get update && apt-get install -y \
+    fonts-dejavu-core \
+    fonts-freefont-ttf \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install Playwright browsers
 RUN playwright install chromium
