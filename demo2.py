@@ -5,7 +5,6 @@ from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 from bs4 import BeautifulSoup
 
-TARGET_URL = "https://efiling.web.commerce.state.mn.us/documents?doSearch=true&dockets=24-198"
 API_KEY = "1cc2815b0dfbc0b37d0218bc5f4325d1"  # <-- INSERT YOUR 2Captcha key here
 
 CAPTCHA_SOLVER_URL = "http://2captcha.com/in.php"
@@ -43,7 +42,7 @@ async def get_sitekey(page):
 
 async def main(wait_time=20, url="https://efiling.web.commerce.state.mn.us/documents?doSearch=true&dockets=24-198"):
     async with Stealth().use_async(async_playwright()) as p:
-        browser = await p.chromium.launch(headless=False)
+        browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         print(f"Navigating to {url} ...")
         await page.goto(url)
