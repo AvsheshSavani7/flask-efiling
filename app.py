@@ -4,6 +4,7 @@ from mn_scraper import scrape_mn_documents
 from demo2 import main
 import logging
 import os
+import asyncio
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -48,11 +49,11 @@ def scrape_documents_post():
             'url', 'https://efiling.web.commerce.state.mn.us/documents?doSearch=true&dockets=24-198')
 
         if type == 'html':
-            html_content = main(wait_time, url)
+            html_content = asyncio.run(main(wait_time, url))
             return jsonify({
                 "success": True,
                 "url": url,
-                "content_length": len(html_content),
+                "content_length": len(html_content) if html_content else 0,
                 "html_content": html_content
             }), 200
         elif type == 'document':
