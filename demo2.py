@@ -40,31 +40,19 @@ async def get_sitekey(page):
     return sitekey
 
 
-async def main(wait_time=20, url="https://efiling.web.commerce.state.mn.us/documents?doSearch=true&dockets=24-198"):
+async def playwright_2captcha_fetch(url, wait_time=20):
     async with Stealth().use_async(async_playwright()) as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
         page = await browser.new_page()
-        print(f"Navigating to {url} ...")
         await page.goto(url)
-        await asyncio.sleep(5)  # Let page render
-
-        # Detect if Turnstile is present
-        print("Detecting Turnstile sitekey ...")
+        await asyncio.sleep(3)
         sitekey = await get_sitekey(page)
         if not sitekey:
-            print(
-                "No Turnstile sitekey found. Page may not be protected or site structure changed.")
+            await asyncio.sleep(wait_time)
             html = await page.content()
-            with open("page.html", "w", encoding="utf-8") as f:
-                f.write(html)
-            print("Page HTML saved as page.html")
             await browser.close()
-            return
-
-        print(f"Turnstile sitekey found: {sitekey}")
-
-        # Submit captcha challenge to 2Captcha
-        print("Submitting to 2Captcha...")
+            return html
+        # 2Captcha logic same as before...
         data = {
             "key": API_KEY,
             "method": "turnstile",
@@ -75,13 +63,8 @@ async def main(wait_time=20, url="https://efiling.web.commerce.state.mn.us/docum
         resp = requests.post(CAPTCHA_SOLVER_URL, data=data)
         task_id = resp.json().get("request")
         if not task_id:
-            print("2Captcha task creation failed:", resp.text)
             await browser.close()
-            return
-
-        print(
-            f"2Captcha task id: {task_id} -- waiting for solution (may take 10-60 sec)...")
-        # Poll for result
+            return ""
         token = None
         for _ in range(30):
             time.sleep(5)
@@ -97,71 +80,57 @@ async def main(wait_time=20, url="https://efiling.web.commerce.state.mn.us/docum
                 token = result["request"]
                 break
             elif result["request"] != "CAPCHA_NOT_READY":
-                print("2Captcha error:", result)
                 break
-            print("Waiting for captcha solution ...")
         if not token:
-            print("Captcha was not solved in time.")
             await browser.close()
-            return
-
-        print(f"Captcha solved: {token[:8]}... (truncated)")
-
-        # Inject the solution token and trigger form submit
-        print("Injecting solution and submitting ...")
-        # The form selector may need to be adjusted for your page.
+            return ""
         await page.evaluate("""
-        (token) => {
-            // Try to set cf-turnstile-response
-            let input = document.querySelector('input[name="cf-turnstile-response"]');
-            if (!input) {
-                input = document.createElement('input');
-                input.type = "hidden";
-                input.name = "cf-turnstile-response";
-                document.body.appendChild(input);
+            (token) => {
+                let input = document.querySelector('input[name="cf-turnstile-response"]');
+                if (!input) {
+                    input = document.createElement('input');
+                    input.type = "hidden";
+                    input.name = "cf-turnstile-response";
+                    document.body.appendChild(input);
+                }
+                input.value = token;
+                let form = input.form || document.querySelector('form');
+                if (form) {
+                    form.submit();
+                } else {
+                    location.reload();
+                }
             }
-            input.value = token;
-            // Try to find and submit a form
-            let form = input.form || document.querySelector('form');
-            if (form) {
-                form.submit();
-            } else {
-                // If no form, reload with token
-                location.reload();
-            }
-        }
         """, token)
-
-       # Wait for navigation or the challenge to finish
         try:
             await page.wait_for_load_state('networkidle', timeout=20000)
         except Exception:
-            print("Still navigating... Waiting a few more seconds just in case.")
             await asyncio.sleep(8)
-
-        # Double-check: Wait until page is not navigating
         for _ in range(10):
             if not page.is_closed():
                 try:
                     html = await page.content()
                     break
                 except Exception:
-                    print("Page still navigating, retrying...")
                     await asyncio.sleep(2)
             else:
-                print("Page closed unexpectedly!")
-                return
-        else:
-            print("Failed to get page content after challenge.")
-            return
-
-        print("Saving HTML ...")
-        with open("page.html", "w", encoding="utf-8") as f:
-            f.write(html)
-        print("Saved final page as page.html")
+                return ""
         await browser.close()
         return html
 
 
+def fetch_with_playwright_2captcha(url, wait_time=20):
+    try:
+        return asyncio.run(playwright_2captcha_fetch(url, wait_time))
+    except RuntimeError:
+        import nest_asyncio
+        nest_asyncio.apply()
+        return asyncio.run(playwright_2captcha_fetch(url, wait_time))
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    html = fetch_with_playwright_2captcha(
+        "https://efiling.web.commerce.state.mn.us/documents?doSearch=true&dockets=24-198")
+    with open("page.html", "w", encoding="utf-8") as f:
+        f.write(html or "")
+    print("HTML saved to page.html")

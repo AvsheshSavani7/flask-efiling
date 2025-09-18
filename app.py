@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 from mn_doc_scraper import parse_mn_documents
 from mn_scraper import scrape_mn_documents
-from demo2 import main
+from demo2 import fetch_with_playwright_2captcha
 import logging
 import os
 import asyncio
@@ -49,7 +49,7 @@ def scrape_documents_post():
             'url', 'https://efiling.web.commerce.state.mn.us/documents?doSearch=true&dockets=24-198')
 
         if type == 'html':
-            html_content = asyncio.run(main(wait_time, url))
+            html_content = fetch_with_playwright_2captcha(url)
             return jsonify({
                 "success": True,
                 "url": url,
