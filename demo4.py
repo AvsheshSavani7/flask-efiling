@@ -45,7 +45,8 @@ async def playwright_2captcha_fetch(url, wait_time=15):
             headless=True,
             args=[
                 "--no-sandbox",
-                "--ignore-certificate-errors"
+                "--ignore-certificate-errors",
+                f"--proxy-server=http://{proxy_host}:{proxy_port}"
             ]
         )
         context = await browser.new_context(
