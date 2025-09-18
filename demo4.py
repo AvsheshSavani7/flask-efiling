@@ -5,7 +5,7 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 from playwright_stealth import Stealth
 from bs4 import BeautifulSoup
 
-TARGET_URL = "https://efiling.web.commerce.state.mn.us/documents?doSearch=true&dockets=24-198"
+TARGET_URL = "https://ipinfo.io/ip"
 API_KEY = "1cc2815b0dfbc0b37d0218bc5f4325d1"
 
 proxy_host = "95.135.111.60"
@@ -45,8 +45,7 @@ async def playwright_2captcha_fetch(url, wait_time=15):
             headless=True,
             args=[
                 "--no-sandbox",
-                "--ignore-certificate-errors",
-                f"--proxy-server=http://{proxy_host}:{proxy_port}"
+                "--ignore-certificate-errors"
             ]
         )
         context = await browser.new_context(
