@@ -8,6 +8,10 @@ import docx
 from io import BytesIO
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from playwright_stealth import Stealth
+import pdfplumber
+from io import BytesIO
+import pytesseract
+
 
 # Proxy configuration from demo4.py
 proxy_host = "95.135.111.60"
@@ -23,57 +27,43 @@ CAPTCHA_RESULT_URL = "http://2captcha.com/res.php"
 
 def extract_text_from_document(file_content, file_extension):
     """
-    Extract text from different document types.
-
-    Args:
-        file_content (bytes): The file content as bytes
-        file_extension (str): File extension (pdf, docx, txt, etc.)
-
-    Returns:
-        str: Extracted text content
+    Extracts all text and tables from a PDF file.
+    For garbled or image-based pages, uses OCR as fallback.
+    Returns a single string with both text and formatted tables.
     """
+    combined_content = []
     try:
-        # Check if content is HTML (error page)
-        content_str = file_content.decode('utf-8', errors='ignore')
-        if '<html' in content_str.lower() or '<!doctype' in content_str.lower():
-            soup = BeautifulSoup(content_str, 'html.parser')
-            return soup.get_text().strip()
+        with pdfplumber.open(BytesIO(file_content)) as pdf:
+            for page_num, page in enumerate(pdf.pages, start=1):
+                # Try normal text extraction
+                plain = page.extract_text() or ""
+                is_garbled = plain.count("(cid:") > 10 or not plain.strip()
+                if is_garbled:
+                    # Fallback to OCR for this page
+                    combined_content.append(
+                        f"--- Page {page_num} Text (OCR) ---")
+                    pil_image = page.to_image(resolution=300).original
+                    ocr_text = pytesseract.image_to_string(pil_image)
+                    combined_content.append(ocr_text.strip())
+                else:
+                    combined_content.append(
+                        f"--- Page {page_num} Text ---\n{plain}")
 
-        if file_extension.lower() == 'pdf':
-            # Validate and extract PDF content
-            if not file_content.startswith(b'%PDF'):
-                return f"Invalid PDF file - content doesn't start with PDF header"
-
-            pdf_reader = PyPDF2.PdfReader(BytesIO(file_content))
-            text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text() + "\n"
-            return text.strip()
-
-        elif file_extension.lower() in ['docx', 'doc']:
-            # Extract text from Word document
-            doc = docx.Document(BytesIO(file_content))
-            text = ""
-            for paragraph in doc.paragraphs:
-                text += paragraph.text + "\n"
-            return text.strip()
-
-        elif file_extension.lower() == 'txt':
-            return file_content.decode('utf-8', errors='ignore')
-
-        elif file_extension.lower() in ['html', 'htm']:
-            soup = BeautifulSoup(file_content.decode(
-                'utf-8', errors='ignore'), 'html.parser')
-            return soup.get_text().strip()
-
-        else:
-            return file_content.decode('utf-8', errors='ignore')
-
+                # Try table extraction with pdfplumber
+                tables = page.extract_tables()
+                for idx, table in enumerate(tables, start=1):
+                    if table:
+                        # Format table as a readable string (tab-separated)
+                        table_str = "\n".join(
+                            ["\t".join(cell or "" for cell in row)
+                             for row in table]
+                        )
+                        combined_content.append(
+                            f"\n--- Page {page_num} Table {idx} ---\n{table_str}"
+                        )
+        return "\n".join(combined_content).strip()
     except Exception as e:
-        try:
-            return file_content.decode('utf-8', errors='ignore')
-        except:
-            return f"Error extracting text: {str(e)}"
+        return f"Error extracting text: {str(e)}"
 
 
 async def get_sitekey(page):
