@@ -485,15 +485,31 @@ async def parse_mn_documents_async(wait_time=20, url="", use_proxy=True):
                     print(
                         f"Download attempt {i}/{len(urls_to_try)}: {attempt_url}")
                     try:
-                        response = requests.get(attempt_url, headers={
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                            'Accept-Language': 'en-US,en;q=0.5',
-                            'Accept-Encoding': 'gzip, deflate',
-                            'Connection': 'keep-alive',
-                            'Upgrade-Insecure-Requests': '1',
-                            'Referer': current_url  # Add referer to maintain session context
-                        }, cookies=cookie_dict, timeout=30)
+                        # Prepare request parameters
+                        request_params = {
+                            'headers': {
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                                'Accept-Language': 'en-US,en;q=0.5',
+                                'Accept-Encoding': 'gzip, deflate',
+                                'Connection': 'keep-alive',
+                                'Upgrade-Insecure-Requests': '1',
+                                'Referer': current_url  # Add referer to maintain session context
+                            },
+                            'cookies': cookie_dict,
+                            'timeout': 30
+                        }
+
+                        # Add proxy configuration if enabled
+                        if use_proxy:
+                            request_params['proxies'] = {
+                                'http': f'http://{proxy_username}:{proxy_password}@{proxy_host}:{proxy_port}',
+                                'https': f'http://{proxy_username}:{proxy_password}@{proxy_host}:{proxy_port}'
+                            }
+                            print(
+                                f"Using proxy for download: {proxy_host}:{proxy_port}")
+
+                        response = requests.get(attempt_url, **request_params)
 
                         print(
                             f"Response status: {response.status_code}, Content length: {len(response.content)}")
