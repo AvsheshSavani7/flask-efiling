@@ -67,7 +67,7 @@ def scrape_documents_post():
                 "html_content": html_content
             }), 200
         elif type == 'document':
-            result = parse_mn_documents(wait_time, url)
+            result = parse_mn_documents(wait_time=wait_time, url=url)
             return jsonify(result), 200 if result.get("success") else 500
 
     except Exception as e:
