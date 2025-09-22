@@ -25,7 +25,8 @@ RUN apt-get update && apt-get install -y \
     xdg-utils \
     xvfb \
     fluxbox \
-    && rm -rf /var/lib/apt/lists/*
+    tesseract-ocr \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
