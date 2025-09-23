@@ -145,6 +145,7 @@ async def solve_captcha(sitekey, page_url):
 async def parse_mn_documents_async(wait_time=20, url="", use_proxy=True):
     """
     Download and parse Minnesota e-filing documents using Playwright with proxy and 2captcha.
+    For direct PDF URLs, downloads and extracts text directly without browser automation.
 
     Args:
         wait_time (int): Time to wait for page load in seconds
@@ -154,6 +155,75 @@ async def parse_mn_documents_async(wait_time=20, url="", use_proxy=True):
     Returns:
         dict: Dictionary containing extracted text and metadata
     """
+
+    # Check if URL is a direct PDF link - handle it directly without browser automation
+    if url.lower().endswith('.pdf'):
+        print(f"Direct PDF URL detected: {url}")
+        try:
+            # Prepare request parameters
+            request_params = {
+                'headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                    'Accept': 'application/pdf,application/octet-stream,*/*',
+                    'Accept-Language': 'en-US,en;q=0.5',
+                    'Accept-Encoding': 'gzip, deflate',
+                    'Connection': 'keep-alive',
+                },
+                'timeout': 30
+            }
+
+            # For direct PDF downloads, try without proxy first as many PDF servers don't require it
+            # and proxy can cause authentication issues
+            print("Downloading PDF directly (without proxy)...")
+            response = requests.get(url, **request_params)
+
+            # If direct download fails and proxy is enabled, try with proxy as fallback
+            if response.status_code != 200 and use_proxy:
+                print(
+                    f"Direct download failed (status: {response.status_code}), trying with proxy...")
+                request_params['proxies'] = {
+                    'http': f'http://{proxy_username}:{proxy_password}@{proxy_host}:{proxy_port}',
+                    'https': f'http://{proxy_username}:{proxy_password}@{proxy_host}:{proxy_port}'
+                }
+                print(
+                    f"Using proxy for PDF download: {proxy_host}:{proxy_port}")
+                response = requests.get(url, **request_params)
+
+            if response.status_code == 200:
+                print(
+                    f"PDF downloaded successfully. Size: {len(response.content)} bytes")
+
+                # Extract text from PDF
+                text_content = extract_text_from_document(
+                    response.content, 'pdf')
+
+                return {
+                    "success": True,
+                    "content_type": "pdf",
+                    "text_content": text_content,
+                    "url": url,
+                    "content_length": len(text_content),
+                    "file_size_bytes": len(response.content),
+                    "direct_pdf_download": True
+                }
+            else:
+                print(
+                    f"Failed to download PDF. Status code: {response.status_code}")
+                return {
+                    "success": False,
+                    "error": f"Failed to download PDF. Status code: {response.status_code}",
+                    "url": url,
+                    "direct_pdf_download": True
+                }
+
+        except Exception as e:
+            print(f"Error downloading PDF directly: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Error downloading PDF directly: {str(e)}",
+                "url": url,
+                "direct_pdf_download": True
+            }
     async with Stealth().use_async(async_playwright()) as p:
         # Configure browser launch args
         launch_args = [
