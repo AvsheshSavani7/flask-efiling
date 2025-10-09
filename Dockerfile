@@ -41,4 +41,4 @@ EXPOSE 10000
 ENV DISPLAY=:99
 ENV PORT=10000
 
-CMD ["python", "app.py"]
+CMD ["gunicorn", "--bind", "0.0.0.0:10000", "--workers", "3", "--timeout", "300", "app:app"]
