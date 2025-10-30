@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 TARGET_URL = "https://ipinfo.io/ip"
 API_KEY = "1cc2815b0dfbc0b37d0218bc5f4325d1"
 
-proxy_host = "95.135.111.60"
+proxy_host = "95.135.111.121"
 proxy_port = 45237
 proxy_username = "oEhXl624nXDSDBR"
 proxy_password = "YC7SFyimYnBQLbt"

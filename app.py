@@ -37,7 +37,7 @@ def home():
             },
             "POST /proxy-check": {
                 "body": {
-                    "host": "string (optional, default: 95.135.111.60)",
+                    "host": "string (optional, default: 95.135.111.121)",
                     "port": "integer (optional, default: 45237)",
                     "timeout": "integer (optional, default: 5)"
                 },
@@ -84,7 +84,7 @@ def proxy_check():
     try:
         data = request.get_json() or {}
 
-        host = data.get('host', '95.135.111.60')
+        host = data.get('host', '95.135.111.121')
         port = data.get('port', 45237)
         timeout = data.get('timeout', 5)
 
