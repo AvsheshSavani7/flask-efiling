@@ -10,7 +10,7 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 from playwright_stealth import Stealth
 
 # Proxy configuration from demo4.py
-proxy_host = "95.135.111.60"
+proxy_host = "95.135.111.121"
 proxy_port = 45237
 proxy_username = "oEhXl624nXDSDBR"
 proxy_password = "YC7SFyimYnBQLbt"
