@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from mn_doc_scraper import parse_mn_documents
 from mn_scraper import scrape_mn_documents
 from demo4 import fetch_with_playwright_2captcha
+from puc_scraper import fetch_with_playwright_2captcha_puc
 import logging
 import os
 import asyncio
@@ -21,6 +22,7 @@ def home():
         "message": "Minnesota E-filing Scraper API",
         "endpoints": {
             "/scrape": "POST - Scrape documents for a given URL",
+            "/puc-scrape": "POST - Scrape PUC documents for a given URL",
             "/proxy-check": "POST - Check if a proxy port is open"
         },
         "usage": {
@@ -116,6 +118,48 @@ def proxy_check():
 
     except Exception as e:
         logger.error(f"Error during proxy check: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/puc-scrape/', methods=['POST'])
+def puc_scrape():
+    """Scrape PUC documents using POST request with JSON body"""
+    try:
+        data = request.get_json() or {}
+
+        url = data.get('url')
+        wait_time = data.get('wait_time', 30)
+        extract_zips = data.get('extract_zips', True)  # Default to True
+
+        if not url:
+            return jsonify({
+                "success": False,
+                "error": "URL is required"
+            }), 400
+
+        result = fetch_with_playwright_2captcha_puc(
+            url, wait_time, extract_zips=extract_zips)
+
+        # Handle different return types
+        if isinstance(result, dict) and "zip_urls" in result:
+            # Result includes ZIP extraction info - return simplified structure
+            return jsonify({
+                "success": True,
+                "zip_urls": result.get("zip_urls", []),
+                "extracted_files": result.get("extracted_files", [])
+            }), 200
+        else:
+            # Just HTML content (when extract_zips=False)
+            return jsonify({
+                "success": True,
+                "html_content": result if result else ""
+            }), 200
+
+    except Exception as e:
+        logger.error(f"Error during PUC scraping: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
