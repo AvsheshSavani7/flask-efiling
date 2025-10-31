@@ -21,7 +21,6 @@ def home():
         "message": "Minnesota E-filing Scraper API",
         "endpoints": {
             "/scrape": "POST - Scrape documents for a given URL",
-            "/puc-scrape": "POST - Scrape PUC Interchange pages with JavaScript support",
             "/proxy-check": "POST - Check if a proxy port is open"
         },
         "usage": {
@@ -35,13 +34,6 @@ def home():
                     "html": "Returns HTML content of the scraped page",
                     "document": "Downloads and extracts text content from documents (PDF, Word, etc.)"
                 }
-            },
-            "POST /puc-scrape": {
-                "body": {
-                    "url": "string (required) - URL to scrape",
-                    "wait_time": "integer (optional, default: 15)"
-                },
-                "description": "Returns HTML content of the PUC Interchange page with JavaScript enabled"
             },
             "POST /proxy-check": {
                 "body": {
@@ -61,7 +53,7 @@ def scrape_documents_post():
     try:
         data = request.get_json() or {}
 
-        wait_time = data.get('wait_time', 20)
+        wait_time = data.get('wait_time', 30)
         type = data.get('type', 'html')
         url = data.get(
             'url', 'https://efiling.web.commerce.state.mn.us/documents?doSearch=true&dockets=24-198')
@@ -80,46 +72,6 @@ def scrape_documents_post():
 
     except Exception as e:
         logger.error(f"Error during scraping: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
-@app.route('/puc-scrape/', methods=['POST'])
-def puc_scrape():
-    """Scrape PUC Interchange pages using POST request with JSON body"""
-    try:
-        data = request.get_json() or {}
-
-        url = data.get('url')
-        if not url:
-            return jsonify({
-                "success": False,
-                "error": "URL is required in the request body"
-            }), 400
-
-        wait_time = data.get('wait_time', 15)
-
-        # Use playwright to fetch the HTML content
-        html_content = fetch_with_playwright_2captcha(url, wait_time)
-
-        if html_content:
-            return jsonify({
-                "success": True,
-                "url": url,
-                "content_length": len(html_content),
-                "html_content": html_content
-            }), 200
-        else:
-            return jsonify({
-                "success": False,
-                "url": url,
-                "error": "Failed to retrieve HTML content"
-            }), 500
-
-    except Exception as e:
-        logger.error(f"Error during PUC scraping: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
