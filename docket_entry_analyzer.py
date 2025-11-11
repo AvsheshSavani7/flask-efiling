@@ -279,6 +279,7 @@ Be factual and concise. Focus on substantive content, not procedural details."""
         "summary": tier1_summary,
         "original_content_length": len(full_text),
         "summary_length": len(tier1_summary),
+        "metadata": entry_metadata,
         "tokens": {
             "input": tier1_input_tokens,
             "output": tier1_output_tokens,
