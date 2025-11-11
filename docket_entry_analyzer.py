@@ -62,6 +62,12 @@ def analyze_docket_entry(
             "doc_number": doc_number
         }
 
+    if metadata is None:
+        metadata = {}
+
+    # Get docket_type from metadata for filtering
+    docket_type = metadata.get("docket_type", "N/A")
+
     try:
         mongo_client = MongoClient(mongodb_uri)
         db = mongo_client.get_database()
@@ -78,7 +84,15 @@ def analyze_docket_entry(
                 "entry": existing_entry
             }
 
-        all_entries = list(collection.find().sort("entry_number", 1))
+        # Filter entries by docket_type if provided
+        if docket_type and docket_type != "N/A":
+            query_filter = {"metadata.docket_type": docket_type}
+        else:
+            query_filter = {}
+
+        # Sort by created_at timestamp for chronological order within docket_type
+        all_entries = list(collection.find(
+            query_filter).sort("created_at", 1))
         for entry in all_entries:
             entry.pop("_id", None)
 
@@ -98,12 +112,11 @@ def analyze_docket_entry(
 
     client = anthropic.Anthropic(api_key=api_key)
 
+    # Build historical context from filtered entries with sequential numbering
     historical_context = _build_historical_context(all_entries)
 
+    # Next entry number is simply the count of filtered entries + 1
     next_entry_number = len(all_entries) + 1
-
-    if metadata is None:
-        metadata = {}
 
     entry_metadata = {
         "date": metadata.get("date", "N/A"),
@@ -111,7 +124,8 @@ def analyze_docket_entry(
         "additional_info": metadata.get("additional_info", "N/A"),
         "on_behalf_of": metadata.get("on_behalf_of", "N/A"),
         "docket_number": metadata.get("docket_number", "N/A"),
-        "document_id": doc_number
+        "document_id": doc_number,
+        "docket_type": docket_type
     }
 
     tier2_prompt = f"""You are a legal analyst specializing in M&A regulatory proceedings.
@@ -261,7 +275,6 @@ Be factual and concise. Focus on substantive content, not procedural details."""
     total_cost = tier1_cost + tier2_cost + tier3_cost
 
     new_entry = {
-        "entry_number": next_entry_number,
         "metadata": entry_metadata,
         "summary": tier1_summary,
         "original_content_length": len(full_text),
@@ -298,7 +311,6 @@ Be factual and concise. Focus on substantive content, not procedural details."""
     result = {
         "doc_number": doc_number,
         "status": "new_analysis",
-        "entry_number": next_entry_number,
         "metadata": entry_metadata,
         "tier1_summary": {
             "summary": tier1_summary,
@@ -333,20 +345,20 @@ Be factual and concise. Focus on substantive content, not procedural details."""
 
 
 def _build_historical_context(entries: list) -> str:
-    """Build historical context string from all entries in database"""
+    """Build historical context string from filtered entries using sequential numbering"""
     if not entries:
         return "No prior entries."
 
     context_parts = []
-    for entry in entries:
-        entry_num = entry.get("entry_number", "?")
+    # Use enumerate to assign sequential numbers starting from 1
+    for idx, entry in enumerate(entries, start=1):
         metadata = entry.get("metadata", {})
         date = metadata.get("date", "N/A")
         doc_type = metadata.get("document_type", "N/A")
         summary = entry.get("summary", "")
 
         context_parts.append(
-            f"Entry #{entry_num} ({date}) - {doc_type}:\n{summary}"
+            f"Entry #{idx} ({date}) - {doc_type}:\n{summary}"
         )
 
     return "\n\n".join(context_parts)
