@@ -3,6 +3,7 @@ from mn_doc_scraper import parse_mn_documents
 from mn_scraper import scrape_mn_documents
 from demo4 import fetch_with_playwright_2captcha
 from puc_scraper import fetch_with_playwright_2captcha_puc
+from docket_entry_analyzer import analyze_docket_entry
 import logging
 import os
 import asyncio
@@ -23,7 +24,8 @@ def home():
         "endpoints": {
             "/scrape": "POST - Scrape documents for a given URL",
             "/puc-scrape": "POST - Scrape PUC documents for a given URL",
-            "/proxy-check": "POST - Check if a proxy port is open"
+            "/proxy-check": "POST - Check if a proxy port is open",
+            "/analyze-docket": "POST - Analyze docket entry with tier 2 and tier 3 analysis"
         },
         "usage": {
             "POST /scrape": {
@@ -160,6 +162,65 @@ def puc_scrape():
 
     except Exception as e:
         logger.error(f"Error during PUC scraping: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/analyze-docket', methods=['POST'])
+def analyze_docket():
+    """Analyze docket entry with tier 2 and tier 3 analysis"""
+    try:
+        data = request.get_json() or {}
+
+        doc_number = data.get('doc_number')
+        text = data.get('text')
+        metadata = data.get('metadata')  # Optional metadata
+
+        if not doc_number:
+            return jsonify({
+                "success": False,
+                "error": "doc_number is required"
+            }), 400
+
+        if not text:
+            return jsonify({
+                "success": False,
+                "error": "text is required"
+            }), 400
+
+        # Call the analyzer function
+        result = analyze_docket_entry(doc_number, text, metadata)
+
+        # Check if there was an error
+        if "error" in result:
+            return jsonify({
+                "success": False,
+                "error": result["error"],
+                "doc_number": doc_number
+            }), 500
+
+        # Return only tier2 and tier3 analysis
+        response = {
+            "success": True,
+            "doc_number": doc_number,
+            "status": result.get("status"),
+            "tier2_analysis": result.get("tier2_analysis"),
+            "tier3_risk_assessment": result.get("tier3_risk_assessment")
+        }
+
+        # If it's an existing entry, extract tier2 and tier3 from the entry
+        if result.get("status") == "existing" and "entry" in result:
+            entry = result["entry"]
+            response["tier2_analysis"] = entry.get("tier2_analysis")
+            response["tier3_risk_assessment"] = entry.get(
+                "tier3_risk_assessment")
+
+        return jsonify(response), 200
+
+    except Exception as e:
+        logger.error(f"Error during docket analysis: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
