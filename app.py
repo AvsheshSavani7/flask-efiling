@@ -151,7 +151,8 @@ def puc_scrape():
             return jsonify({
                 "success": True,
                 "zip_urls": result.get("zip_urls", []),
-                "extracted_files": result.get("extracted_files", [])
+                "extracted_files": result.get("extracted_files", []),
+                "metadata": result.get("metadata", {})
             }), 200
         else:
             # Just HTML content (when extract_zips=False)
