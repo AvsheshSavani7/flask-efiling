@@ -207,6 +207,43 @@ async def playwright_2captcha_fetch_puc(url, wait_time=15):
         return html_after
 
 
+def extract_metadata_from_html(html_content):
+    """
+    Extract metadata from HTML paragraphs with strong tags.
+
+    Args:
+        html_content: HTML content as string
+
+    Returns:
+        Dictionary containing metadata key-value pairs
+    """
+    soup = BeautifulSoup(html_content, "html.parser")
+    metadata = {}
+
+    # Find all paragraphs with strong tags
+    paragraphs = soup.find_all("p")
+
+    for p in paragraphs:
+        strong = p.find("strong")
+        if strong:
+            # Extract the key from strong tag
+            key = strong.get_text(strip=True)
+
+            # Extract the value (everything after the strong tag)
+            # Remove the strong tag text and any nbsp/whitespace
+            full_text = p.get_text(separator=" ", strip=True)
+            # Remove the key from the beginning
+            value = full_text.replace(key, "", 1).strip()
+
+            # Clean up common HTML entities
+            value = value.replace("\xa0", " ").strip()
+
+            if key and value:
+                metadata[key] = value
+
+    return metadata
+
+
 def extract_zip_links_from_html(html_content, base_url):
     """
     Extract ZIP file links from the HTML table.
@@ -216,16 +253,19 @@ def extract_zip_links_from_html(html_content, base_url):
         base_url: Base URL to resolve relative links
 
     Returns:
-        List of dictionaries containing zip_url, name, description, and type
+        Dictionary containing zip_files list and metadata dict
     """
     soup = BeautifulSoup(html_content, "html.parser")
     zip_files = []
+
+    # Extract metadata from paragraphs
+    metadata = extract_metadata_from_html(html_content)
 
     # Find the table with documents
     table = soup.find("table", class_="table")
     if not table:
         print("No table found in HTML")
-        return zip_files
+        return {"zip_files": zip_files, "metadata": metadata}
 
     # Find all rows in tbody (skip header)
     tbody = table.find("tbody")
@@ -263,7 +303,7 @@ def extract_zip_links_from_html(html_content, base_url):
                 "type": file_type
             })
 
-    return zip_files
+    return {"zip_files": zip_files, "metadata": metadata}
 
 
 def download_and_extract_zip(zip_url, output_dir=None):
@@ -527,13 +567,16 @@ def process_puc_documents(html_content, base_url, extract_zips=True):
         extract_zips: Whether to download and extract ZIP files
 
     Returns:
-        Dictionary with zip_urls array and extracted_files array
+        Dictionary with zip_urls array, extracted_files array, and metadata dict
     """
-    # Extract ZIP links from HTML
-    zip_files = extract_zip_links_from_html(html_content, base_url)
+    # Extract ZIP links and metadata from HTML
+    extraction_result = extract_zip_links_from_html(html_content, base_url)
+    zip_files = extraction_result["zip_files"]
+    metadata = extraction_result["metadata"]
     zip_urls = [zip_info["url"] for zip_info in zip_files]
 
     print(f"Found {len(zip_files)} ZIP file(s) in the table")
+    print(f"Extracted metadata: {metadata}")
 
     # Collect all extracted files from all ZIPs
     all_extracted_files = []
@@ -549,7 +592,8 @@ def process_puc_documents(html_content, base_url, extract_zips=True):
 
     return {
         "zip_urls": zip_urls,
-        "extracted_files": all_extracted_files
+        "extracted_files": all_extracted_files,
+        "metadata": metadata
     }
 
 
