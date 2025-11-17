@@ -378,6 +378,68 @@ def extract_all_file_links_from_html(html_content, base_url):
     return {"files": files, "metadata": metadata}
 
 
+def detect_file_type_from_content(file_content, filename=""):
+    """
+    Detect file type from content using magic bytes/file signatures.
+
+    Args:
+        file_content: Binary content of the file
+        filename: Optional filename for additional hints
+
+    Returns:
+        Detected file extension (e.g., '.pdf', '.xlsx', '.docx') or None
+    """
+    if not file_content:
+        return None
+
+    # Check magic bytes for different file types
+    if file_content.startswith(b'%PDF'):
+        return '.pdf'
+
+    # ZIP-based formats (DOCX, XLSX are ZIP archives)
+    if file_content.startswith(b'PK\x03\x04') or file_content.startswith(b'PK\x05\x06') or file_content.startswith(b'PK\x07\x08'):
+        # Need to check deeper for DOCX vs XLSX
+        try:
+            # Try to identify by looking for specific files in the ZIP
+            import io
+            import zipfile as zf
+            with zf.ZipFile(io.BytesIO(file_content)) as zip_file:
+                namelist = zip_file.namelist()
+                # DOCX has word/ directory
+                if any('word/' in name for name in namelist):
+                    return '.docx'
+                # XLSX has xl/ directory
+                elif any('xl/' in name for name in namelist):
+                    return '.xlsx'
+        except:
+            pass
+        # Generic ZIP if can't determine specific type
+        return '.zip'
+
+    # Old Excel format (.xls)
+    if file_content.startswith(b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'):
+        # This is OLE2/CFB format, could be .xls or .doc
+        # Try to distinguish based on content
+        if b'Microsoft Excel' in file_content[:8192]:
+            return '.xls'
+        elif b'Microsoft Word' in file_content[:8192] or b'Word.Document' in file_content[:8192]:
+            return '.doc'
+        # Default to XLS for OLE2 format
+        return '.xls'
+
+    # RTF format
+    if file_content.startswith(b'{\\rtf'):
+        return '.rtf'
+
+    # Check filename extension as fallback
+    if filename:
+        ext = os.path.splitext(filename)[1].lower()
+        if ext in ['.pdf', '.docx', '.doc', '.xlsx', '.xls']:
+            return ext
+
+    return None
+
+
 def download_and_extract_single_file(file_url, file_name=None):
     """
     Download a single file (PDF, XLSX, DOCX) and extract its text content.
@@ -617,50 +679,65 @@ def download_and_extract_zip(zip_url, output_dir=None):
                     "type": "unknown"
                 }
 
+                # Read file content for type detection
+                with open(full_path, 'rb') as f:
+                    file_content = f.read()
+
+                # Detect file type from extension or content
+                file_extension = os.path.splitext(file_name)[1].lower()
+
+                # If no extension or unknown extension, detect from content
+                if not file_extension or file_extension not in ['.pdf', '.xlsx', '.xls', '.docx', '.doc']:
+                    detected_ext = detect_file_type_from_content(
+                        file_content, file_name)
+                    if detected_ext:
+                        file_extension = detected_ext
+                        print(
+                            f"Detected file type for {file_name}: {detected_ext}")
+
                 # Check if it's a PDF file and extract text
-                if file_name.lower().endswith('.pdf'):
+                if file_extension == '.pdf':
                     file_info["type"] = "pdf"
                     try:
-                        # Read PDF file and extract text
-                        with open(full_path, 'rb') as pdf_file:
-                            pdf_content = pdf_file.read()
+                        # Use already read file_content
+                        pdf_content = file_content
 
-                            # Validate PDF header
-                            if pdf_content.startswith(b'%PDF'):
-                                pdf_reader = PyPDF2.PdfReader(
-                                    BytesIO(pdf_content))
-                                text = ""
-                                page_count = len(pdf_reader.pages)
+                        # Validate PDF header
+                        if pdf_content.startswith(b'%PDF'):
+                            pdf_reader = PyPDF2.PdfReader(
+                                BytesIO(pdf_content))
+                            text = ""
+                            page_count = len(pdf_reader.pages)
 
-                                for page in pdf_reader.pages:
-                                    page_text = page.extract_text()
-                                    text += page_text + "\n"
+                            for page in pdf_reader.pages:
+                                page_text = page.extract_text()
+                                text += page_text + "\n"
 
-                                pdf_text = text.strip()
-                                file_info["pdf_text"] = pdf_text
-                                file_info["pdf_page_count"] = page_count
-                                file_info["pdf_text_length"] = len(pdf_text)
+                            pdf_text = text.strip()
+                            file_info["pdf_text"] = pdf_text
+                            file_info["pdf_page_count"] = page_count
+                            file_info["pdf_text_length"] = len(pdf_text)
 
-                                pdf_text_content.append({
-                                    "file_name": file_name,
-                                    "page_count": page_count,
-                                    "text_length": len(pdf_text),
-                                    "text": pdf_text
-                                })
+                            pdf_text_content.append({
+                                "file_name": file_name,
+                                "page_count": page_count,
+                                "text_length": len(pdf_text),
+                                "text": pdf_text
+                            })
 
-                                print(
-                                    f"Extracted text from PDF {file_name}: {len(pdf_text)} characters, {page_count} pages")
-                            else:
-                                print(
-                                    f"Invalid PDF file {file_name}: doesn't start with PDF header")
-                                file_info["pdf_error"] = "Invalid PDF header"
+                            print(
+                                f"Extracted text from PDF {file_name}: {len(pdf_text)} characters, {page_count} pages")
+                        else:
+                            print(
+                                f"Invalid PDF file {file_name}: doesn't start with PDF header")
+                            file_info["pdf_error"] = "Invalid PDF header"
                     except Exception as e:
                         print(
                             f"Error extracting text from PDF {file_name}: {str(e)}")
                         file_info["pdf_error"] = str(e)
 
                 # Check if it's an XLSX file and extract text
-                elif file_name.lower().endswith(('.xlsx', '.xls')):
+                elif file_extension in ['.xlsx', '.xls']:
                     file_info["type"] = "xlsx"
                     try:
                         if not OPENPYXL_AVAILABLE:
@@ -716,7 +793,7 @@ def download_and_extract_zip(zip_url, output_dir=None):
                         file_info["xlsx_error"] = str(e)
 
                 # Check if it's a DOCX file and extract text
-                elif file_name.lower().endswith(('.docx', '.doc')):
+                elif file_extension in ['.docx', '.doc']:
                     file_info["type"] = "docx"
                     try:
                         if not DOCX_AVAILABLE:
