@@ -306,6 +306,250 @@ def extract_zip_links_from_html(html_content, base_url):
     return {"zip_files": zip_files, "metadata": metadata}
 
 
+def extract_all_file_links_from_html(html_content, base_url):
+    """
+    Extract all file links (PDF, DOC, XLSX, etc.) from the HTML table.
+    This is used as fallback when no ZIP files are found.
+
+    Args:
+        html_content: HTML content as string
+        base_url: Base URL to resolve relative links
+
+    Returns:
+        Dictionary containing files list and metadata dict
+    """
+    soup = BeautifulSoup(html_content, "html.parser")
+    files = []
+
+    # Extract metadata from paragraphs
+    metadata = extract_metadata_from_html(html_content)
+
+    # Find the table with documents
+    table = soup.find("table", class_="table")
+    if not table:
+        print("No table found in HTML")
+        return {"files": files, "metadata": metadata}
+
+    # Find all rows in tbody (skip header)
+    tbody = table.find("tbody")
+    if tbody:
+        rows = tbody.find_all("tr")
+    else:
+        # If no tbody, get all rows except the first (header)
+        rows = table.find_all("tr")[1:]  # Skip header row
+
+    for row in rows:
+        cells = row.find_all("td")
+        if len(cells) < 3:
+            continue
+
+        # Get the link in the first cell
+        link_elem = cells[0].find("a")
+        if not link_elem or not link_elem.get("href"):
+            continue
+
+        file_url = link_elem.get("href")
+        name = link_elem.get_text(strip=True)
+        description = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+        file_type = cells[2].get_text(strip=True) if len(cells) > 2 else ""
+
+        # Process PDF, DOC, DOCX, XLS, XLSX files
+        file_type_upper = file_type.upper()
+        file_url_upper = file_url.upper()
+
+        supported_types = ["PDF", "DOC", "DOCX", "XLS", "XLSX"]
+        supported_extensions = [".PDF", ".DOC", ".DOCX", ".XLS", ".XLSX"]
+
+        is_supported = (file_type_upper in supported_types or
+                        any(file_url_upper.endswith(ext) for ext in supported_extensions))
+
+        if is_supported:
+            # Resolve relative URLs
+            if not file_url.startswith("http"):
+                file_url = urljoin(base_url, file_url)
+
+            files.append({
+                "url": file_url,
+                "name": name,
+                "description": description,
+                "type": file_type
+            })
+
+    return {"files": files, "metadata": metadata}
+
+
+def download_and_extract_single_file(file_url, file_name=None):
+    """
+    Download a single file (PDF, XLSX, DOCX) and extract its text content.
+
+    Args:
+        file_url: URL of the file to download
+        file_name: Optional filename (if None, will be extracted from URL)
+
+    Returns:
+        Dictionary with extraction results
+    """
+    try:
+        # Use proxy if available
+        proxy_dict = None
+        if proxy_host and proxy_port:
+            proxy_dict = {
+                "http": f"http://{proxy_username}:{proxy_password}@{proxy_host}:{proxy_port}",
+                "https": f"http://{proxy_username}:{proxy_password}@{proxy_host}:{proxy_port}"
+            }
+
+        # Download the file
+        print(f"Downloading file from: {file_url}")
+        response = requests.get(
+            file_url, proxies=proxy_dict, timeout=120, verify=False)
+        response.raise_for_status()
+
+        # Get filename
+        if not file_name:
+            file_name = os.path.basename(urlparse(file_url).path)
+
+        file_content = response.content
+        file_extension = os.path.splitext(file_name)[1].lower()
+
+        file_info = {
+            "name": file_name,
+            "type": "unknown",
+            "size": len(file_content)
+        }
+
+        # Process PDF files
+        if file_extension == '.pdf':
+            file_info["type"] = "pdf"
+            try:
+                if file_content.startswith(b'%PDF'):
+                    pdf_reader = PyPDF2.PdfReader(BytesIO(file_content))
+                    text = ""
+                    page_count = len(pdf_reader.pages)
+
+                    for page in pdf_reader.pages:
+                        page_text = page.extract_text()
+                        text += page_text + "\n"
+
+                    pdf_text = text.strip()
+                    file_info["text"] = pdf_text
+
+                    print(
+                        f"Extracted text from PDF {file_name}: {len(pdf_text)} characters, {page_count} pages")
+                else:
+                    print(
+                        f"Invalid PDF file {file_name}: doesn't start with PDF header")
+                    file_info["error"] = "Invalid PDF header"
+            except Exception as e:
+                print(f"Error extracting text from PDF {file_name}: {str(e)}")
+                file_info["error"] = str(e)
+
+        # Process Excel files
+        elif file_extension in ['.xlsx', '.xls']:
+            file_info["type"] = "xlsx"
+            try:
+                if not OPENPYXL_AVAILABLE:
+                    file_info["error"] = "openpyxl library not installed"
+                    print(f"Skipping XLSX {file_name}: openpyxl not available")
+                else:
+                    # Save to temp file for openpyxl
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
+                        tmp_file.write(file_content)
+                        tmp_path = tmp_file.name
+
+                    try:
+                        workbook = openpyxl.load_workbook(
+                            tmp_path, data_only=True)
+                        text_content = []
+
+                        for sheet_name in workbook.sheetnames:
+                            sheet = workbook[sheet_name]
+                            sheet_text = [f"Sheet: {sheet_name}"]
+                            sheet_text.append("=" * 50)
+
+                            for row_num, row in enumerate(sheet.iter_rows(values_only=True), 1):
+                                if any(cell is not None and str(cell).strip() for cell in row):
+                                    row_text = []
+                                    for cell in row:
+                                        if cell is None:
+                                            row_text.append("")
+                                        else:
+                                            cell_str = str(cell).strip()
+                                            row_text.append(cell_str)
+                                    sheet_text.append(" | ".join(row_text))
+
+                            text_content.append("\n".join(sheet_text))
+                            text_content.append("\n")
+
+                        xlsx_text = "\n".join(text_content).strip()
+                        file_info["text"] = xlsx_text
+
+                        print(
+                            f"Extracted text from XLSX {file_name}: {len(xlsx_text)} characters, {len(workbook.sheetnames)} sheet(s)")
+                        workbook.close()
+                    finally:
+                        os.unlink(tmp_path)
+            except Exception as e:
+                print(f"Error extracting text from XLSX {file_name}: {str(e)}")
+                file_info["error"] = str(e)
+
+        # Process Word documents
+        elif file_extension in ['.docx', '.doc']:
+            file_info["type"] = "docx"
+            try:
+                if not DOCX_AVAILABLE:
+                    file_info["error"] = "python-docx library not installed"
+                    print(
+                        f"Skipping DOCX {file_name}: python-docx not available")
+                else:
+                    # Save to temp file for python-docx
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
+                        tmp_file.write(file_content)
+                        tmp_path = tmp_file.name
+
+                    try:
+                        doc = docx.Document(tmp_path)
+                        text_content = []
+
+                        for paragraph in doc.paragraphs:
+                            if paragraph.text.strip():
+                                text_content.append(paragraph.text.strip())
+
+                        for table in doc.tables:
+                            text_content.append("\n[Table]")
+                            for row in table.rows:
+                                row_text = []
+                                for cell in row.cells:
+                                    cell_text = cell.text.strip()
+                                    row_text.append(cell_text)
+                                if any(row_text):
+                                    text_content.append(" | ".join(row_text))
+                            text_content.append("[End Table]\n")
+
+                        docx_text = "\n".join(text_content).strip()
+                        file_info["text"] = docx_text
+
+                        print(
+                            f"Extracted text from DOCX {file_name}: {len(docx_text)} characters")
+                    finally:
+                        os.unlink(tmp_path)
+            except Exception as e:
+                print(f"Error extracting text from DOCX {file_name}: {str(e)}")
+                file_info["error"] = str(e)
+
+        return {
+            "success": True,
+            "file": file_info
+        }
+
+    except Exception as e:
+        print(f"Error downloading/processing file from {file_url}: {str(e)}")
+        return {
+            "success": False,
+            "file_url": file_url,
+            "error": str(e)
+        }
+
+
 def download_and_extract_zip(zip_url, output_dir=None):
     """
     Download a ZIP file and extract its contents.
@@ -560,6 +804,7 @@ def download_and_extract_zip(zip_url, output_dir=None):
 def process_puc_documents(html_content, base_url, extract_zips=True):
     """
     Process PUC documents from HTML: extract ZIP links, download and extract them.
+    If no ZIP files found, fallback to extracting individual PDF/DOC/XLSX files.
 
     Args:
         html_content: HTML content as string
@@ -589,6 +834,42 @@ def process_puc_documents(html_content, base_url, extract_zips=True):
             if extraction_result.get("success") and extraction_result.get("files"):
                 # Add all files from this ZIP to the main array
                 all_extracted_files.extend(extraction_result["files"])
+
+    # If no ZIP files found, fallback to extracting individual files
+    elif extract_zips and not zip_files:
+        print("No ZIP files found. Looking for individual PDF/DOC/XLSX files...")
+        file_extraction_result = extract_all_file_links_from_html(
+            html_content, base_url)
+        individual_files = file_extraction_result["files"]
+        metadata = file_extraction_result["metadata"]  # Update metadata
+
+        print(f"Found {len(individual_files)} individual file(s) to process")
+
+        for file_info in individual_files:
+            print(
+                f"Processing {file_info['type'].upper()} file: {file_info['name']}")
+            download_result = download_and_extract_single_file(
+                file_info["url"],
+                file_info["name"]
+            )
+
+            if download_result.get("success") and download_result.get("file"):
+                file_data = download_result["file"]
+                # Create simplified file structure matching ZIP extraction format
+                simplified_file = {
+                    "name": file_data["name"],
+                    "type": file_data["type"]
+                }
+
+                # Add text content if available
+                if "text" in file_data:
+                    simplified_file["text"] = file_data["text"]
+
+                # Add error info if present
+                if "error" in file_data:
+                    simplified_file["error"] = file_data["error"]
+
+                all_extracted_files.append(simplified_file)
 
     return {
         "zip_urls": zip_urls,
