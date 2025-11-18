@@ -53,10 +53,10 @@ def extract_text_from_old_doc(file_path):
         try:
             result = subprocess.run(
                 ["antiword", file_path],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=30,
-                stderr=subprocess.DEVNULL
+                timeout=30
             )
             if result.returncode == 0 and result.stdout.strip():
                 print(f"Successfully extracted text using antiword")
@@ -90,9 +90,9 @@ def extract_text_from_old_doc(file_path):
                     subprocess.run(
                         ["libreoffice", "--headless", "--convert-to", "txt:Text",
                          "--outdir", temp_dir, file_path],
-                        capture_output=True,
-                        timeout=30,
-                        stderr=subprocess.DEVNULL
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=30
                     )
                     # Read the converted file
                     txt_file = os.path.join(temp_dir, os.path.splitext(
@@ -709,9 +709,17 @@ def download_and_extract_zip(zip_url, output_dir=None):
             elif file_info.get("type") == "xlsx" and file_info.get("xlsx_text"):
                 simplified_file["text"] = file_info["xlsx_text"]
 
-            # Add text content if it's a DOCX file
-            elif file_info.get("type") == "docx" and file_info.get("docx_text"):
+            # Add text content if it's a DOC/DOCX file (handles both old .doc and new .docx)
+            elif file_info.get("type") in ["doc", "docx"] and file_info.get("docx_text"):
                 simplified_file["text"] = file_info["docx_text"]
+
+            # Add error information if extraction failed
+            if file_info.get("pdf_error"):
+                simplified_file["error"] = file_info["pdf_error"]
+            elif file_info.get("xlsx_error"):
+                simplified_file["error"] = file_info["xlsx_error"]
+            elif file_info.get("docx_error"):
+                simplified_file["error"] = file_info["docx_error"]
 
             simplified_files.append(simplified_file)
 
