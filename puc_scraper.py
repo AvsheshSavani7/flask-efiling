@@ -5,6 +5,8 @@ import zipfile
 import os
 import tempfile
 import urllib3
+import subprocess
+import platform
 from io import BytesIO
 from urllib.parse import urljoin, urlparse
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
@@ -30,6 +32,104 @@ except ImportError:
 
 # Disable SSL warnings for requests with verify=False
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+def extract_text_from_old_doc(file_path):
+    """
+    Extract text from old binary .doc files (pre-2007 format).
+    Uses platform-specific tools. Prioritizes antiword for Linux servers.
+
+    Args:
+        file_path: Path to the .doc file
+
+    Returns:
+        Extracted text as string, or None if extraction fails
+    """
+    try:
+        system = platform.system()
+
+        # Try antiword first (works on Linux, macOS, Windows)
+        # This is the primary method for Render/Linux servers
+        try:
+            result = subprocess.run(
+                ["antiword", file_path],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                stderr=subprocess.DEVNULL
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                print(f"Successfully extracted text using antiword")
+                return result.stdout.strip()
+        except FileNotFoundError:
+            print("antiword not found, trying platform-specific methods...")
+        except Exception as e:
+            print(f"antiword failed: {str(e)}")
+
+        # Platform-specific fallbacks
+        if system == "Darwin":  # macOS
+            # Use textutil (built-in on macOS)
+            try:
+                result = subprocess.run(
+                    ["textutil", "-convert", "txt", "-stdout", file_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                if result.returncode == 0:
+                    print(f"Successfully extracted text using textutil (macOS)")
+                    return result.stdout.strip()
+            except Exception as e:
+                print(f"textutil failed: {str(e)}")
+
+        elif system == "Linux":
+            # Try LibreOffice as fallback for Linux
+            try:
+                # Create temp directory for output
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    subprocess.run(
+                        ["libreoffice", "--headless", "--convert-to", "txt:Text",
+                         "--outdir", temp_dir, file_path],
+                        capture_output=True,
+                        timeout=30,
+                        stderr=subprocess.DEVNULL
+                    )
+                    # Read the converted file
+                    txt_file = os.path.join(temp_dir, os.path.splitext(
+                        os.path.basename(file_path))[0] + ".txt")
+                    if os.path.exists(txt_file):
+                        with open(txt_file, 'r', encoding='utf-8') as f:
+                            extracted = f.read().strip()
+                            if extracted:
+                                print(
+                                    f"Successfully extracted text using LibreOffice")
+                                return extracted
+            except FileNotFoundError:
+                print("LibreOffice not found")
+            except Exception as e:
+                print(f"LibreOffice failed: {str(e)}")
+
+        print(f"All extraction methods failed for {file_path}")
+        return None
+
+    except Exception as e:
+        print(f"Error extracting text from old .doc file: {str(e)}")
+        return None
+
+
+def is_old_doc_format(file_content):
+    """
+    Check if a file is in old binary .doc format (pre-2007).
+
+    Args:
+        file_content: Binary content of the file
+
+    Returns:
+        True if it's an old .doc format, False otherwise
+    """
+    # Old .doc files start with D0 CF 11 E0 (OLE2 compound document)
+    return file_content[:8] == b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1'
+
 
 TARGET_URL = "https://ipinfo.io/ip"
 API_KEY = "1cc2815b0dfbc0b37d0218bc5f4325d1"
@@ -489,47 +589,74 @@ def download_and_extract_zip(zip_url, output_dir=None):
 
                 # Check if it's a DOCX file and extract text
                 elif file_name.lower().endswith(('.docx', '.doc')):
-                    file_info["type"] = "docx"
+                    file_info["type"] = "docx" if file_name.lower().endswith(
+                        '.docx') else "doc"
                     try:
-                        if not DOCX_AVAILABLE:
-                            file_info["docx_error"] = "python-docx library not installed"
+                        # Check if it's an old .doc format
+                        with open(full_path, 'rb') as f:
+                            file_header = f.read(8)
+
+                        is_old_doc = is_old_doc_format(file_header)
+
+                        if is_old_doc:
+                            # Handle old binary .doc format
                             print(
-                                f"Skipping DOCX {file_name}: python-docx not available")
+                                f"Detected old binary .doc format for {file_name}")
+                            docx_text = extract_text_from_old_doc(full_path)
+
+                            if docx_text:
+                                file_info["docx_text"] = docx_text
+                                file_info["docx_text_length"] = len(docx_text)
+                                file_info["doc_format"] = "binary (pre-2007)"
+                                print(
+                                    f"Extracted text from old DOC {file_name}: {len(docx_text)} characters")
+                            else:
+                                file_info["docx_error"] = "Failed to extract text from old .doc format"
+                                print(
+                                    f"Failed to extract text from old DOC {file_name}")
                         else:
-                            # Read and parse Word document
-                            doc = docx.Document(full_path)
-                            text_content = []
+                            # Handle new .docx format
+                            if not DOCX_AVAILABLE:
+                                file_info["docx_error"] = "python-docx library not installed"
+                                print(
+                                    f"Skipping DOCX {file_name}: python-docx not available")
+                            else:
+                                # Read and parse Word document
+                                doc = docx.Document(full_path)
+                                text_content = []
 
-                            # Extract text from all paragraphs
-                            for paragraph in doc.paragraphs:
-                                if paragraph.text.strip():
-                                    text_content.append(paragraph.text.strip())
-
-                            # Also extract text from tables if present
-                            for table in doc.tables:
-                                text_content.append("\n[Table]")
-                                for row in table.rows:
-                                    row_text = []
-                                    for cell in row.cells:
-                                        cell_text = cell.text.strip()
-                                        row_text.append(cell_text)
-                                    if any(row_text):
+                                # Extract text from all paragraphs
+                                for paragraph in doc.paragraphs:
+                                    if paragraph.text.strip():
                                         text_content.append(
-                                            " | ".join(row_text))
-                                text_content.append("[End Table]\n")
+                                            paragraph.text.strip())
 
-                            docx_text = "\n".join(text_content).strip()
-                            file_info["docx_text"] = docx_text
-                            file_info["docx_text_length"] = len(docx_text)
-                            file_info["docx_paragraph_count"] = len(
-                                [p for p in doc.paragraphs if p.text.strip()])
-                            file_info["docx_table_count"] = len(doc.tables)
+                                # Also extract text from tables if present
+                                for table in doc.tables:
+                                    text_content.append("\n[Table]")
+                                    for row in table.rows:
+                                        row_text = []
+                                        for cell in row.cells:
+                                            cell_text = cell.text.strip()
+                                            row_text.append(cell_text)
+                                        if any(row_text):
+                                            text_content.append(
+                                                " | ".join(row_text))
+                                    text_content.append("[End Table]\n")
 
-                            print(
-                                f"Extracted text from DOCX {file_name}: {len(docx_text)} characters, {len(doc.paragraphs)} paragraphs, {len(doc.tables)} tables")
+                                docx_text = "\n".join(text_content).strip()
+                                file_info["docx_text"] = docx_text
+                                file_info["docx_text_length"] = len(docx_text)
+                                file_info["docx_paragraph_count"] = len(
+                                    [p for p in doc.paragraphs if p.text.strip()])
+                                file_info["docx_table_count"] = len(doc.tables)
+                                file_info["doc_format"] = "Office Open XML (.docx)"
+
+                                print(
+                                    f"Extracted text from DOCX {file_name}: {len(docx_text)} characters, {len(doc.paragraphs)} paragraphs, {len(doc.tables)} tables")
                     except Exception as e:
                         print(
-                            f"Error extracting text from DOCX {file_name}: {str(e)}")
+                            f"Error extracting text from DOC/DOCX {file_name}: {str(e)}")
                         file_info["docx_error"] = str(e)
 
                 extracted_file_paths.append(file_info)
@@ -639,53 +766,86 @@ def download_and_extract_document(doc_url, file_type):
 
         elif file_type.upper() in ["DOC", "DOCX"] or file_name.lower().endswith(('.doc', '.docx')):
             try:
-                if not DOCX_AVAILABLE:
-                    result["error"] = "python-docx library not installed"
-                    print(
-                        f"Skipping DOCX {file_name}: python-docx not available")
-                else:
-                    # Save to temp file for docx library
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp_file:
+                # Check if it's an old .doc format
+                is_old_doc = is_old_doc_format(file_content)
+
+                if is_old_doc:
+                    # Handle old binary .doc format
+                    print(f"Detected old binary .doc format for {file_name}")
+
+                    # Save to temp file
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.doc') as tmp_file:
                         tmp_file.write(file_content)
                         tmp_path = tmp_file.name
 
                     try:
-                        # Read and parse Word document
-                        doc = docx.Document(tmp_path)
-                        text_content = []
+                        docx_text = extract_text_from_old_doc(tmp_path)
 
-                        # Extract text from all paragraphs
-                        for paragraph in doc.paragraphs:
-                            if paragraph.text.strip():
-                                text_content.append(paragraph.text.strip())
-
-                        # Also extract text from tables if present
-                        for table in doc.tables:
-                            text_content.append("\n[Table]")
-                            for row in table.rows:
-                                row_text = []
-                                for cell in row.cells:
-                                    cell_text = cell.text.strip()
-                                    row_text.append(cell_text)
-                                if any(row_text):
-                                    text_content.append(" | ".join(row_text))
-                            text_content.append("[End Table]\n")
-
-                        docx_text = "\n".join(text_content).strip()
-                        result["text"] = docx_text
-                        result["text_length"] = len(docx_text)
-                        result["paragraph_count"] = len(
-                            [p for p in doc.paragraphs if p.text.strip()])
-                        result["table_count"] = len(doc.tables)
-
-                        print(
-                            f"Extracted text from DOCX {file_name}: {len(docx_text)} characters")
+                        if docx_text:
+                            result["text"] = docx_text
+                            result["text_length"] = len(docx_text)
+                            result["doc_format"] = "binary (pre-2007)"
+                            print(
+                                f"Extracted text from old DOC {file_name}: {len(docx_text)} characters")
+                        else:
+                            result["error"] = "Failed to extract text from old .doc format"
+                            print(
+                                f"Failed to extract text from old DOC {file_name}")
                     finally:
                         # Clean up temp file
                         os.unlink(tmp_path)
+                else:
+                    # Handle new .docx format
+                    if not DOCX_AVAILABLE:
+                        result["error"] = "python-docx library not installed"
+                        print(
+                            f"Skipping DOCX {file_name}: python-docx not available")
+                    else:
+                        # Save to temp file for docx library
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp_file:
+                            tmp_file.write(file_content)
+                            tmp_path = tmp_file.name
+
+                        try:
+                            # Read and parse Word document
+                            doc = docx.Document(tmp_path)
+                            text_content = []
+
+                            # Extract text from all paragraphs
+                            for paragraph in doc.paragraphs:
+                                if paragraph.text.strip():
+                                    text_content.append(paragraph.text.strip())
+
+                            # Also extract text from tables if present
+                            for table in doc.tables:
+                                text_content.append("\n[Table]")
+                                for row in table.rows:
+                                    row_text = []
+                                    for cell in row.cells:
+                                        cell_text = cell.text.strip()
+                                        row_text.append(cell_text)
+                                    if any(row_text):
+                                        text_content.append(
+                                            " | ".join(row_text))
+                                text_content.append("[End Table]\n")
+
+                            docx_text = "\n".join(text_content).strip()
+                            result["text"] = docx_text
+                            result["text_length"] = len(docx_text)
+                            result["paragraph_count"] = len(
+                                [p for p in doc.paragraphs if p.text.strip()])
+                            result["table_count"] = len(doc.tables)
+                            result["doc_format"] = "Office Open XML (.docx)"
+
+                            print(
+                                f"Extracted text from DOCX {file_name}: {len(docx_text)} characters")
+                        finally:
+                            # Clean up temp file
+                            os.unlink(tmp_path)
             except Exception as e:
                 result["error"] = str(e)
-                print(f"Error extracting text from DOCX {file_name}: {str(e)}")
+                print(
+                    f"Error extracting text from DOC/DOCX {file_name}: {str(e)}")
 
         return {
             "success": True,
