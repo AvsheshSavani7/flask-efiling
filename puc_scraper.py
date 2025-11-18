@@ -246,17 +246,19 @@ def extract_metadata_from_html(html_content):
 
 def extract_zip_links_from_html(html_content, base_url):
     """
-    Extract ZIP file links from the HTML table.
+    Extract ZIP file links from the HTML table. If no ZIP files found,
+    extract PDF and DOC files instead.
 
     Args:
         html_content: HTML content as string
         base_url: Base URL to resolve relative links
 
     Returns:
-        Dictionary containing zip_files list and metadata dict
+        Dictionary containing zip_files list, doc_files list, and metadata dict
     """
     soup = BeautifulSoup(html_content, "html.parser")
     zip_files = []
+    doc_files = []
 
     # Extract metadata from paragraphs
     metadata = extract_metadata_from_html(html_content)
@@ -265,7 +267,7 @@ def extract_zip_links_from_html(html_content, base_url):
     table = soup.find("table", class_="table")
     if not table:
         print("No table found in HTML")
-        return {"zip_files": zip_files, "metadata": metadata}
+        return {"zip_files": zip_files, "doc_files": doc_files, "metadata": metadata}
 
     # Find all rows in tbody (skip header)
     tbody = table.find("tbody")
@@ -285,25 +287,39 @@ def extract_zip_links_from_html(html_content, base_url):
         if not link_elem or not link_elem.get("href"):
             continue
 
-        zip_url = link_elem.get("href")
+        file_url = link_elem.get("href")
         name = link_elem.get_text(strip=True)
         description = cells[1].get_text(strip=True) if len(cells) > 1 else ""
         file_type = cells[2].get_text(strip=True) if len(cells) > 2 else ""
 
-        # Only process ZIP files
-        if file_type.upper() == "ZIP" or zip_url.upper().endswith(".ZIP"):
-            # Resolve relative URLs
-            if not zip_url.startswith("http"):
-                zip_url = urljoin(base_url, zip_url)
+        # Resolve relative URLs
+        if not file_url.startswith("http"):
+            file_url = urljoin(base_url, file_url)
 
+        # Process ZIP files
+        if file_type.upper() == "ZIP" or file_url.upper().endswith(".ZIP"):
             zip_files.append({
-                "url": zip_url,
+                "url": file_url,
                 "name": name,
                 "description": description,
                 "type": file_type
             })
+        # Process PDF and DOC files
+        elif (file_type.upper() in ["PDF", "DOC", "DOCX"] or
+              file_url.upper().endswith((".PDF", ".DOC", ".DOCX"))):
+            doc_files.append({
+                "url": file_url,
+                "name": name,
+                "description": description,
+                "type": file_type if file_type else file_url.split('.')[-1].upper()
+            })
 
-    return {"zip_files": zip_files, "metadata": metadata}
+    # If no ZIP files found, log that we're using doc files
+    if not zip_files and doc_files:
+        print(
+            f"No ZIP files found. Found {len(doc_files)} PDF/DOC file(s) instead.")
+
+    return {"zip_files": zip_files, "doc_files": doc_files, "metadata": metadata}
 
 
 def download_and_extract_zip(zip_url, output_dir=None):
@@ -557,41 +573,191 @@ def download_and_extract_zip(zip_url, output_dir=None):
         }
 
 
+def download_and_extract_document(doc_url, file_type):
+    """
+    Download an individual document (PDF or DOC) and extract its text content.
+
+    Args:
+        doc_url: URL of the document to download
+        file_type: Type of file (PDF, DOC, DOCX)
+
+    Returns:
+        Dictionary with extraction results containing file info and extracted text
+    """
+    try:
+        # Use proxy if available
+        proxy_dict = None
+        if proxy_host and proxy_port:
+            proxy_dict = {
+                "http": f"http://{proxy_username}:{proxy_password}@{proxy_host}:{proxy_port}",
+                "https": f"http://{proxy_username}:{proxy_password}@{proxy_host}:{proxy_port}"
+            }
+
+        # Download the file
+        print(f"Downloading {file_type} from: {doc_url}")
+        response = requests.get(
+            doc_url, proxies=proxy_dict, timeout=120, verify=False)
+        response.raise_for_status()
+
+        file_content = response.content
+        file_name = os.path.basename(urlparse(doc_url).path)
+
+        result = {
+            "name": file_name,
+            "type": file_type.lower(),
+            "url": doc_url,
+            "size": len(file_content)
+        }
+
+        # Extract text based on file type
+        if file_type.upper() == "PDF" or file_name.lower().endswith('.pdf'):
+            try:
+                # Validate PDF header
+                if file_content.startswith(b'%PDF'):
+                    pdf_reader = PyPDF2.PdfReader(BytesIO(file_content))
+                    text = ""
+                    page_count = len(pdf_reader.pages)
+
+                    for page in pdf_reader.pages:
+                        page_text = page.extract_text()
+                        text += page_text + "\n"
+
+                    pdf_text = text.strip()
+                    result["text"] = pdf_text
+                    result["page_count"] = page_count
+                    result["text_length"] = len(pdf_text)
+
+                    print(
+                        f"Extracted text from PDF {file_name}: {len(pdf_text)} characters, {page_count} pages")
+                else:
+                    result["error"] = "Invalid PDF header"
+                    print(
+                        f"Invalid PDF file {file_name}: doesn't start with PDF header")
+            except Exception as e:
+                result["error"] = str(e)
+                print(f"Error extracting text from PDF {file_name}: {str(e)}")
+
+        elif file_type.upper() in ["DOC", "DOCX"] or file_name.lower().endswith(('.doc', '.docx')):
+            try:
+                if not DOCX_AVAILABLE:
+                    result["error"] = "python-docx library not installed"
+                    print(
+                        f"Skipping DOCX {file_name}: python-docx not available")
+                else:
+                    # Save to temp file for docx library
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp_file:
+                        tmp_file.write(file_content)
+                        tmp_path = tmp_file.name
+
+                    try:
+                        # Read and parse Word document
+                        doc = docx.Document(tmp_path)
+                        text_content = []
+
+                        # Extract text from all paragraphs
+                        for paragraph in doc.paragraphs:
+                            if paragraph.text.strip():
+                                text_content.append(paragraph.text.strip())
+
+                        # Also extract text from tables if present
+                        for table in doc.tables:
+                            text_content.append("\n[Table]")
+                            for row in table.rows:
+                                row_text = []
+                                for cell in row.cells:
+                                    cell_text = cell.text.strip()
+                                    row_text.append(cell_text)
+                                if any(row_text):
+                                    text_content.append(" | ".join(row_text))
+                            text_content.append("[End Table]\n")
+
+                        docx_text = "\n".join(text_content).strip()
+                        result["text"] = docx_text
+                        result["text_length"] = len(docx_text)
+                        result["paragraph_count"] = len(
+                            [p for p in doc.paragraphs if p.text.strip()])
+                        result["table_count"] = len(doc.tables)
+
+                        print(
+                            f"Extracted text from DOCX {file_name}: {len(docx_text)} characters")
+                    finally:
+                        # Clean up temp file
+                        os.unlink(tmp_path)
+            except Exception as e:
+                result["error"] = str(e)
+                print(f"Error extracting text from DOCX {file_name}: {str(e)}")
+
+        return {
+            "success": True,
+            "file": result
+        }
+
+    except Exception as e:
+        print(
+            f"Error downloading/extracting document from {doc_url}: {str(e)}")
+        return {
+            "success": False,
+            "url": doc_url,
+            "error": str(e)
+        }
+
+
 def process_puc_documents(html_content, base_url, extract_zips=True):
     """
     Process PUC documents from HTML: extract ZIP links, download and extract them.
+    If no ZIP files found, process PDF and DOC files instead.
 
     Args:
         html_content: HTML content as string
         base_url: Base URL of the page
-        extract_zips: Whether to download and extract ZIP files
+        extract_zips: Whether to download and extract files
 
     Returns:
-        Dictionary with zip_urls array, extracted_files array, and metadata dict
+        Dictionary with zip_urls array, doc_urls array, extracted_files array, and metadata dict
     """
-    # Extract ZIP links and metadata from HTML
+    # Extract ZIP links, document links, and metadata from HTML
     extraction_result = extract_zip_links_from_html(html_content, base_url)
     zip_files = extraction_result["zip_files"]
+    doc_files = extraction_result["doc_files"]
     metadata = extraction_result["metadata"]
+
     zip_urls = [zip_info["url"] for zip_info in zip_files]
+    doc_urls = [doc_info["url"] for doc_info in doc_files]
 
     print(f"Found {len(zip_files)} ZIP file(s) in the table")
+    print(f"Found {len(doc_files)} PDF/DOC file(s) in the table")
     print(f"Extracted metadata: {metadata}")
 
-    # Collect all extracted files from all ZIPs
+    # Collect all extracted files
     all_extracted_files = []
 
-    # Download and extract ZIP files if requested
-    if extract_zips and zip_files:
-        for zip_info in zip_files:
-            print(f"Processing ZIP: {zip_info['name']}")
-            extraction_result = download_and_extract_zip(zip_info["url"])
-            if extraction_result.get("success") and extraction_result.get("files"):
-                # Add all files from this ZIP to the main array
-                all_extracted_files.extend(extraction_result["files"])
+    # Download and extract files if requested
+    if extract_zips:
+        # Process ZIP files first if available
+        if zip_files:
+            for zip_info in zip_files:
+                print(f"Processing ZIP: {zip_info['name']}")
+                extraction_result = download_and_extract_zip(zip_info["url"])
+                if extraction_result.get("success") and extraction_result.get("files"):
+                    # Add all files from this ZIP to the main array
+                    all_extracted_files.extend(extraction_result["files"])
+
+        # If no ZIP files, process individual PDF/DOC files
+        elif doc_files:
+            print("No ZIP files to process. Processing individual PDF/DOC files...")
+            for doc_info in doc_files:
+                print(f"Processing document: {doc_info['name']}")
+                extraction_result = download_and_extract_document(
+                    doc_info["url"],
+                    doc_info["type"]
+                )
+                if extraction_result.get("success") and extraction_result.get("file"):
+                    # Add the extracted file to the main array
+                    all_extracted_files.append(extraction_result["file"])
 
     return {
         "zip_urls": zip_urls,
+        "doc_urls": doc_urls,
         "extracted_files": all_extracted_files,
         "metadata": metadata
     }
@@ -601,15 +767,15 @@ def fetch_with_playwright_2captcha_puc(url, wait_time=30, extract_zips=True):
     """
     Synchronous wrapper for playwright_2captcha_fetch_puc.
     Properly handles event loop conflicts when called from Flask.
-    Also processes ZIP files from the scraped HTML.
+    Also processes ZIP and document files from the scraped HTML.
 
     Args:
         url: URL to scrape
         wait_time: Wait time for page load
-        extract_zips: Whether to extract ZIP files found in the table
+        extract_zips: Whether to extract files found in the table
 
     Returns:
-        If extract_zips=True: Dictionary with HTML and extracted files
+        If extract_zips=True: Dictionary with extracted files and metadata
         If extract_zips=False: HTML content as string
     """
     try:
@@ -631,14 +797,16 @@ def fetch_with_playwright_2captcha_puc(url, wait_time=30, extract_zips=True):
         else:
             return {
                 "zip_urls": [],
-                "extracted_files": []
+                "doc_urls": [],
+                "extracted_files": [],
+                "metadata": {}
             }
 
     # If extract_zips is False, just return HTML
     if not extract_zips:
         return html_content
 
-    # Process ZIP files and return simplified structure
+    # Process files (ZIP or PDF/DOC) and return simplified structure
     return process_puc_documents(html_content, url, extract_zips=True)
 
 
@@ -646,24 +814,61 @@ if __name__ == "__main__":
     result = fetch_with_playwright_2captcha_puc(TARGET_URL, extract_zips=True)
 
     if isinstance(result, dict):
-        # Result includes ZIP extraction info
-        html_content = result.get("html_content", "")
-        with open("puc_page.html", "w", encoding="utf-8") as f:
-            f.write(html_content)
-        print(f"HTML saved to puc_page.html")
-        print(f"Found {len(result.get('zip_files', []))} ZIP file(s)")
-        print(
-            f"Extracted {len(result.get('extracted_files', []))} ZIP file(s)")
-        for idx, extracted in enumerate(result.get("extracted_files", []), 1):
-            extraction = extracted.get("extraction", {})
-            if extraction.get("success"):
-                print(
-                    f"  ZIP {idx}: Extracted {extraction.get('file_count', 0)} files to {extraction.get('extract_dir', '')}")
-            else:
-                print(
-                    f"  ZIP {idx}: Failed - {extraction.get('error', 'Unknown error')}")
+        # Result includes file extraction info
+        print(f"\n{'='*60}")
+        print(f"EXTRACTION RESULTS")
+        print(f"{'='*60}")
+
+        # Display metadata
+        metadata = result.get("metadata", {})
+        if metadata:
+            print(f"\nMetadata:")
+            for key, value in metadata.items():
+                print(f"  {key}: {value}")
+
+        # Display ZIP file URLs
+        zip_urls = result.get("zip_urls", [])
+        if zip_urls:
+            print(f"\nFound {len(zip_urls)} ZIP file(s):")
+            for idx, url in enumerate(zip_urls, 1):
+                print(f"  {idx}. {url}")
+
+        # Display DOC file URLs
+        doc_urls = result.get("doc_urls", [])
+        if doc_urls:
+            print(f"\nFound {len(doc_urls)} PDF/DOC file(s):")
+            for idx, url in enumerate(doc_urls, 1):
+                print(f"  {idx}. {url}")
+
+        # Display extracted files with text
+        extracted_files = result.get("extracted_files", [])
+        if extracted_files:
+            print(f"\nExtracted {len(extracted_files)} file(s):")
+            for idx, file_info in enumerate(extracted_files, 1):
+                file_name = file_info.get("name", "Unknown")
+                file_type = file_info.get("type", "unknown")
+                text_length = file_info.get("text_length", 0) or len(
+                    file_info.get("text", ""))
+
+                print(f"\n  File {idx}: {file_name}")
+                print(f"    Type: {file_type}")
+                print(f"    Text length: {text_length} characters")
+
+                # Show page count for PDFs
+                if file_info.get("page_count"):
+                    print(f"    Pages: {file_info.get('page_count')}")
+
+                # Show preview of extracted text
+                text = file_info.get("text", "")
+                if text:
+                    preview = text[:200] + "..." if len(text) > 200 else text
+                    print(f"    Text preview: {preview}")
+
+                # Show error if any
+                if file_info.get("error"):
+                    print(f"    Error: {file_info.get('error')}")
+
+        print(f"\n{'='*60}\n")
     else:
         # Just HTML content
-        with open("puc_page.html", "w", encoding="utf-8") as f:
-            f.write(result or "")
-        print("HTML saved to puc_page.html")
+        print("Received HTML content only (no file extraction)")
