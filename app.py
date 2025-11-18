@@ -8,6 +8,8 @@ import logging
 import os
 import asyncio
 import socket
+import subprocess
+import platform
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -25,7 +27,9 @@ def home():
             "/scrape": "POST - Scrape documents for a given URL",
             "/puc-scrape": "POST - Scrape PUC documents for a given URL",
             "/proxy-check": "POST - Check if a proxy port is open",
-            "/analyze-docket": "POST - Analyze docket entry with tier 2 and tier 3 analysis"
+            "/analyze-docket": "POST - Analyze docket entry with tier 2 and tier 3 analysis",
+            "/system-check": "GET - Check system dependencies for document extraction",
+            "/health": "GET - Health check endpoint"
         },
         "usage": {
             "POST /scrape": {
@@ -237,6 +241,84 @@ def health_check():
         "status": "healthy",
         "service": "Minnesota E-filing Scraper API"
     }), 200
+
+
+@app.route('/system-check', methods=['GET'])
+def system_check():
+    """Check system dependencies for document extraction"""
+    checks = {
+        "os": platform.system(),
+        "os_version": platform.version(),
+        "python_version": platform.python_version(),
+        "antiword_available": False,
+        "antiword_version": None,
+        "textutil_available": False,
+        "python_docx_available": False,
+        "pypdf2_available": False,
+        "openpyxl_available": False
+    }
+
+    # Check antiword
+    try:
+        result = subprocess.run(
+            ["antiword", "-v"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        checks["antiword_available"] = True
+        checks["antiword_version"] = result.stdout.strip(
+        ) or result.stderr.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    except Exception as e:
+        checks["antiword_error"] = str(e)
+
+    # Check textutil (macOS)
+    try:
+        result = subprocess.run(
+            ["which", "textutil"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        checks["textutil_available"] = result.returncode == 0
+    except Exception:
+        pass
+
+    # Check Python libraries
+    try:
+        import docx
+        checks["python_docx_available"] = True
+    except ImportError:
+        pass
+
+    try:
+        import PyPDF2
+        checks["pypdf2_available"] = True
+    except ImportError:
+        pass
+
+    try:
+        import openpyxl
+        checks["openpyxl_available"] = True
+    except ImportError:
+        pass
+
+    # Overall status
+    doc_extraction_ready = (
+        checks["antiword_available"] or
+        checks["textutil_available"] or
+        checks["python_docx_available"]
+    )
+
+    checks["doc_extraction_ready"] = doc_extraction_ready
+    checks["status"] = "ready" if doc_extraction_ready else "limited"
+
+    if not checks["antiword_available"] and checks["os"] == "Linux":
+        checks["warning"] = "antiword not installed - old .doc files cannot be extracted on Linux"
+
+    return jsonify(checks), 200
 
 
 if __name__ == '__main__':

@@ -591,15 +591,21 @@ def download_and_extract_zip(zip_url, output_dir=None):
                 elif file_name.lower().endswith(('.docx', '.doc')):
                     file_info["type"] = "docx" if file_name.lower().endswith(
                         '.docx') else "doc"
+
+                    # Check if it's an old .doc format by reading file header
                     try:
-                        # Check if it's an old .doc format
                         with open(full_path, 'rb') as f:
                             file_header = f.read(8)
-
                         is_old_doc = is_old_doc_format(file_header)
+                    except Exception as e:
+                        print(
+                            f"Error reading file header for {file_name}: {str(e)}")
+                        # Assume .doc extension means old format
+                        is_old_doc = file_name.lower().endswith('.doc')
 
-                        if is_old_doc:
-                            # Handle old binary .doc format
+                    # Try old .doc extraction first if detected
+                    if is_old_doc:
+                        try:
                             print(
                                 f"Detected old binary .doc format for {file_name}")
                             docx_text = extract_text_from_old_doc(full_path)
@@ -614,8 +620,13 @@ def download_and_extract_zip(zip_url, output_dir=None):
                                 file_info["docx_error"] = "Failed to extract text from old .doc format"
                                 print(
                                     f"Failed to extract text from old DOC {file_name}")
-                        else:
-                            # Handle new .docx format
+                        except Exception as e:
+                            print(
+                                f"Error extracting text from old DOC {file_name}: {str(e)}")
+                            file_info["docx_error"] = str(e)
+                    else:
+                        # Try new .docx format, but fall back to old .doc extraction on failure
+                        try:
                             if not DOCX_AVAILABLE:
                                 file_info["docx_error"] = "python-docx library not installed"
                                 print(
@@ -654,10 +665,31 @@ def download_and_extract_zip(zip_url, output_dir=None):
 
                                 print(
                                     f"Extracted text from DOCX {file_name}: {len(docx_text)} characters, {len(doc.paragraphs)} paragraphs, {len(doc.tables)} tables")
-                    except Exception as e:
-                        print(
-                            f"Error extracting text from DOC/DOCX {file_name}: {str(e)}")
-                        file_info["docx_error"] = str(e)
+                        except Exception as e:
+                            # If python-docx fails, try old .doc extraction as fallback
+                            print(
+                                f"python-docx failed for {file_name}: {str(e)}")
+                            print(f"Trying old .doc extraction as fallback...")
+                            try:
+                                docx_text = extract_text_from_old_doc(
+                                    full_path)
+                                if docx_text:
+                                    file_info["docx_text"] = docx_text
+                                    file_info["docx_text_length"] = len(
+                                        docx_text)
+                                    file_info["doc_format"] = "binary (pre-2007) - fallback"
+                                    print(
+                                        f"Fallback: Extracted text from old DOC {file_name}: {len(docx_text)} characters")
+                                else:
+                                    file_info[
+                                        "docx_error"] = f"Both python-docx and old .doc extraction failed: {str(e)}"
+                                    print(
+                                        f"Fallback also failed for {file_name}")
+                            except Exception as e2:
+                                file_info[
+                                    "docx_error"] = f"All extraction methods failed: {str(e)} | {str(e2)}"
+                                print(
+                                    f"Error in fallback extraction for {file_name}: {str(e2)}")
 
                 extracted_file_paths.append(file_info)
 
