@@ -9,6 +9,8 @@ Otherwise generates new analysis using all historical summaries and adds to data
 
 import json
 import os
+import tempfile
+import time
 from typing import Dict, Any, Optional
 from datetime import datetime
 import anthropic
@@ -17,6 +19,8 @@ from pymongo import MongoClient
 
 ENV_FILE = ".env"
 COMPREHENSIVE_SUMMARY_MODEL = "gpt-5-mini-2025-08-07"
+# Model for Assistants API (must support file_search)
+ASSISTANTS_API_MODEL = "gpt-4o-mini"
 TIER1_MODEL = "claude-3-haiku-20240307"
 TIER2_MODEL = "claude-3-5-haiku-20241022"
 TIER3_MODEL = "claude-sonnet-4-20250514"
@@ -35,6 +39,191 @@ def _load_env_file(env_path: str) -> None:
                 key = key.strip()
                 value = value.strip().strip('"').strip("'")
                 os.environ[key] = value
+
+
+def _generate_comprehensive_summary_with_file_upload(
+    openai_client: OpenAI,
+    full_text: str,
+    entry_metadata: Dict[str, str],
+    estimated_tokens: int,
+    next_entry_number: int
+) -> Dict[str, Any]:
+    """
+    Generate comprehensive summary by uploading file to OpenAI.
+    Use this when content is too large for direct API calls.
+
+    Args:
+        openai_client: OpenAI client instance
+        full_text: Full document text
+        entry_metadata: Document metadata
+        estimated_tokens: Estimated token count
+        next_entry_number: The entry number for this document
+
+    Returns:
+        Dictionary with summary, tokens, and cost information
+    """
+    print("Using file upload approach for comprehensive summary...")
+
+    # Create a temporary text file
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tmp_file:
+        tmp_file.write(full_text)
+        tmp_file_path = tmp_file.name
+
+    try:
+        # Upload file to OpenAI
+        print(f"Uploading file to OpenAI ({len(full_text):,} characters)...")
+        with open(tmp_file_path, 'rb') as file:
+            uploaded_file = openai_client.files.create(
+                file=file,
+                purpose='assistants'
+            )
+
+        file_id = uploaded_file.id
+        print(f"✓ File uploaded with ID: {file_id}")
+
+        # Create an assistant
+        print("Creating assistant...")
+        assistant = openai_client.beta.assistants.create(
+            name="Document Summarizer",
+            instructions="""You are a legal document summarizer. Create comprehensive summaries that preserve all important details for further analysis.""",
+            model=ASSISTANTS_API_MODEL,
+            tools=[{"type": "file_search"}]
+        )
+
+        print(f"✓ Assistant created with ID: {assistant.id}")
+
+        # Create a thread with the file
+        print("Creating thread with file...")
+        thread = openai_client.beta.threads.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"""You are summarizing a legal docket entry for further analysis. Create a comprehensive summary that preserves all important details.
+
+ENTRY METADATA:
+Entry Number: {next_entry_number}
+Type: {entry_metadata['document_type']}
+Date: {entry_metadata['date']}
+Filed By: {entry_metadata['on_behalf_of']}
+Info: {entry_metadata['additional_info']}
+
+The full document content is in the attached file. Please read it and create a COMPREHENSIVE SUMMARY that includes:
+
+1. Document type and purpose
+2. All parties involved and their positions
+3. All key arguments, claims, and concerns raised
+4. Any evidence, data, or exhibits referenced
+5. Procedural requests or recommendations
+6. Any commitments, conditions, or proposed remedies
+7. Legal citations or regulatory references
+8. Timeline information or deadlines mentioned
+
+Be thorough and detailed. Preserve specific facts, numbers, names, and legal arguments. 
+This summary must contain enough detail for downstream analysis of legal significance and risk assessment.
+
+Target length: 1000-2000 words depending on complexity.""",
+                    "attachments": [
+                        {
+                            "file_id": file_id,
+                            "tools": [{"type": "file_search"}]
+                        }
+                    ]
+                }
+            ]
+        )
+
+        print(f"✓ Thread created with ID: {thread.id}")
+
+        # Run the assistant
+        print("Running assistant...")
+        run = openai_client.beta.threads.runs.create(
+            thread_id=thread.id,
+            assistant_id=assistant.id
+        )
+
+        # Wait for completion
+        max_wait_time = 300  # 5 minutes max
+        start_time = time.time()
+
+        while run.status in ['queued', 'in_progress']:
+            if time.time() - start_time > max_wait_time:
+                raise TimeoutError("Assistant run exceeded maximum wait time")
+
+            time.sleep(2)
+            run = openai_client.beta.threads.runs.retrieve(
+                thread_id=thread.id,
+                run_id=run.id
+            )
+            print(f"  Status: {run.status}")
+
+        if run.status != 'completed':
+            raise Exception(f"Assistant run failed with status: {run.status}")
+
+        print(f"✓ Assistant run completed")
+
+        # Get the messages
+        messages = openai_client.beta.threads.messages.list(
+            thread_id=thread.id
+        )
+
+        # Extract the assistant's response
+        assistant_message = None
+        for message in messages.data:
+            if message.role == 'assistant':
+                assistant_message = message
+                break
+
+        if not assistant_message or not assistant_message.content:
+            raise Exception("No response from assistant")
+
+        comprehensive_summary_text = assistant_message.content[0].text.value
+
+        # Estimate token usage (since Assistants API doesn't provide exact counts)
+        comprehensive_summary_input_tokens = estimated_tokens + \
+            500  # Add buffer for instructions
+        comprehensive_summary_output_tokens = len(
+            comprehensive_summary_text) // 4
+        comprehensive_summary_cost = _estimate_cost(
+            comprehensive_summary_input_tokens,
+            comprehensive_summary_output_tokens,
+            ASSISTANTS_API_MODEL
+        )
+
+        print(
+            f"✓ Generated comprehensive summary: {len(comprehensive_summary_text):,} characters")
+
+        # Clean up
+        try:
+            openai_client.files.delete(file_id)
+            print(f"✓ Cleaned up uploaded file")
+        except Exception as e:
+            print(f"Warning: Could not delete uploaded file: {str(e)}")
+
+        try:
+            openai_client.beta.assistants.delete(assistant.id)
+            print(f"✓ Cleaned up assistant")
+        except Exception as e:
+            print(f"Warning: Could not delete assistant: {str(e)}")
+
+        return {
+            "summary": comprehensive_summary_text,
+            "tokens": {
+                "input": comprehensive_summary_input_tokens,
+                "output": comprehensive_summary_output_tokens,
+                "estimated_original": estimated_tokens
+            },
+            "cost": comprehensive_summary_cost,
+            "generated": True,
+            "method": "file_upload",
+            "reason": f"Content too large ({estimated_tokens:,} tokens)"
+        }
+
+    finally:
+        # Clean up temp file
+        try:
+            os.unlink(tmp_file_path)
+        except Exception as e:
+            print(f"Warning: Could not delete temp file: {str(e)}")
 
 
 def analyze_docket_entry(
@@ -230,38 +419,64 @@ This summary must contain enough detail for downstream analysis of legal signifi
 Target length: 1000-2000 words depending on complexity."""
 
         try:
+            # Always try direct comprehensive summary first
             print("Generating comprehensive summary...")
-            comprehensive_summary_message = openai_client.chat.completions.create(
-                model=COMPREHENSIVE_SUMMARY_MODEL,
-                messages=[
-                    {"role": "user", "content": comprehensive_summary_prompt}
-                ]
-            )
+            try:
+                comprehensive_summary_message = openai_client.chat.completions.create(
+                    model=COMPREHENSIVE_SUMMARY_MODEL,
+                    messages=[
+                        {"role": "user", "content": comprehensive_summary_prompt}
+                    ]
+                )
 
-            comprehensive_summary_text = comprehensive_summary_message.choices[0].message.content.strip(
-            )
-            comprehensive_summary_input_tokens = comprehensive_summary_message.usage.prompt_tokens
-            comprehensive_summary_output_tokens = comprehensive_summary_message.usage.completion_tokens
-            comprehensive_summary_cost = _estimate_cost(
-                comprehensive_summary_input_tokens,
-                comprehensive_summary_output_tokens,
-                COMPREHENSIVE_SUMMARY_MODEL
-            )
+                comprehensive_summary_text = comprehensive_summary_message.choices[0].message.content.strip(
+                )
+                comprehensive_summary_input_tokens = comprehensive_summary_message.usage.prompt_tokens
+                comprehensive_summary_output_tokens = comprehensive_summary_message.usage.completion_tokens
+                comprehensive_summary_cost = _estimate_cost(
+                    comprehensive_summary_input_tokens,
+                    comprehensive_summary_output_tokens,
+                    COMPREHENSIVE_SUMMARY_MODEL
+                )
 
-            comprehensive_summary_data = {
-                "summary": comprehensive_summary_text,
-                "tokens": {
-                    "input": comprehensive_summary_input_tokens,
-                    "output": comprehensive_summary_output_tokens,
-                    "estimated_original": estimated_tokens
-                },
-                "cost": comprehensive_summary_cost,
-                "generated": True,
-                "reason": f"Fallback: Direct tier2 generation failed with error: {str(tier2_error)}"
-            }
+                comprehensive_summary_data = {
+                    "summary": comprehensive_summary_text,
+                    "tokens": {
+                        "input": comprehensive_summary_input_tokens,
+                        "output": comprehensive_summary_output_tokens,
+                        "estimated_original": estimated_tokens
+                    },
+                    "cost": comprehensive_summary_cost,
+                    "generated": True,
+                    "method": "direct",
+                    "reason": f"Fallback: Direct tier2 generation failed with error: {str(tier2_error)}"
+                }
 
-            print(
-                f"✓ Generated comprehensive summary: {estimated_tokens:,} tokens → {len(comprehensive_summary_text)} chars")
+                print(
+                    f"✓ Generated comprehensive summary: {estimated_tokens:,} tokens → {len(comprehensive_summary_text)} chars")
+
+            except Exception as direct_error:
+                error_str = str(direct_error)
+                # Check if it's a token limit error
+                if "context_length_exceeded" in error_str or "tokens exceed" in error_str.lower():
+                    print(
+                        f"⚠ Direct API call failed due to token limit: {error_str}")
+                    print("Switching to file upload approach...")
+                    comprehensive_summary_data = _generate_comprehensive_summary_with_file_upload(
+                        openai_client=openai_client,
+                        full_text=full_text,
+                        entry_metadata=entry_metadata,
+                        estimated_tokens=estimated_tokens,
+                        next_entry_number=next_entry_number
+                    )
+                    comprehensive_summary_data["reason"] = f"Fallback + File Upload: Token limit exceeded in direct call"
+                    comprehensive_summary_text = comprehensive_summary_data["summary"]
+
+                    print(
+                        f"✓ Generated comprehensive summary: {estimated_tokens:,} tokens → {len(comprehensive_summary_text)} chars")
+                else:
+                    # If it's not a token error, re-raise
+                    raise
 
             # Now retry tier2 with comprehensive summary
             content_for_tier2 = comprehensive_summary_text
@@ -530,6 +745,7 @@ def _estimate_cost(input_tokens: int, output_tokens: int, model: str) -> float:
         "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
         # OpenAI pricing (per 1M tokens)
         "gpt-4o": {"input": 2.50, "output": 10.00},
+        "gpt-4o-mini": {"input": 0.150, "output": 0.600},
         "gpt-4-turbo": {"input": 10.00, "output": 30.00},
         "gpt-5-mini-2025-08-07": {"input": 0.25, "output": 2},
 
