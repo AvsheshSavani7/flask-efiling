@@ -4,6 +4,7 @@ from mn_scraper import scrape_mn_documents
 from demo4 import fetch_with_playwright_2captcha
 from puc_scraper import fetch_with_playwright_2captcha_puc
 from docket_entry_analyzer import analyze_docket_entry
+from fcc_html_scraper import process_fcc_scraper
 import logging
 import os
 import asyncio
@@ -26,6 +27,7 @@ def home():
         "endpoints": {
             "/scrape": "POST - Scrape documents for a given URL",
             "/puc-scrape": "POST - Scrape PUC documents for a given URL",
+            "/fcc-scraper": "POST - Check for new FCC filings and scrape HTML",
             "/proxy-check": "POST - Check if a proxy port is open",
             "/analyze-docket": "POST - Analyze docket entry with tier 2 and tier 3 analysis",
             "/system-check": "GET - Check system dependencies for document extraction",
@@ -319,6 +321,40 @@ def system_check():
         checks["warning"] = "antiword not installed - old .doc files cannot be extracted on Linux"
 
     return jsonify(checks), 200
+
+
+@app.route('/fcc-scraper', methods=['POST'])
+def fcc_scraper():
+    """
+    Check for new FCC filings by comparing document_id with RSS feed items.
+    If new records found, scrape HTML from their links.
+    """
+    try:
+        data = request.get_json() or {}
+
+        url = data.get('url')
+        document_id = data.get('document_id')
+        wait_time = data.get('wait_time', 10)
+
+        # Call the main processing function
+        result = process_fcc_scraper(url, document_id, wait_time)
+
+        # Determine HTTP status code based on result
+        status_code = 200
+        if not result.get("success"):
+            if "url is required" in result.get("error", "") or "document_id is required" in result.get("error", ""):
+                status_code = 400
+            else:
+                status_code = 500
+
+        return jsonify(result), status_code
+
+    except Exception as e:
+        logger.error(f"Error in FCC scraper endpoint: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 
 if __name__ == '__main__':
