@@ -4,11 +4,21 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 import sys
 import time
+import urllib3
+
+# Disable SSL warnings for requests with verify=False
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Proxy configuration (same as puc_scraper.py)
+proxy_host = "108.59.242.138"
+proxy_port = 46885
+proxy_username = "GSenAgrfKhuNWkd"
+proxy_password = "8lmVa5yl0pKp9MI"
 
 
 def fetch_rss_feed(url, max_retries=3, retry_delay=2):
     """
-    Fetch RSS feed from the given URL with retry logic
+    Fetch RSS feed from the given URL with retry logic using residential proxy
     Returns the XML content as a string
     """
     headers = {
@@ -16,16 +26,26 @@ def fetch_rss_feed(url, max_retries=3, retry_delay=2):
         'Accept': '*/*'
     }
 
+    # Always use residential proxy (same as puc_scraper.py)
+    proxy_dict = {
+        "http": f"http://{proxy_username}:{proxy_password}@{proxy_host}:{proxy_port}",
+        "https": f"http://{proxy_username}:{proxy_password}@{proxy_host}:{proxy_port}"
+    }
+
+    print(f"Using residential proxy: {proxy_host}:{proxy_port}")
+
     for attempt in range(max_retries):
         try:
             print(f"Attempt {attempt + 1}/{max_retries}...")
+            print(f"Fetching URL through proxy: {url}")
             # Use a fresh connection for each attempt (no session)
             response = requests.get(
                 url,
                 headers=headers,
-                timeout=(5, 60),  # Longer timeouts: 5s connect, 60s read
+                proxies=proxy_dict,
+                timeout=(5, 120),  # Longer timeouts: 5s connect, 120s read
                 stream=False,
-                verify=True,
+                verify=False,  # Disable SSL verification like puc_scraper.py
                 allow_redirects=True
             )
             response.raise_for_status()
