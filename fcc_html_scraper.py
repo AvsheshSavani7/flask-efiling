@@ -555,6 +555,8 @@ def extract_metadata_from_rss_item(item):
         if link:
             metadata["document_id"] = link
 
+        metadata["docket_type"] = "FCC"
+
         return metadata
 
     except Exception as e:
