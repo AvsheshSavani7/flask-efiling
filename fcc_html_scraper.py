@@ -759,7 +759,6 @@ def process_fcc_scraper(url, document_id, wait_time=10):
                 combined_document_text) if combined_document_text else ""
 
             scraped_data.append({
-                "index": idx,
                 "scraped_successfully": html_content is not None,
                 "metadata": metadata,
                 "combined_document_text": combined_text,
