@@ -8,6 +8,12 @@ from datetime import datetime
 import re
 from fcc_rss_to_json import fetch_rss_feed, parse_rss_items
 
+# Proxy configuration (same as puc_scraper.py)
+proxy_host = "108.59.242.138"
+proxy_port = 46885
+proxy_username = "GSenAgrfKhuNWkd"
+proxy_password = "8lmVa5yl0pKp9MI"
+
 # Try to import document processing libraries
 try:
     import PyPDF2
@@ -27,16 +33,36 @@ logger = logging.getLogger(__name__)
 async def scrape_html_from_url_async(url, wait_time=10):
     """
     Scrape HTML content from a given URL using Playwright to handle JavaScript-rendered content
+    Uses residential proxy (same as puc_scraper.py)
     Returns HTML content as string or None on error
     """
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--ignore-certificate-errors",
+                    f"--proxy-server=http://{proxy_host}:{proxy_port}"
+                ]
+            )
             context = await browser.new_context(
+                proxy={
+                    "server": f"http://{proxy_host}:{proxy_port}",
+                    "username": proxy_username,
+                    "password": proxy_password
+                },
+                ignore_https_errors=True,
                 viewport={'width': 1920, 'height': 1080},
-                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                }
             )
             page = await context.new_page()
+            logger.info(
+                f"Using residential proxy for HTML scraping: {proxy_host}:{proxy_port}")
 
             try:
                 # Navigate to the URL
@@ -44,7 +70,14 @@ async def scrape_html_from_url_async(url, wait_time=10):
 
                 # Wait for the React app to load - wait for content in the root div
                 try:
-                    await page.wait_for_selector('#root', state='attached', timeout=5000)
+                    await page.wait_for_selector('#root', state='attached', timeout=10000)
+                    # Wait for document download section to appear
+                    try:
+                        await page.wait_for_selector('div.card-header', timeout=10000)
+                        logger.info("Document download section found")
+                    except PlaywrightTimeoutError:
+                        logger.warning(
+                            "Document download section not found, continuing anyway")
                     # Wait a bit more for React to render content
                     await page.wait_for_timeout(wait_time * 1000)
                 except PlaywrightTimeoutError:
@@ -182,19 +215,38 @@ def extract_document_download_links(html_content, base_url=None):
 
 async def download_document_async(document_url, wait_time=5):
     """
-    Download a document from a URL using Playwright
+    Download a document from a URL using Playwright with residential proxy
     Handles JavaScript-rendered pages and waits for actual document download
     Returns the document content as bytes or None on error
     """
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--ignore-certificate-errors",
+                    f"--proxy-server=http://{proxy_host}:{proxy_port}"
+                ]
+            )
             context = await browser.new_context(
+                proxy={
+                    "server": f"http://{proxy_host}:{proxy_port}",
+                    "username": proxy_username,
+                    "password": proxy_password
+                },
+                ignore_https_errors=True,
                 viewport={'width': 1920, 'height': 1080},
                 user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                accept_downloads=True
+                accept_downloads=True,
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                }
             )
             page = await context.new_page()
+            logger.info(
+                f"Using residential proxy for document download: {proxy_host}:{proxy_port}")
 
             try:
                 # Set up download listener
