@@ -529,24 +529,48 @@ def extract_metadata_from_rss_item(item):
         if comment_type_match:
             metadata["document_type"] = comment_type_match.group(1).strip()
 
-        # Extract additional_info from description
-        if description:
-            # Clean HTML entities
-            description_clean = description.replace(
-                '&#xD;', '').replace('<br/>', '\n')
-            soup = BeautifulSoup(description_clean, 'html.parser')
+        # Normalise description for line-based parsing
+        desc_text = description.replace('&#xD;', '').replace('<br/>', '\n')
+
+        proceeding_match = re.search(
+            r'Proceeding\(s\):\s*([^\n<]+)', desc_text, re.IGNORECASE
+        )
+        if proceeding_match:
+            # Example: "25-233 : In the Matter of Cox Enterprises, Inc. and Charter Communications, Inc."
+            metadata["additional_info"] = proceeding_match.group(1).strip()
+
+        elif description:
+            # Fallback: cleaned full description text
+            soup = BeautifulSoup(desc_text, 'html.parser')
             metadata["additional_info"] = soup.get_text().strip()
 
-        # Extract on_behalf_of from title
-        title = item.get('title', '')
-        if title:
-            # Remove CDATA wrapper if present
-            title = re.sub(r'<!\[CDATA\[(.*?)\]\]>',
-                           r'\1', title, flags=re.DOTALL)
-            metadata["on_behalf_of"] = title.strip()
+      # ----- on_behalf_of: from Filers(s) -----
+        filers_match = re.search(
+            r'Filers\(s\):\s*([^\n<]+)', desc_text, re.IGNORECASE
+        )
+        if filers_match:
+            filers_raw = filers_match.group(1).strip()
+            # Normalise to "A, B, C"
+            filers_list = [f.strip()
+                           for f in filers_raw.split(',') if f.strip()]
+            metadata["on_behalf_of"] = ", ".join(filers_list)
+
+        # Fallback: on_behalf_of from title if Filers(s) not found
+        if "on_behalf_of" not in metadata:
+            title = item.get('title', '') or ''
+            if title:
+                # Remove CDATA wrapper if present
+                title_clean = re.sub(
+                    r'<!\[CDATA\[(.*?)\]\]>', r'\1', title, flags=re.DOTALL
+                )
+                metadata["on_behalf_of"] = title_clean.strip()
 
         # Extract docket_number from title or description (e.g., "25-233")
-        docket_match = re.search(r'(\d+-\d+)', title + ' ' + description)
+        title_for_docket = item.get('title', '') or ''
+        docket_match = re.search(
+            r'(\d+-\d+)', (title_for_docket or '') + ' ' + description
+        )
+
         if docket_match:
             metadata["docket_number"] = docket_match.group(1)
 
