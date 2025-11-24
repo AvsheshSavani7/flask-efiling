@@ -3,8 +3,9 @@
 Docket Entry Analyzer
 =====================
 Analyzes docket entries with tier 1, tier 2, and tier 3 summaries.
-If entry already exists in database, returns existing data.
+If entry already exists in database, skips it and returns skip status.
 Otherwise generates new analysis using all historical summaries and adds to database.
+Only returns new entries that are analyzed and added to the database.
 """
 
 import json
@@ -268,11 +269,11 @@ def analyze_docket_entry(
             {"metadata.document_id": doc_number})
 
         if existing_entry:
-            existing_entry.pop("_id", None)
+            # Entry already exists, skip it and don't return it
             return {
                 "doc_number": doc_number,
-                "status": "existing",
-                "entry": existing_entry
+                "status": "skipped",
+                "message": "Entry already exists in database"
             }
 
         # Filter entries by docket_type if provided
