@@ -269,11 +269,13 @@ def analyze_docket_entry(
             {"metadata.document_id": doc_number})
 
         if existing_entry:
+            existing_entry.pop("_id", None)
             # Entry already exists, skip it and don't return it
             return {
                 "doc_number": doc_number,
                 "status": "skipped",
-                "message": "Entry already exists in database"
+                "message": "Entry already exists in database",
+                "entry": existing_entry
             }
 
         # Filter entries by docket_type if provided
