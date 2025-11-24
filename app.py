@@ -218,13 +218,14 @@ def analyze_docket():
             "tier3_risk_assessment": result.get("tier3_risk_assessment")
         }
 
-        # If it's an existing entry, extract tier2 and tier3 from the entry
-        if result.get("status") == "existing" and "entry" in result:
+        # If it's a skipped entry (already exists), extract tier2 and tier3 from the entry
+        if result.get("status") == "skipped" and "entry" in result:
             entry = result["entry"]
             response["tier2_analysis"] = entry.get("tier2_analysis")
             response["tier3_risk_assessment"] = entry.get(
                 "tier3_risk_assessment")
             response["metadata"] = entry.get("metadata")
+            response["entry"] = entry  # Include the full entry in the response
 
         return jsonify(response), 200
 
