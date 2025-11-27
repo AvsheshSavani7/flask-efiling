@@ -308,6 +308,23 @@ def analyze_docket_entry(
         for entry in all_entries:
             entry.pop("_id", None)
 
+        # Calculate next hash_id: filter by docket_type only, sort by date
+        # Use the same query_filter as all_entries (filters by docket_type)
+        hash_id_entries = list(collection.find(
+            query_filter).sort("metadata.date", 1))
+
+        # Calculate next hash_id
+        if hash_id_entries:
+            # Get the maximum hash_id from existing entries
+            max_hash_id = 0
+            for entry in hash_id_entries:
+                if "hash_id" in entry and isinstance(entry["hash_id"], int):
+                    max_hash_id = max(max_hash_id, entry["hash_id"])
+            next_hash_id = max_hash_id + 1
+        else:
+            # No existing entries, start from 1
+            next_hash_id = 1
+
     except Exception as e:
         return {
             "error": f"MongoDB connection error: {str(e)}",
@@ -668,6 +685,7 @@ Be factual and concise. Focus on substantive content, not procedural details."""
         total_cost += comprehensive_summary_data["cost"]
 
     new_entry = {
+        "hash_id": next_hash_id,
         "metadata": entry_metadata,
         "summary": tier1_summary,
         "original_content_length": len(full_text),
@@ -746,20 +764,22 @@ Be factual and concise. Focus on substantive content, not procedural details."""
 
 
 def _build_historical_context(entries: list) -> str:
-    """Build historical context string from filtered entries using sequential numbering"""
+    """Build historical context string from filtered entries using hash_id"""
     if not entries:
         return "No prior entries."
 
     context_parts = []
-    # Use enumerate to assign sequential numbers starting from 1
+    # Use hash_id from entry, fallback to index if hash_id doesn't exist
     for idx, entry in enumerate(entries, start=1):
+        # Use hash_id if available, otherwise use index
+        hash_id = entry.get("hash_id", idx)
         metadata = entry.get("metadata", {})
         date = metadata.get("date", "N/A")
         doc_type = metadata.get("document_type", "N/A")
         summary = entry.get("summary", "")
 
         context_parts.append(
-            f"Entry #{idx} ({date}) - {doc_type}:\n{summary}"
+            f"Entry #{hash_id} ({date}) - {doc_type}:\n{summary}"
         )
 
     return "\n\n".join(context_parts)

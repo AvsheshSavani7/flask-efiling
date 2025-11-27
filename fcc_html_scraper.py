@@ -516,11 +516,23 @@ def extract_metadata_from_rss_item(item):
                 if 'T' in date_str:
                     dt = datetime.fromisoformat(
                         date_str.replace('Z', '+00:00'))
-                    metadata["date"] = dt.strftime('%m/%d/%Y')
+                    metadata["date"] = dt
                 else:
+                    # Try to parse as MM/DD/YYYY format
+                    try:
+                        dt = datetime.strptime(date_str.strip(), "%m/%d/%Y")
+                        metadata["date"] = dt
+                    except ValueError:
+                        # If MM/DD/YYYY parsing fails, try other common formats
+                        # or keep as string if all parsing fails
+                        metadata["date"] = date_str
+            except Exception:
+                # If ISO parsing fails, try MM/DD/YYYY format
+                try:
+                    dt = datetime.strptime(date_str.strip(), "%m/%d/%Y")
+                    metadata["date"] = dt
+                except ValueError:
                     metadata["date"] = date_str
-            except:
-                metadata["date"] = date_str
 
         # Extract document_type from description (Comment Type)
         description = item.get('description', '')
