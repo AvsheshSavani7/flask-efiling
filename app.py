@@ -1,9 +1,11 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from mn_doc_scraper import parse_mn_documents
 from mn_scraper import scrape_mn_documents
 from demo4 import fetch_with_playwright_2captcha
 from puc_scraper import fetch_with_playwright_2captcha_puc
 from docket_entry_analyzer import analyze_docket_entry
+from docket_manager import get_dockets
 from fcc_html_scraper import process_fcc_scraper
 import logging
 import os
@@ -18,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Configure CORS to allow requests from http://localhost:8080
+CORS(app, origins=["http://localhost:8080"])
+
 
 @app.route('/')
 def home():
@@ -30,6 +35,7 @@ def home():
             "/fcc-scraper": "POST - Check for new FCC filings and scrape HTML",
             "/proxy-check": "POST - Check if a proxy port is open",
             "/analyze-docket": "POST - Analyze docket entry with tier 2 and tier 3 analysis",
+            "/dockets": "GET - Fetch docket entries with pagination (query params: docket_type, page, limit)",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -231,6 +237,45 @@ def analyze_docket():
 
     except Exception as e:
         logger.error(f"Error during docket analysis: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/dockets', methods=['GET'])
+def fetch_dockets():
+    """Fetch docket entries with pagination, filtered by docket_type and sorted by date"""
+    try:
+        # Get query parameters
+        docket_type = request.args.get('docket_type', None)
+        page = request.args.get('page', 1, type=int)
+        limit = request.args.get('limit', 10, type=int)
+
+        # Validate pagination parameters
+        if page < 1:
+            return jsonify({
+                "success": False,
+                "error": "Page must be greater than 0"
+            }), 400
+
+        if limit < 1:
+            return jsonify({
+                "success": False,
+                "error": "Limit must be greater than 0"
+            }), 400
+
+        # Call the docket manager function
+        result = get_dockets(docket_type=docket_type, page=page, limit=limit)
+        print(result)
+
+        # Return appropriate status code based on result
+        status_code = 200 if result.get("success") else 500
+
+        return jsonify(result), status_code
+
+    except Exception as e:
+        logger.error(f"Error fetching dockets: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)

@@ -42,6 +42,22 @@ def _load_env_file(env_path: str) -> None:
                 os.environ[key] = value
 
 
+def convert_date_to_datetime(date_str: str) -> Optional[datetime]:
+    """
+    Convert date string to datetime object.
+
+    Args:
+        date_str: Date string in MM/DD/YYYY format
+
+    Returns:
+        datetime object, or None if conversion fails
+    """
+    try:
+        return datetime.strptime(date_str.strip(), "%m/%d/%Y")
+    except Exception:
+        return None
+
+
 def _generate_comprehensive_summary_with_file_upload(
     openai_client: OpenAI,
     full_text: str,
@@ -275,7 +291,9 @@ def analyze_docket_entry(
                 "doc_number": doc_number,
                 "status": "skipped",
                 "message": "Entry already exists in database",
-                "entry": existing_entry
+                "metadata": existing_entry.get("metadata", {}),
+                "tier2_analysis": existing_entry.get("tier2_analysis", {}),
+                "tier3_risk_assessment": existing_entry.get("tier3_risk_assessment", {}),
             }
 
         # Filter entries by docket_type if provided
@@ -320,8 +338,16 @@ def analyze_docket_entry(
     # Next entry number is simply the count of filtered entries + 1
     next_entry_number = len(all_entries) + 1
 
+    # Convert date to datetime object if it exists and is a string
+    date_value = metadata.get("date", "N/A")
+    if date_value != "N/A" and isinstance(date_value, str):
+        dt = convert_date_to_datetime(date_value)
+        if dt:
+            date_value = dt
+        # If conversion fails, keep the original string value
+
     entry_metadata = {
-        "date": metadata.get("date", "N/A"),
+        "date": date_value,
         "document_type": metadata.get("document_type", "N/A"),
         "additional_info": metadata.get("additional_info", "N/A"),
         "on_behalf_of": metadata.get("on_behalf_of", "N/A"),
