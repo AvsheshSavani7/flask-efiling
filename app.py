@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Configure CORS to allow requests from http://localhost:8080
-CORS(app, origins=["http://localhost:8080"])
+CORS(app, origins=["http://localhost:8080",
+     "https://rag-summary-fe.onrender.com"])
 
 
 @app.route('/')
