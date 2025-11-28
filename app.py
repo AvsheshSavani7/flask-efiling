@@ -36,7 +36,7 @@ def home():
             "/fcc-scraper": "POST - Check for new FCC filings and scrape HTML",
             "/proxy-check": "POST - Check if a proxy port is open",
             "/analyze-docket": "POST - Analyze docket entry with tier 2 and tier 3 analysis",
-            "/dockets": "GET - Fetch docket entries with pagination (query params: docket_type, page, limit)",
+            "/dockets": "GET - Fetch docket entries with pagination (query params: docket_type, page, limit, sort_field, sort_order)",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -246,12 +246,15 @@ def analyze_docket():
 
 @app.route('/dockets', methods=['GET'])
 def fetch_dockets():
-    """Fetch docket entries with pagination, filtered by docket_type and sorted by date"""
+    """Fetch docket entries with pagination, filtered by docket_type and sorted by specified field"""
     try:
         # Get query parameters
         docket_type = request.args.get('docket_type', None)
         page = request.args.get('page', 1, type=int)
         limit = request.args.get('limit', 10, type=int)
+        sort_field = request.args.get(
+            'sort_field', 'date')  # 'date' or 'hash_id'
+        sort_order = request.args.get('sort_order', 'asc')  # 'asc' or 'desc'
 
         # Validate pagination parameters
         if page < 1:
@@ -266,8 +269,28 @@ def fetch_dockets():
                 "error": "Limit must be greater than 0"
             }), 400
 
+        # Validate sort_field parameter
+        if sort_field.lower() not in ['date', 'hash_id']:
+            return jsonify({
+                "success": False,
+                "error": "sort_field must be 'date' or 'hash_id'"
+            }), 400
+
+        # Validate sort_order parameter
+        if sort_order.lower() not in ['asc', 'desc']:
+            return jsonify({
+                "success": False,
+                "error": "sort_order must be 'asc' (ascending) or 'desc' (descending)"
+            }), 400
+
         # Call the docket manager function
-        result = get_dockets(docket_type=docket_type, page=page, limit=limit)
+        result = get_dockets(
+            docket_type=docket_type,
+            page=page,
+            limit=limit,
+            sort_field=sort_field,
+            sort_order=sort_order
+        )
         print(result)
 
         # Return appropriate status code based on result
