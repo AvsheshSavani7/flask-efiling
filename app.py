@@ -7,6 +7,7 @@ from puc_scraper import fetch_with_playwright_2captcha_puc
 from docket_entry_analyzer import analyze_docket_entry
 from docket_manager import get_dockets
 from fcc_html_scraper import process_fcc_scraper
+from mergers_manager import get_all_mergers
 import logging
 import os
 import asyncio
@@ -36,7 +37,8 @@ def home():
             "/fcc-scraper": "POST - Check for new FCC filings and scrape HTML",
             "/proxy-check": "POST - Check if a proxy port is open",
             "/analyze-docket": "POST - Analyze docket entry with tier 2 and tier 3 analysis",
-            "/dockets": "GET - Fetch docket entries with pagination (query params: docket_type, page, limit, sort_field, sort_order)",
+            "/dockets": "GET - Fetch docket entries with pagination (query params: docket_type, docket_number, page, limit, sort_field, sort_order)",
+            "/mergers": "GET - Get all merger records from MongoDB",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -246,10 +248,11 @@ def analyze_docket():
 
 @app.route('/dockets', methods=['GET'])
 def fetch_dockets():
-    """Fetch docket entries with pagination, filtered by docket_type and sorted by specified field"""
+    """Fetch docket entries with pagination, filtered by docket_type and/or docket_number, and sorted by specified field"""
     try:
         # Get query parameters
         docket_type = request.args.get('docket_type', None)
+        docket_number = request.args.get('docket_number', None)
         page = request.args.get('page', 1, type=int)
         limit = request.args.get('limit', 10, type=int)
         sort_field = request.args.get(
@@ -286,6 +289,7 @@ def fetch_dockets():
         # Call the docket manager function
         result = get_dockets(
             docket_type=docket_type,
+            docket_number=docket_number,
             page=page,
             limit=limit,
             sort_field=sort_field,
@@ -425,6 +429,26 @@ def fcc_scraper():
         return jsonify({
             "success": False,
             "error": str(e)
+        }), 500
+
+
+@app.route('/mergers', methods=['GET'])
+def fetch_mergers():
+    """Get all merger records from MongoDB"""
+    try:
+        result = get_all_mergers()
+
+        # Return appropriate status code based on result
+        status_code = 200 if result.get("success") else 500
+
+        return jsonify(result), status_code
+
+    except Exception as e:
+        logger.error(f"Error fetching mergers: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "data": []
         }), 500
 
 
