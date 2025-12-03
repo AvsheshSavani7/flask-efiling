@@ -45,17 +45,20 @@ def _get_database_connection():
 
 def get_dockets(
     docket_type: Optional[str] = None,
+    docket_number: Optional[str] = None,
     page: int = 1,
     limit: int = 10,
     sort_field: str = "date",
     sort_order: str = "asc"
 ) -> Dict[str, Any]:
     """
-    Fetch docket entries with pagination, filtered by docket_type and sorted by specified field.
+    Fetch docket entries with pagination, filtered by docket_type and/or docket_number, and sorted by specified field.
 
     Args:
         docket_type: Optional docket type to filter by (e.g., "PUC", "FCC", "CPUC", "STB")
                     If None or empty, returns all dockets
+        docket_number: Optional docket number to filter by (e.g., "A2410006", "58536", "25-233", "FD-36873")
+                      If None or empty, no docket_number filter is applied
         page: Page number (1-indexed)
         limit: Number of records per page
         sort_field: Field to sort by - "date" or "hash_id" (default: "date")
@@ -74,7 +77,9 @@ def get_dockets(
         # Build query filter
         query_filter = {}
         if docket_type and docket_type.strip() and docket_type != "N/A":
-            query_filter = {"metadata.docket_type": docket_type}
+            query_filter["metadata.docket_type"] = docket_type
+        if docket_number and docket_number.strip() and docket_number != "N/A":
+            query_filter["metadata.docket_number"] = docket_number
 
         # Get total count for pagination
         total_count = collection.count_documents(query_filter)
@@ -147,6 +152,7 @@ def get_dockets(
                 "has_prev": page > 1
             },
             "docket_type": docket_type if docket_type else "all",
+            "docket_number": docket_number if docket_number else "all",
             "sort_info": {
                 "sort_field": sort_field,
                 "sort_order": sort_order,
