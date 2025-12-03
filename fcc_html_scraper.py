@@ -244,41 +244,113 @@ async def download_document_async(document_url, wait_time=5):
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
                 }
             )
-            page = await context.new_page()
             logger.info(
                 f"Using residential proxy for document download: {proxy_host}:{proxy_port}")
 
             try:
-                # Set up download listener
+                # For direct PDF/document URLs, use request API instead of page.goto()
+                # This is more reliable for binary content downloads
+                if document_url.lower().endswith(('.pdf', '.doc', '.docx', '.xls', '.xlsx', '.txt')):
+                    try:
+                        logger.info(
+                            f"Using request API for direct document download: {document_url}")
+                        response = await context.request.get(
+                            document_url,
+                            timeout=60000
+                        )
+                        if response.ok:
+                            content = await response.body()
+                            if content and (content.startswith(b'%PDF') or len(content) > 100):
+                                logger.info(
+                                    f"Successfully downloaded document via request API: {len(content)} bytes")
+                                await browser.close()
+                                return content
+                        logger.warning(
+                            f"Request API returned non-OK status for {document_url}, status: {response.status}, trying page.goto()")
+                        # Fall through to page.goto() method
+                    except Exception as e:
+                        logger.warning(
+                            f"Request API failed for {document_url}: {str(e)}, trying page.goto()")
+                        # Fall through to page.goto() method
+
+                # For other URLs or if request API fails, use page.goto()
+                page = await context.new_page()
+
+                # Set up download listener for actual download events
                 download_content = None
+                download_error = None
 
                 async def handle_download(download):
-                    nonlocal download_content
+                    nonlocal download_content, download_error
                     try:
-                        # Wait for download to complete
+                        # Wait for download to complete with timeout
                         path = await download.path()
-                        with open(path, 'rb') as f:
-                            download_content = f.read()
+                        if path:
+                            with open(path, 'rb') as f:
+                                download_content = f.read()
                     except Exception as e:
-                        logger.error(
-                            f"Error reading downloaded file: {str(e)}")
+                        # Only log if it's not a cancellation (cancellation is expected for direct streams)
+                        if "canceled" not in str(e).lower():
+                            logger.warning(
+                                f"Error reading downloaded file: {str(e)}")
+                        download_error = str(e)
 
                 page.on("download", handle_download)
 
-                # Navigate to the document URL
-                response = await page.goto(document_url, wait_until='networkidle', timeout=30000)
+                # Navigate to the document URL with more lenient wait strategy
+                try:
+                    response = await page.goto(document_url, wait_until='domcontentloaded', timeout=60000)
+                except Exception as goto_error:
+                    # If goto fails, try with load strategy
+                    try:
+                        logger.warning(
+                            f"domcontentloaded failed for {document_url}, trying load strategy")
+                        response = await page.goto(document_url, wait_until='load', timeout=60000)
+                    except Exception as load_error:
+                        # If both fail, try without wait_until
+                        try:
+                            logger.warning(
+                                f"load failed for {document_url}, trying commit strategy")
+                            response = await page.goto(document_url, wait_until='commit', timeout=60000)
+                        except Exception as commit_error:
+                            logger.error(
+                                f"All navigation strategies failed for {document_url}")
+                            await browser.close()
+                            return None
 
-                # Wait a bit for any JavaScript to trigger downloads
-                await page.wait_for_timeout(wait_time * 1000)
-
-                # If we got a download, return it
-                if download_content:
-                    await browser.close()
-                    return download_content
-
-                # Otherwise, try to get the response body
+                # Check response content-type first
                 if response:
+                    content_type = response.headers.get(
+                        'content-type', '').lower()
+
+                    # If it's a direct PDF or document stream, read it directly
+                    if 'application/pdf' in content_type or 'application/octet-stream' in content_type or document_url.lower().endswith('.pdf'):
+                        content = await response.body()
+                        if content and content.startswith(b'%PDF'):
+                            logger.info(
+                                f"Direct PDF stream detected for {document_url}")
+                            await browser.close()
+                            return content
+
+                    # Wait a bit for any JavaScript to trigger downloads (only if not direct PDF)
+                    if 'application/pdf' not in content_type:
+                        await page.wait_for_timeout(wait_time * 1000)
+
+                    # If we got a download, return it
+                    if download_content:
+                        await browser.close()
+                        return download_content
+
+                    # Otherwise, try to get the response body
                     content = await response.body()
+
+                    # Check if it's a PDF by content signature
+                    if content and content.startswith(b'%PDF'):
+                        logger.info(
+                            f"PDF detected by content signature for {document_url}")
+                        await browser.close()
+                        return content
+
                     # Check if it's HTML (error page) or actual document
                     try:
                         content_str = content.decode('utf-8', errors='ignore')
@@ -298,7 +370,7 @@ async def download_document_async(document_url, wait_time=5):
                                         iframe_src = urljoin(
                                             document_url, iframe_src)
 
-                                    iframe_response = await page.goto(iframe_src, wait_until='networkidle', timeout=30000)
+                                    iframe_response = await page.goto(iframe_src, wait_until='networkidle', timeout=60000)
                                     if iframe_response:
                                         iframe_content = await iframe_response.body()
                                         await browser.close()
@@ -319,9 +391,33 @@ async def download_document_async(document_url, wait_time=5):
                     return None
 
             except Exception as e:
+                error_str = str(e).lower()
+                # Check if it's an ERR_ABORTED error - this often happens with direct PDF streams
+                if "err_aborted" in error_str or "aborted" in error_str:
+                    # Try one more time with request API as fallback
+                    try:
+                        logger.info(
+                            f"ERR_ABORTED detected, trying request API fallback for {document_url}")
+                        response = await context.request.get(document_url, timeout=60000)
+                        if response.ok:
+                            content = await response.body()
+                            if content and (content.startswith(b'%PDF') or len(content) > 100):
+                                logger.info(
+                                    f"Successfully downloaded via request API fallback: {len(content)} bytes")
+                                await browser.close()
+                                return content
+                    except Exception as fallback_error:
+                        logger.warning(
+                            f"Request API fallback also failed: {str(fallback_error)}")
+
                 await browser.close()
-                logger.error(
-                    f"Error downloading document from {document_url}: {str(e)}")
+                # Only log as error if it's not a common abort (which we tried to handle)
+                if "err_aborted" not in error_str:
+                    logger.error(
+                        f"Error downloading document from {document_url}: {str(e)}")
+                else:
+                    logger.warning(
+                        f"Document download aborted for {document_url} (may be due to direct stream)")
                 return None
 
     except Exception as e:
@@ -628,6 +724,46 @@ def extract_additional_details_from_html(html_content):
         return {}
 
 
+def extract_brief_comment_from_html(html_content):
+    """
+    Extract Brief Comment value from HTML content if available.
+
+    Looks for a label with id="comment" that is within a div containing "Brief Comment" label.
+
+    Args:
+        html_content: HTML content as string
+
+    Returns:
+        Brief comment text as string, or empty string if not found
+    """
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+
+        # Find the label with id="comment"
+        comment_label = soup.find('label', {'id': 'comment'})
+
+        if comment_label:
+            # Check if it's within a div that contains "form-group" class
+            parent_div = comment_label.find_parent(
+                'div', class_=lambda x: x and 'form-group' in x)
+            if parent_div:
+                # Check if there's a "Brief Comment" label in the parent div
+                brief_comment_label = parent_div.find(
+                    'label', string=re.compile(r'Brief Comment', re.I))
+                if brief_comment_label:
+                    comment_text = comment_label.get_text(strip=True)
+                    if comment_text:
+                        logger.info(
+                            f"Found Brief Comment: {len(comment_text)} characters")
+                        return comment_text
+
+        return ""
+
+    except Exception as e:
+        logger.error(f"Error extracting Brief Comment from HTML: {str(e)}")
+        return ""
+
+
 def process_fcc_scraper(url, document_id, wait_time=10):
     """
     Main function to process FCC scraper request.
@@ -731,6 +867,13 @@ def process_fcc_scraper(url, document_id, wait_time=10):
             documents_data = []
             combined_document_text = []
 
+            # Extract Brief Comment from HTML if available
+            brief_comment = ""
+            if html_content:
+                brief_comment = extract_brief_comment_from_html(html_content)
+                if brief_comment:
+                    logger.info(f"Extracted Brief Comment for item {idx + 1}")
+
             if html_content:
                 # Extract document download links from HTML
                 logger.info(
@@ -795,11 +938,19 @@ def process_fcc_scraper(url, document_id, wait_time=10):
             combined_text = "\n\n".join(
                 combined_document_text) if combined_document_text else ""
 
+            # Append Brief Comment to combined text if available
+            if brief_comment:
+                if combined_text:
+                    combined_text += f"\n\n--- Brief Comment ---\n{brief_comment}"
+                else:
+                    combined_text = f"--- Brief Comment ---\n{brief_comment}"
+
             scraped_data.append({
                 "scraped_successfully": html_content is not None,
                 "metadata": metadata,
                 "combined_document_text": combined_text,
-                "combined_text_length": len(combined_text)
+                "combined_text_length": len(combined_text),
+                "brief_comment": brief_comment if brief_comment else None
             })
 
         # Calculate total documents found and downloaded
