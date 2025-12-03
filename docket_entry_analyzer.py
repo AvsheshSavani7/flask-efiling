@@ -273,8 +273,9 @@ def analyze_docket_entry(
     if metadata is None:
         metadata = {}
 
-    # Get docket_type from metadata for filtering
+    # Get docket_type and docket_number from metadata for filtering
     docket_type = metadata.get("docket_type", "N/A")
+    docket_number = metadata.get("docket_number", "N/A")
 
     try:
         mongo_client = MongoClient(mongodb_uri)
@@ -296,11 +297,12 @@ def analyze_docket_entry(
                 "tier3_risk_assessment": existing_entry.get("tier3_risk_assessment", {}),
             }
 
-        # Filter entries by docket_type if provided
+        # Filter entries by docket_type and docket_number if provided
+        query_filter = {}
         if docket_type and docket_type != "N/A":
-            query_filter = {"metadata.docket_type": docket_type}
-        else:
-            query_filter = {}
+            query_filter["metadata.docket_type"] = docket_type
+        if docket_number and docket_number != "N/A":
+            query_filter["metadata.docket_number"] = docket_number
 
         # Sort by metadata.date for chronological order within docket_type (older to newer)
         all_entries = list(collection.find(
