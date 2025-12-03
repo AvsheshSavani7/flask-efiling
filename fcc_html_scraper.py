@@ -633,10 +633,11 @@ def process_fcc_scraper(url, document_id, wait_time=10):
     Main function to process FCC scraper request.
     Checks for new FCC filings by comparing document_id with RSS feed items.
     If new records found, scrapes HTML and extracts documents.
+    If document_id is not provided or is empty string, treats as first entry and scrapes all items.
 
     Args:
         url: RSS feed URL
-        document_id: Document ID (link) to compare against
+        document_id: Document ID (link) to compare against. If None or empty string, scrapes all items.
         wait_time: Wait time for React app to render (default: 10)
 
     Returns:
@@ -647,12 +648,6 @@ def process_fcc_scraper(url, document_id, wait_time=10):
             return {
                 "success": False,
                 "error": "url is required"
-            }
-
-        if not document_id:
-            return {
-                "success": False,
-                "error": "document_id is required"
             }
 
         logger.info(f"Fetching RSS feed from: {url}")
@@ -675,19 +670,25 @@ def process_fcc_scraper(url, document_id, wait_time=10):
 
         logger.info(f"Parsed {len(items)} items from RSS feed")
 
-        # Find the index of document_id in the items
-        matched_index = None
-        for idx, item in enumerate(items):
-            item_link = item.get('link', '')
-            if item_link == document_id:
-                matched_index = idx
-                break
-
-        # If document_id not found, treat all items as new
-        if matched_index is None:
+        # If document_id is not provided or is empty string, treat as first entry (scrape all items)
+        if not document_id or document_id.strip() == "":
             logger.info(
-                f"Document ID {document_id} not found in RSS feed. All {len(items)} items are new.")
+                f"No document_id provided or empty string. Treating as first entry. All {len(items)} items will be scraped.")
             matched_index = len(items)
+        else:
+            # Find the index of document_id in the items
+            matched_index = None
+            for idx, item in enumerate(items):
+                item_link = item.get('link', '')
+                if item_link == document_id:
+                    matched_index = idx
+                    break
+
+            # If document_id not found, treat all items as new
+            if matched_index is None:
+                logger.info(
+                    f"Document ID {document_id} not found in RSS feed. All {len(items)} items are new.")
+                matched_index = len(items)
 
         # If matched at index 0, no new records
         if matched_index == 0:

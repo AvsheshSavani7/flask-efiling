@@ -398,6 +398,7 @@ def fcc_scraper():
     """
     Check for new FCC filings by comparing document_id with RSS feed items.
     If new records found, scrape HTML from their links.
+    If document_id is not provided or is empty string, treats as first entry and scrapes all items.
     """
     try:
         data = request.get_json() or {}
@@ -412,7 +413,7 @@ def fcc_scraper():
         # Determine HTTP status code based on result
         status_code = 200
         if not result.get("success"):
-            if "url is required" in result.get("error", "") or "document_id is required" in result.get("error", ""):
+            if "url is required" in result.get("error", ""):
                 status_code = 400
             else:
                 status_code = 500
