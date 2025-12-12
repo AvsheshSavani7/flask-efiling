@@ -276,6 +276,8 @@ def analyze_docket_entry(
     # Get docket_type and docket_number from metadata for filtering
     docket_type = metadata.get("docket_type", "N/A")
     docket_number = metadata.get("docket_number", "N/A")
+    date = metadata.get("date", "N/A")
+    on_behalf_of = metadata.get("on_behalf_of", "N/A")
 
     try:
         mongo_client = MongoClient(mongodb_uri)
@@ -385,6 +387,8 @@ def analyze_docket_entry(
     # Try to generate Tier2 directly with full_text first
     tier2_prompt = f"""You are a legal analyst specializing in M&A regulatory proceedings.
 
+    Always prioritize the filing's concrete legal or procedural function over its rhetorical tone. When possible, use the filer’s own language to describe what they are asking the agency or other parties to do, and avoid vague phrasing such as "raises concerns" or "highlights issues" when you can state the specific request, effect, or role of the filing in the proceeding.
+
 COMPLETE DOCKET HISTORY (Entries 1-{len(all_entries)}):
 {historical_context}
 
@@ -392,6 +396,9 @@ COMPLETE DOCKET HISTORY (Entries 1-{len(all_entries)}):
 
 NEW ENTRY #{next_entry_number} TO ANALYZE:
 Document ID: {doc_number}
+Date: {date}
+Type: {docket_type}
+Filed By: {on_behalf_of}
 
 CONTENT:
 {content_for_tier2}
@@ -400,17 +407,37 @@ CONTENT:
 
 Based on the COMPLETE docket history above and this new entry, provide:
 
-1. ENTRY SUMMARY (2-3 sentences): What is this entry and what does it contain?
+1. ENTRY SUMMARY (2-3 sentences):
+   Describe this filing in terms of its regulatory or procedural function. Identify:
+   (i) who filed it,
+   (ii) what specific regulatory, procedural, or substantive action they are requesting (if any),
+   and (iii) the main issues they are asking the agency or other decision-maker to evaluate.
+   If the filer is not requesting a concrete action, explicitly state that they are urging
+   consideration or re-weighting of certain factors rather than demanding a specific outcome.
 
 2. LEGAL/REGULATORY SIGNIFICANCE (3-4 sentences): 
-   - What legal or procedural issues does this raise?
-   - How does it relate to previous entries? (cite specific entry numbers)
-   - What stakeholder positions are emerging or evolving?
+   Explain how this filing affects the legal and procedural posture of the case, if at all.
+   Be explicit about whether it:
+   • changes the scope of review, evidentiary burden, available remedies, schedule,
+     or procedural rights; or
+   • is primarily non-binding advocacy or commentary without direct procedural effect.
+   Distinguish clearly between binding procedural or legal consequences (e.g., motions,
+   orders, schedule changes, formal commitments) and persuasive advocacy (e.g., public
+   comments, letters of support or opposition). Describe how this filing escalates,
+   narrows, reinforces, or contradicts the themes and positions in specific prior entries
+   (cite entry numbers).
 
 3. CUMULATIVE IMPACT (3-4 sentences):
-   Given EVERYTHING that has happened from Entry #1 through #{next_entry_number}, how does 
-   this entry change the overall picture? Does it strengthen/weaken the deal's position? 
-   Does it introduce new themes or continue existing patterns?
+   
+   Considering EVERYTHING that has happened from Entry #1 through #{next_entry_number},
+   assess how this filing changes the overall risk profile and deal dynamics.
+   Does it:
+   • increase or decrease the probability of a formal challenge, remedies/conditions,
+     or delays; or
+   • mainly add weight to existing themes already present in prior entries?
+   Be explicit about whether this filing introduces a new risk vector or simply reinforces
+   existing ones, and state whether it tends to strengthen or weaken the deal’s position.
+   Cite specific entry numbers when making comparisons or describing patterns.
 
 Be specific and cite entry numbers when referencing prior events."""
 
@@ -585,45 +612,68 @@ Be specific and cite entry numbers when referencing prior events."""
 
     tier3_prompt = f"""You are a senior legal analyst providing risk assessment for an M&A transaction regulatory review.
 
-CASE: ALLETE acquisition by Canada Pension Plan Investment Board and Global Infrastructure Partners
+    Always prioritize procedural and legal consequences over rhetorical intensity or the mere volume of comments when assessing risk. Focus on filings and orders that actually change the regulatory posture, timing, or available remedies.
 
-COMPLETE DOCKET HISTORY (Entries 1-{next_entry_number}):
-{historical_context}
+    CASE: ALLETE acquisition by Canada Pension Plan Investment Board and Global Infrastructure Partners
 
-MOST RECENT ENTRY (#{next_entry_number}):
-{tier2_response}
+    COMPLETE DOCKET HISTORY (Entries 1-{next_entry_number}):
+    {historical_context}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    MOST RECENT ENTRY (#{next_entry_number}):
+    {tier2_response}
 
-Based on ALL evidence from Entry #1 through #{next_entry_number}, provide comprehensive risk assessment:
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. DEAL CHALLENGE RISK - Rate as LOW, MODERATE, or HIGH:
+    Based on ALL evidence from Entry #1 through #{next_entry_number}, provide comprehensive risk assessment:
 
-Rating criteria:
-• LOW: Limited opposition, mostly procedural concerns, deal structure sound
-• MODERATE: Multiple substantive intervenors, significant concerns but deal viable with conditions
-• HIGH: Widespread strong opposition, fundamental public interest concerns, approval unlikely
+    1. DEAL CHALLENGE RISK SCORE (0-100):
 
-Your rating: [LOW/MODERATE/HIGH]
-Reasoning (4-5 sentences): [Cite specific entries by number to support your assessment]
+    Score: [X]
 
-2. TIMING RISK - Rate as LOW, MODERATE, or HIGH:
+    Where:
+    • 0-30: Limited opposition, mostly procedural concerns, deal structure sound
+    • 31-60: Multiple substantive intervenors, significant concerns but deal viable with conditions
+    • 61-100: Widespread strong opposition, fundamental public interest concerns, approval unlikely
 
-Rating criteria:
-• LOW: Standard review timeline, few intervenors, proceeding smoothly
-• MODERATE: Contested case, multiple intervenors, 6-12 month timeline
-• HIGH: Highly contested, procedural disputes, likely 12+ month delay
+    Reasoning (4-5 sentences):
+    Ground this score in filings and actions that create concrete legal or procedural exposure,
+    such as complaints, enforcement activity, adverse staff recommendations, motions directed
+    at blocking or conditioning the deal, formal opposition from enforcement agencies or
+    state regulators, or clear signals of potential litigation. Do not inflate the score based
+    solely on the volume or emotional intensity of public comments or political rhetoric unless
+    they have already produced identifiable procedural consequences (e.g., expanded discovery,
+    new hearings, schedule changes). Cite specific entries by number to support your score.
 
-Your rating: [LOW/MODERATE/HIGH]
-Reasoning (4-5 sentences): [Cite specific entries by number to support your assessment]
+    2. TIMING RISK SCORE (0-100):
 
-3. KEY RISK FACTORS (list 3-5 most significant concerns that have emerged)
+    Score: [X]
 
-4. TRAJECTORY ASSESSMENT (3-4 sentences): 
-   Looking at the arc from Entry #1 to #{next_entry_number}, is the deal strengthening or 
-   weakening? What have been the key inflection points? (cite entry numbers)
+    Where:
+    • 0-30: Standard review timeline, few intervenors, proceeding smoothly
+    • 31-60: Contested case, multiple intervenors, 6-12 month timeline
+    • 61-100: Highly contested, procedural disputes, likely 12+ month delay
 
-Be decisive. Ground all assessments in specific entries from the docket history."""
+    Reasoning (4-5 sentences):
+    Ground this score in events that directly affect timing, such as schedule changes,
+    extensions of statutory deadlines, motions for more time, expanded discovery,
+    additional hearing days, or procedural complications that make timely resolution
+    unlikely. Do not infer high timing risk solely from controversy or public interest;
+    tie it to actual orders, motions, or procedural bottlenecks in the docket.
+    Cite specific entries by number to support your score.
+
+    3. KEY RISK FACTORS 
+    List the 3-5 most significant risk factors that have emerged, focusing on those that
+    realistically affect (i) probability of deal challenge or litigation, (ii) likelihood or
+    severity of remedies/conditions, and (iii) timing of closing.
+
+    4. TRAJECTORY ASSESSMENT (3-4 sentences): 
+    Looking at the arc from Entry #1 to #{next_entry_number}, explain whether the deal is
+        strengthening or weakening from a regulatory risk perspective. Identify the key
+        inflection points where the posture meaningfully changed (e.g., major enforcement
+        filings, significant political interventions with procedural consequences, schedule
+        changes, or major commitments by the parties), and cite those entries by number.
+
+CRITICAL: You must provide numerical scores (0-100) for both risks. Be decisive and ground all assessments in specific entries from the docket history."""
 
     tier3_message = client.messages.create(
         model=TIER3_MODEL,
