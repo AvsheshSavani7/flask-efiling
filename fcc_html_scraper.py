@@ -603,39 +603,29 @@ def extract_metadata_from_rss_item(item):
             "docket_type": "FCC"
         }
 
-        # Extract date from dc:date or date field
-        date_str = item.get('date') or item.get(
-            'dc:date') or item.get('pubDate', '')
-        if date_str:
-            try:
-                # Parse ISO format date (2025-11-18T22:00:14.705Z)
-                if 'T' in date_str:
-                    dt = datetime.fromisoformat(
-                        date_str.replace('Z', '+00:00'))
-                    metadata["date"] = dt
-                else:
-                    # Try to parse as MM/DD/YYYY format
-                    try:
-                        dt = datetime.strptime(date_str.strip(), "%m/%d/%Y")
-                        metadata["date"] = dt
-                    except ValueError:
-                        # If MM/DD/YYYY parsing fails, try other common formats
-                        # or keep as string if all parsing fails
-                        metadata["date"] = date_str
-            except Exception:
-                # If ISO parsing fails, try MM/DD/YYYY format
-                try:
-                    dt = datetime.strptime(date_str.strip(), "%m/%d/%Y")
-                    metadata["date"] = dt
-                except ValueError:
-                    metadata["date"] = date_str
+        description = item.get('description', '') or ''
+        desc_text = description.replace('&#xD;', '').replace('<br/>', '\n')
 
-        # Extract document_type from description (Comment Type)
-        description = item.get('description', '')
-        comment_type_match = re.search(
-            r'Comment Type:\s*([^<]+)', description, re.IGNORECASE)
-        if comment_type_match:
-            metadata["document_type"] = comment_type_match.group(1).strip()
+        # Extract date from dc:date or date field
+       # 1) Prefer "Date Received: MM/DD/YYYY"
+        m = re.search(
+            r'Date Received:\s*(\d{2}/\d{2}/\d{4})', desc_text, re.IGNORECASE)
+        if m:
+            metadata["date"] = m.group(1)
+        else:
+            # 2) Fallback to dc:date ISO string
+            iso = (item.get('dc:date') or item.get('date') or '').strip()
+            if iso:
+                dt = datetime.fromisoformat(iso.replace('Z', '+00:00'))
+                metadata["date"] = dt.strftime("%m/%d/%Y")
+
+                # Extract document_type from description (Comment Type)
+                description = item.get('description', '')
+                comment_type_match = re.search(
+                    r'Comment Type:\s*([^<]+)', description, re.IGNORECASE)
+                if comment_type_match:
+                    metadata["document_type"] = comment_type_match.group(
+                        1).strip()
 
         # Normalise description for line-based parsing
         desc_text = description.replace('&#xD;', '').replace('<br/>', '\n')
