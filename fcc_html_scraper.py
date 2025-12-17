@@ -7,6 +7,8 @@ from io import BytesIO
 from datetime import datetime
 import re
 from fcc_rss_to_json import fetch_rss_feed, parse_rss_items
+import html
+
 
 # Proxy configuration (same as puc_scraper.py)
 proxy_host = "108.59.242.138"
@@ -619,13 +621,12 @@ def extract_metadata_from_rss_item(item):
                 dt = datetime.fromisoformat(iso.replace('Z', '+00:00'))
                 metadata["date"] = dt.strftime("%m/%d/%Y")
 
-                # Extract document_type from description (Comment Type)
-                description = item.get('description', '')
-                comment_type_match = re.search(
-                    r'Comment Type:\s*([^<]+)', description, re.IGNORECASE)
-                if comment_type_match:
-                    metadata["document_type"] = comment_type_match.group(
-                        1).strip()
+        # Extract document_type from description (regardless of date extraction path)
+        # Use desc_text which already has the cleaned description
+        doc_type_match = re.search(
+            r"Comment\s*Type\s*:\s*([^<\r\n]+)", desc_text, re.IGNORECASE)
+        if doc_type_match:
+            metadata["document_type"] = doc_type_match.group(1).strip()
 
         # Normalise description for line-based parsing
         desc_text = description.replace('&#xD;', '').replace('<br/>', '\n')
@@ -678,6 +679,8 @@ def extract_metadata_from_rss_item(item):
             metadata["document_id"] = link
 
         metadata["docket_type"] = "FCC"
+
+        print(metadata)
 
         return metadata
 
