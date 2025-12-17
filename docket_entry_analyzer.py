@@ -776,7 +776,7 @@ Be factual and concise. Focus on substantive content, not procedural details."""
     if comprehensive_summary_data:
         new_entry["comprehensive_summary"] = comprehensive_summary_data
 
-    # collection.insert_one(new_entry)
+    collection.insert_one(new_entry)
 
     result = {
         "doc_number": doc_number,
