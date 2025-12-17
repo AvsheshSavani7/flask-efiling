@@ -287,17 +287,17 @@ def analyze_docket_entry(
         existing_entry = collection.find_one(
             {"metadata.document_id": doc_number})
 
-        if existing_entry:
-            existing_entry.pop("_id", None)
-            # Entry already exists, skip it and don't return it
-            return {
-                "doc_number": doc_number,
-                "status": "skipped",
-                "message": "Entry already exists in database",
-                "metadata": existing_entry.get("metadata", {}),
-                "tier2_analysis": existing_entry.get("tier2_analysis", {}),
-                "tier3_risk_assessment": existing_entry.get("tier3_risk_assessment", {}),
-            }
+        # if existing_entry:
+        #     existing_entry.pop("_id", None)
+        #     # Entry already exists, skip it and don't return it
+        #     return {
+        #         "doc_number": doc_number,
+        #         "status": "skipped",
+        #         "message": "Entry already exists in database",
+        #         "metadata": existing_entry.get("metadata", {}),
+        #         "tier2_analysis": existing_entry.get("tier2_analysis", {}),
+        #         "tier3_risk_assessment": existing_entry.get("tier3_risk_assessment", {}),
+        #     }
 
         # Filter entries by docket_type and docket_number if provided
         query_filter = {}
@@ -311,6 +311,8 @@ def analyze_docket_entry(
             query_filter).sort("metadata.date", 1))
         for entry in all_entries:
             entry.pop("_id", None)
+
+        print(f"All entries: length {len(all_entries)}")
 
         # Calculate next hash_id: filter by docket_type only, sort by date
         # Use the same query_filter as all_entries (filters by docket_type)
@@ -358,6 +360,8 @@ def analyze_docket_entry(
 
     # Next entry number is simply the count of filtered entries + 1
     next_entry_number = len(all_entries) + 1
+
+    print(f"Next entry number: {next_entry_number}")
 
     # Convert date to datetime object if it exists and is a string
     date_value = metadata.get("date", "N/A")
@@ -614,7 +618,6 @@ Be specific and cite entry numbers when referencing prior events."""
 
     Always prioritize procedural and legal consequences over rhetorical intensity or the mere volume of comments when assessing risk. Focus on filings and orders that actually change the regulatory posture, timing, or available remedies.
 
-    CASE: ALLETE acquisition by Canada Pension Plan Investment Board and Global Infrastructure Partners
 
     COMPLETE DOCKET HISTORY (Entries 1-{next_entry_number}):
     {historical_context}
@@ -773,7 +776,7 @@ Be factual and concise. Focus on substantive content, not procedural details."""
     if comprehensive_summary_data:
         new_entry["comprehensive_summary"] = comprehensive_summary_data
 
-    collection.insert_one(new_entry)
+    # collection.insert_one(new_entry)
 
     result = {
         "doc_number": doc_number,
@@ -865,7 +868,7 @@ if __name__ == "__main__":
     import sys
 
     doc_num = "202510-224026-01"
-    text = "From: Thom, Anne (PUC)\nTo: Staff, CAO (PUC)\nSubject: FW: Oppose the Proposed Takeover of Minnesota Utility by BlackRock (Global Infrastructure Partners)\nDate: Wednesday, October 15, 2025 10:04:02 AM\nAttachments: image001.png\n \n \nAnne Thom\nSupervisor | Consumer Affairs Office\nMinnesota Public Utilities Commission\n121 7th Place E, Suite 350 Saint Paul, MN 55101-2147O: 651-355-0000F: 651-297-7073mn.gov/puc\nDISCLAIMER: The Consumer Affairs Office works to resolve consumer complaints informally. This\nemail does not constitute legal advice or formal determination by the Minnesota Public UtilitiesCommission. CONFIDENTIALITY NOTICE:  This message is only for the use of the individual(s) named above.\nInformation in this email or any attachment may be confidential or may be protected by state orfederal law. Any unauthorized disclosure, use, dissemination, or copying of this message isprohibited. If you are not the intended recipient, do not read this email or any attachments and notifythe sender immediately. Please delete all copies of this communication.\n \nFrom: Sieben, Katie (PUC) <katie.sieben@state.mn.us> \nSent:  Wednesday, October 15, 2025 10:03 AM\nTo: Thom, Anne (PUC) <anne.thom@state.mn.us>\nSubject: FW: Oppose the Proposed Takeover of Minnesota Utility by BlackRock (Global\nInfrastructure Partners)\n \nI just saw this email.\n \nFrom: costume_funky9u@icloud.com  <costume_funky9u@icloud.com > \nSent:  Friday, September 26, 2025 7:34 PM\nTo: Sieben, Katie (PUC) < katie.sieben@state.mn.us >\nSubject: Oppose the Proposed Takeover of Minnesota Utility by BlackRock (Global Infrastructure\nPartners)\nThis message may be from an external email source.\nDo not select links or open attachments unless verified. Report all suspicious emails to Minnesota IT Services Security\nOperations Center.You don't often get email from costume_funky9u@icloud.com . Learn why this is important \n \nDear Chair Sieben and Commissioners,\nI am writing as a concerned resident to express my strong opposition to the proposed\nacquisition of the parent company of a Duluth-based electric utility by Global InfrastructurePartners, a division of BlackRock. This utility currently provides electricity to over 150,000Minnesotans, and the decision regarding its future should prioritize the public good overprivate profit.\nAllowing a Wall Street private equity firm to take over a vital public utility raises serious red\nflags. Private equity firms like BlackRock are notorious for putting profits for executives andshareholders ahead of the needs of communities. Handing control of a critical energy providerto a firm with no direct accountability to Minnesota residents risks increased rates, reducedtransparency, and service decisions that prioritize investor returns over reliable and affordableaccess to power.\nAs Jenna Yeakle of the Sierra Club rightly stated, “If the deal goes through, it will force\nratepayers to be beholden to the private equity agenda.” This is unacceptable. Our utilitiesshould be accountable to the public, not to corporate investors with no stake in ourcommunities.\nI urge the Public Utilities Commission to reject this proposal and ensure that Minnesota’s\nenergy future is controlled by those who have the public interest, environmental responsibility,and long-term affordability at heart—not by distant private equity firms.\nThank you for your time and attention to this urgent matter.Sincerely,Kristy M."
+    text = "Surface Transportation BoardWashington, D.C. 20423-0001Office of EconomicsDecember 10, 2025Re: Waybill Request WB25-55I have approved the addition of the following individual to the waybill access letter inWB25-55.a) Kim Hillenbrand - Berkley Research GroupPrior payment of processing and mailing cost of $72 ($72 per signature) is required andreceived.Sincerely,Francis X. O’ConnorActing DirectorOffice of EconomicsFRANCISO'CONNORDigitally signed byFRANCIS O'CONNORDate: 2025.12.1107:57:06 -05'00'y FD 36873 310490 ENTEREDOffice of Chief Counsel December 11, 2025 Part of Public Record Waybill Agreement WB25-55I have read and understand the conditions for release of the CCWS data. I agree tocomply fully with these conditions and the provisions of this confidentiality agreement. No laterthan thirty days before the agreement expires, I will request an extension of this agreement, ifnecessary. If no extension is requested, I will return or destroy all CCWS data and certify that Ihave done so. I have the authority to sign this agreement._______________"
     # metadata ={
     #     "docket_type": "PUC",
     #     "date": "2025-10-15",
@@ -876,5 +879,15 @@ if __name__ == "__main__":
     #     "document_id": "202510-224026-01"
     # }
 
-    result = analyze_docket_entry(doc_num, text)
+    metadata = {
+        "date": "2025-12-11T00:00:00.000Z",
+        "document_type": "Filing",
+        "additional_info": "UNION PACIFIC CORPORATION AND UNION PACIFIC RAILROAD COMPANY &mdash;CONTROL&mdash; NORFOLK SOUTHERN CORPORATION AND NORFOLK SOUTHERN RAILWAY COMPANY",
+        "on_behalf_of": "Surface Transportation Board",
+        "docket_number": "FD-36873",
+        "document_id": "https://dcms-external.s3.amazonaws.com/DCMS_External_PROD/416/310490.pdf",
+        "docket_type": "stb-document"
+    }
+
+    result = analyze_docket_entry(doc_num, text, metadata)
     print(json.dumps(result, indent=2))
