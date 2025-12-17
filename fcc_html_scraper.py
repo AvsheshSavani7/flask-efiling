@@ -2,7 +2,7 @@ import asyncio
 import logging
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, parse_qs
 from io import BytesIO
 from datetime import datetime
 import re
@@ -590,7 +590,7 @@ def extract_text_from_document(file_content, file_url):
         return f"Error extracting text: {str(e)}"
 
 
-def extract_metadata_from_rss_item(item):
+def extract_metadata_from_rss_item(item, url):
     """
     Extract metadata from RSS item element
 
@@ -664,14 +664,29 @@ def extract_metadata_from_rss_item(item):
                 )
                 metadata["on_behalf_of"] = title_clean.strip()
 
-        # Extract docket_number from title or description (e.g., "25-233")
-        title_for_docket = item.get('title', '') or ''
-        docket_match = re.search(
-            r'(\d+-\d+)', (title_for_docket or '') + ' ' + description
-        )
+        # Extract docket_number from URL's proceedings_name parameter (primary source)
+        if url:
+            try:
+                parsed_url = urlparse(url)
+                query_params = parse_qs(parsed_url.query)
+                proceedings_name = query_params.get('proceedings_name', [])
+                if proceedings_name and len(proceedings_name) > 0:
+                    # Extract docket number from proceedings_name (e.g., "25-331")
+                    docket_from_url = proceedings_name[0].strip()
+                    if re.match(r'^\d+-\d+$', docket_from_url):
+                        metadata["docket_number"] = docket_from_url
+            except Exception as e:
+                logger.warning(
+                    f"Error extracting docket_number from URL: {str(e)}")
 
-        if docket_match:
-            metadata["docket_number"] = docket_match.group(1)
+        # Fallback: Extract docket_number from title or description if not found in URL
+        if "docket_number" not in metadata:
+            title_for_docket = item.get('title', '') or ''
+            docket_match = re.search(
+                r'(\d+-\d+)', (title_for_docket or '') + ' ' + description
+            )
+            if docket_match:
+                metadata["docket_number"] = docket_match.group(1)
 
         # Extract document_id from link
         link = item.get('link', '')
@@ -846,7 +861,7 @@ def process_fcc_scraper(url, document_id, wait_time=10):
             html_content = scrape_html_from_url(item_link, wait_time=wait_time)
 
             # Extract metadata from RSS item
-            metadata = extract_metadata_from_rss_item(item)
+            metadata = extract_metadata_from_rss_item(item, url)
 
             # Extract additional details from HTML if possible
             additional_details = {}
