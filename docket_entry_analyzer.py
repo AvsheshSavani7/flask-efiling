@@ -287,17 +287,17 @@ def analyze_docket_entry(
         existing_entry = collection.find_one(
             {"metadata.document_id": doc_number})
 
-        # if existing_entry:
-        #     existing_entry.pop("_id", None)
-        #     # Entry already exists, skip it and don't return it
-        #     return {
-        #         "doc_number": doc_number,
-        #         "status": "skipped",
-        #         "message": "Entry already exists in database",
-        #         "metadata": existing_entry.get("metadata", {}),
-        #         "tier2_analysis": existing_entry.get("tier2_analysis", {}),
-        #         "tier3_risk_assessment": existing_entry.get("tier3_risk_assessment", {}),
-        #     }
+        if existing_entry:
+            existing_entry.pop("_id", None)
+            # Entry already exists, skip it and don't return it
+            return {
+                "doc_number": doc_number,
+                "status": "skipped",
+                "message": "Entry already exists in database",
+                "metadata": existing_entry.get("metadata", {}),
+                "tier2_analysis": existing_entry.get("tier2_analysis", {}),
+                "tier3_risk_assessment": existing_entry.get("tier3_risk_assessment", {}),
+            }
 
         # Filter entries by docket_type and docket_number if provided
         query_filter = {}
