@@ -114,13 +114,13 @@ def get_html_from_nm_prc(target_url: str) -> Dict:
     }
 
 
-def extract_pdf_text_from_nm_prc(pdf_url: str) -> Dict:
+def extract_pdf_text_from_nm_prc(pdf_url: str, document_id: str) -> Dict:
     """
     Fetch PDF from a protected NM PRC eDocket URL and extract text.
 
     Args:
         pdf_url: Full URL to the PDF file
-
+        document_id: Document ID
     Returns:
         Dictionary with success status, extracted text, page count, and text length
 
@@ -177,7 +177,8 @@ def extract_pdf_text_from_nm_prc(pdf_url: str) -> Dict:
             "text": full_text,
             "page_count": page_count,
             "text_length": len(full_text),
-            "url": pdf_url
+            "url": pdf_url,
+            "document_id": document_id
         }
     except Exception as e:
         raise ValueError(f"Error extracting text from PDF: {str(e)}")

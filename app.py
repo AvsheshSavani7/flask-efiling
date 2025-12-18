@@ -575,8 +575,9 @@ def nm_prc_extract_pdf():
     try:
         data = request.get_json() or {}
         pdf_url = data.get('pdf_url')
+        document_id = data.get('document_id')
 
-        result = extract_pdf_text_from_nm_prc(pdf_url)
+        result = extract_pdf_text_from_nm_prc(pdf_url, document_id)
         return jsonify(result), 200
 
     except ValueError as e:
