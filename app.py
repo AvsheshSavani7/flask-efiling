@@ -8,6 +8,7 @@ from docket_entry_analyzer import analyze_docket_entry
 from docket_manager import get_dockets
 from fcc_html_scraper import process_fcc_scraper
 from mergers_manager import get_all_mergers
+from nm_prc_service import login_nm_prc, get_html_from_nm_prc
 import logging
 import os
 import asyncio
@@ -39,6 +40,9 @@ def home():
             "/analyze-docket": "POST - Analyze docket entry with tier 2 and tier 3 analysis",
             "/dockets": "GET - Fetch docket entries with pagination (query params: docket_type, docket_number, page, limit, sort_field, sort_order)",
             "/mergers": "GET - Get all merger records from MongoDB",
+            "/nm-prc-fetch": "POST - Fetch HTML from NM PRC eDocket system (requires authentication)",
+            "/nm-prc-login": "POST - Login to NM PRC eDocket system and save cookies",
+            "/nm-prc-get-html": "POST - Fetch HTML from protected NM PRC eDocket URL (requires login first)",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -449,6 +453,103 @@ def fetch_mergers():
             "success": False,
             "error": str(e),
             "data": []
+        }), 500
+
+
+@app.route('/nm-prc-login', methods=['POST'])
+def nm_prc_login():
+    """
+    Login endpoint that authenticates and saves cookies.
+
+    Request body:
+    {
+        "username": "string (required)",
+        "password": "string (required)"
+    }
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "cookies_file": "string",
+        "meta_file": "string"
+    }
+    """
+    try:
+        data = request.get_json() or {}
+        username = data.get('username')
+        password = data.get('password')
+
+        result = login_nm_prc(username, password)
+        return jsonify(result), 200
+
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 400
+    except RuntimeError as e:
+        logger.error(f"Login failed: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": f"Login failed: {str(e)}"
+        }), 401
+    except Exception as e:
+        logger.error(f"Error during login: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": f"Error during login: {str(e)}"
+        }), 500
+
+
+@app.route('/nm-prc-get-html', methods=['POST'])
+def nm_prc_get_html():
+    """
+    Fetch HTML from a protected NM PRC eDocket URL.
+
+    Request body:
+    {
+        "target_url": "string (required) - Full URL to fetch"
+    }
+
+    Returns:
+    {
+        "success": bool,
+        "html_content": "string",
+        "content_length": int
+    }
+    """
+    try:
+        data = request.get_json() or {}
+        target_url = data.get('target_url')
+
+        result = get_html_from_nm_prc(target_url)
+        return jsonify(result), 200
+
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 400
+    except FileNotFoundError as e:
+        logger.error(f"Cookie file not found: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 401
+    except RuntimeError as e:
+        logger.error(f"Session error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 401
+    except Exception as e:
+        logger.error(f"Error fetching HTML: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": f"Error fetching HTML: {str(e)}"
         }), 500
 
 
