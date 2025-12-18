@@ -8,7 +8,7 @@ from docket_entry_analyzer import analyze_docket_entry
 from docket_manager import get_dockets
 from fcc_html_scraper import process_fcc_scraper
 from mergers_manager import get_all_mergers
-from nm_prc_service import login_nm_prc, get_html_from_nm_prc
+from nm_prc_service import login_nm_prc, get_html_from_nm_prc, extract_pdf_text_from_nm_prc
 import logging
 import os
 import asyncio
@@ -43,6 +43,7 @@ def home():
             "/nm-prc-fetch": "POST - Fetch HTML from NM PRC eDocket system (requires authentication)",
             "/nm-prc-login": "POST - Login to NM PRC eDocket system and save cookies",
             "/nm-prc-get-html": "POST - Fetch HTML from protected NM PRC eDocket URL (requires login first)",
+            "/nm-prc-extract-pdf": "POST - Fetch PDF from protected NM PRC eDocket URL and extract text (requires login first)",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -550,6 +551,57 @@ def nm_prc_get_html():
         return jsonify({
             "success": False,
             "error": f"Error fetching HTML: {str(e)}"
+        }), 500
+
+
+@app.route('/nm-prc-extract-pdf', methods=['POST'])
+def nm_prc_extract_pdf():
+    """
+    Fetch PDF from a protected NM PRC eDocket URL and extract text.
+
+    Request body:
+    {
+        "pdf_url": "string (required) - Full URL to the PDF file"
+    }
+
+    Returns:
+    {
+        "success": bool,
+        "text": "string",
+        "page_count": int,
+        "text_length": int
+    }
+    """
+    try:
+        data = request.get_json() or {}
+        pdf_url = data.get('pdf_url')
+
+        result = extract_pdf_text_from_nm_prc(pdf_url)
+        return jsonify(result), 200
+
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 400
+    except FileNotFoundError as e:
+        logger.error(f"Cookie file not found: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 401
+    except RuntimeError as e:
+        logger.error(f"Session error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 401
+    except Exception as e:
+        logger.error(f"Error extracting PDF text: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": f"Error extracting PDF text: {str(e)}"
         }), 500
 
 

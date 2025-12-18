@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Optional
+from io import BytesIO
 import requests
 from http.cookiejar import LWPCookieJar
+from PyPDF2 import PdfReader
 
 from nm_prc_cookie import EDocketSessionManager, EDocketConfig
 
@@ -110,3 +112,72 @@ def get_html_from_nm_prc(target_url: str) -> Dict:
         "html_content": html_content,
         "content_length": len(html_content)
     }
+
+
+def extract_pdf_text_from_nm_prc(pdf_url: str) -> Dict:
+    """
+    Fetch PDF from a protected NM PRC eDocket URL and extract text.
+
+    Args:
+        pdf_url: Full URL to the PDF file
+
+    Returns:
+        Dictionary with success status, extracted text, page count, and text length
+
+    Raises:
+        ValueError: If pdf_url is missing or invalid PDF
+        FileNotFoundError: If cookie file doesn't exist (session expired)
+        requests.exceptions.RequestException: If request fails
+    """
+    if not pdf_url:
+        raise ValueError("pdf_url is required")
+
+    # Load session with saved cookies
+    s = load_session_with_cookies()
+
+    # Fetch the PDF
+    r = s.get(pdf_url, timeout=60, allow_redirects=True, stream=True)
+    r.raise_for_status()
+
+    # Check if we were redirected to login (session expired)
+    content_type = r.headers.get('Content-Type', '').lower()
+    if 'text/html' in content_type and ("txtUserName" in r.text and "btnLogin" in r.text):
+        raise RuntimeError(
+            "Session expired. Please login again using /nm-prc-login endpoint."
+        )
+
+    # Get PDF content
+    pdf_content = r.content
+
+    # Validate PDF header
+    if not pdf_content.startswith(b'%PDF'):
+        raise ValueError(
+            "Invalid PDF file - content doesn't start with PDF header")
+
+    # Extract text from PDF
+    try:
+        pdf_file = BytesIO(pdf_content)
+        pdf_reader = PdfReader(pdf_file)
+
+        text_content = []
+        for page_num, page in enumerate(pdf_reader.pages):
+            try:
+                text = page.extract_text()
+                if text:
+                    text_content.append(text)
+            except Exception as page_error:
+                # Continue with other pages if one fails
+                continue
+
+        full_text = "\n\n".join(text_content)
+        page_count = len(pdf_reader.pages)
+
+        return {
+            "success": True,
+            "text": full_text,
+            "page_count": page_count,
+            "text_length": len(full_text),
+            "url": pdf_url
+        }
+    except Exception as e:
+        raise ValueError(f"Error extracting text from PDF: {str(e)}")
