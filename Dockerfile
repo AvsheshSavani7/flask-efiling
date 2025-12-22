@@ -42,4 +42,5 @@ EXPOSE 10000
 ENV DISPLAY=:99
 ENV PORT=10000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:10000", "--workers", "3", "--timeout", "300", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:10000", "--workers", "1", "--threads", "4", "--timeout", "1800", "--keep-alive", "5", "app:app"]
+
