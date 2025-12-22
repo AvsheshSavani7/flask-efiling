@@ -536,11 +536,13 @@ Target length: 1000-2000 words depending on complexity."""
 
             except Exception as direct_error:
                 error_str = str(direct_error)
+                print("err", error_str)
                 # Check if it's a token limit error
-                if "context_length_exceeded" in error_str or "tokens exceed" in error_str.lower():
+                if "context_length_exceeded" in error_str or "tokens exceed" in error_str.lower() or "string too long" in error_str.lower():
                     print(
                         f"⚠ Direct API call failed due to token limit: {error_str}")
                     print("Switching to file upload approach...")
+
                     comprehensive_summary_data = _generate_comprehensive_summary_with_file_upload(
                         openai_client=openai_client,
                         full_text=full_text,
