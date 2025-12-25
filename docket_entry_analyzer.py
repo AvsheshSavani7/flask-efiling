@@ -809,6 +809,7 @@ Be factual and concise. Focus on substantive content, not procedural details."""
             "cost": tier3_cost
         },
         "total_cost": total_cost,
+        "comprehensive_summary": comprehensive_summary_data,
         "timestamp": datetime.now().isoformat(),
         "database_updated": True
     }
