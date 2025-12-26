@@ -290,6 +290,17 @@ def analyze_docket_entry(
         if existing_entry:
             existing_entry.pop("_id", None)
             # Entry already exists, skip it and don't return it
+            # Extract comprehensive_summary.summary if it's an object, otherwise use the value directly
+            comprehensive_summary_obj = existing_entry.get(
+                "comprehensive_summary")
+            comprehensive_summary_text = None
+            if comprehensive_summary_obj:
+                if isinstance(comprehensive_summary_obj, dict):
+                    comprehensive_summary_text = comprehensive_summary_obj.get(
+                        "summary")
+                elif isinstance(comprehensive_summary_obj, str):
+                    comprehensive_summary_text = comprehensive_summary_obj
+
             return {
                 "doc_number": doc_number,
                 "status": "skipped",
@@ -297,7 +308,7 @@ def analyze_docket_entry(
                 "metadata": existing_entry.get("metadata", {}),
                 "tier2_analysis": existing_entry.get("tier2_analysis", {}),
                 "tier3_risk_assessment": existing_entry.get("tier3_risk_assessment", {}),
-                "comprehensive_summary": existing_entry.get("comprehensive_summary", {}),
+                "comprehensive_summary": comprehensive_summary_text,
             }
 
         # Filter entries by docket_type and docket_number if provided
@@ -777,7 +788,7 @@ Be factual and concise. Focus on substantive content, not procedural details."""
 
     # Add comprehensive summary field if generated
     if comprehensive_summary_data:
-        new_entry["comprehensive_summary"] = comprehensive_summary_data if comprehensive_summary_data else full_text
+        new_entry["comprehensive_summary"] = comprehensive_summary_data["summary"] if comprehensive_summary_data else full_text
 
     collection.insert_one(new_entry)
 
@@ -810,14 +821,14 @@ Be factual and concise. Focus on substantive content, not procedural details."""
             "cost": tier3_cost
         },
         "total_cost": total_cost,
-        "comprehensive_summary": comprehensive_summary_data,
+        "comprehensive_summary": comprehensive_summary_data["summary"] if comprehensive_summary_data else full_text,
         "timestamp": datetime.now().isoformat(),
         "database_updated": True
     }
 
     # Add comprehensive summary to result if generated
     if comprehensive_summary_data:
-        result["comprehensive_summary"] = comprehensive_summary_data if comprehensive_summary_data else full_text
+        result["comprehensive_summary"] = comprehensive_summary_data["summary"] if comprehensive_summary_data else full_text
 
     return result
 
