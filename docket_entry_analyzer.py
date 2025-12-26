@@ -777,7 +777,7 @@ Be factual and concise. Focus on substantive content, not procedural details."""
 
     # Add comprehensive summary field if generated
     if comprehensive_summary_data:
-        new_entry["comprehensive_summary"] = comprehensive_summary_data
+        new_entry["comprehensive_summary"] = comprehensive_summary_data if comprehensive_summary_data else full_text
 
     collection.insert_one(new_entry)
 
