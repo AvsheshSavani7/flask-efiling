@@ -297,6 +297,7 @@ def analyze_docket_entry(
                 "metadata": existing_entry.get("metadata", {}),
                 "tier2_analysis": existing_entry.get("tier2_analysis", {}),
                 "tier3_risk_assessment": existing_entry.get("tier3_risk_assessment", {}),
+                "comprehensive_summary": existing_entry.get("comprehensive_summary", {}),
             }
 
         # Filter entries by docket_type and docket_number if provided
@@ -816,7 +817,7 @@ Be factual and concise. Focus on substantive content, not procedural details."""
 
     # Add comprehensive summary to result if generated
     if comprehensive_summary_data:
-        result["comprehensive_summary"] = comprehensive_summary_data
+        result["comprehensive_summary"] = comprehensive_summary_data if comprehensive_summary_data else full_text
 
     return result
 
