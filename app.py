@@ -198,6 +198,7 @@ def analyze_docket():
         doc_number = data.get('doc_number')
         text = data.get('text')
         metadata = data.get('metadata')  # Optional metadata
+        test_mode = data.get('test_mode', False)
 
         if not doc_number:
             return jsonify({
@@ -212,7 +213,7 @@ def analyze_docket():
             }), 400
 
         # Call the analyzer function
-        result = analyze_docket_entry(doc_number, text, metadata)
+        result = analyze_docket_entry(doc_number, text, metadata, test_mode)
 
         # Check if there was an error
         if "error" in result:

@@ -138,6 +138,12 @@ The full document content is in the attached file. Please read it and create a C
 Be thorough and detailed. Preserve specific facts, numbers, names, and legal arguments. 
 This summary must contain enough detail for downstream analysis of legal significance and risk assessment.
 
+In summary with other details, you must include the following:
+- Filing: Deal Name or Parties
+- Type: filing type
+- Summary: 1-2 sentence content summary
+- Relevance: High/Medium/Low - short justification
+
 Target length: 1000-2000 words depending on complexity.""",
                     "attachments": [
                         {
@@ -246,7 +252,8 @@ Target length: 1000-2000 words depending on complexity.""",
 def analyze_docket_entry(
     doc_number: str,
     full_text: str,
-    metadata: Optional[Dict[str, str]] = None
+    metadata: Optional[Dict[str, str]] = None,
+    test_mode: bool = False
 ) -> Dict[str, Any]:
     """
     Analyze a docket entry by document number and full text.
@@ -256,7 +263,7 @@ def analyze_docket_entry(
         full_text: The full text content of the document
         metadata: Optional metadata dict with keys: date, document_type, 
                  additional_info, on_behalf_of, docket_number
-
+        test_mode: Whether to run in test mode
     Returns:
         Dictionary containing analysis results with tier1, tier2 and tier3 responses
     """
@@ -287,7 +294,7 @@ def analyze_docket_entry(
         existing_entry = collection.find_one(
             {"metadata.document_id": doc_number})
 
-        if existing_entry:
+        if existing_entry and not test_mode:
             existing_entry.pop("_id", None)
             # Entry already exists, skip it and don't return it
             # Extract comprehensive_summary.summary if it's an object, otherwise use the value directly
@@ -506,6 +513,12 @@ Create a COMPREHENSIVE SUMMARY that will be used for further legal analysis. Inc
 
 Be thorough and detailed. Preserve specific facts, numbers, names, and legal arguments. 
 This summary must contain enough detail for downstream analysis of legal significance and risk assessment.
+
+In summary with other details, you must include the following:
+- Filing: Deal Name or Parties
+- Type: filing type
+- Summary: 1-2 sentence content summary
+- Relevance: High/Medium/Low - short justification
 
 Target length: 1000-2000 words depending on complexity."""
 
@@ -790,7 +803,12 @@ Be factual and concise. Focus on substantive content, not procedural details."""
     if comprehensive_summary_data:
         new_entry["comprehensive_summary"] = comprehensive_summary_data["summary"] if comprehensive_summary_data else full_text
 
-    collection.insert_one(new_entry)
+    if not test_mode:
+        try:
+            collection.insert_one(new_entry)
+            print(f"✓ Saved entry to MongoDB")
+        except Exception as e:
+            print(f"Warning: Failed to save to MongoDB: {str(e)}")
 
     result = {
         "doc_number": doc_number,
