@@ -498,6 +498,35 @@ def extract_text_from_document(file_content, file_url):
                     "PDF extraction not available (PyPDF2 not installed)")
                 return "PDF extraction not available (PyPDF2 not installed)"
 
+        # Check if it's a DOCX by content signature (starts with PK\x03\x04 - ZIP format)
+        # DOCX files are ZIP archives containing XML files
+        if file_content[:4] == b'PK\x03\x04':
+            logger.info(f"Detected DOCX by content signature for {file_url}")
+            if DOCX_AVAILABLE:
+                try:
+                    doc = docx.Document(BytesIO(file_content))
+                    text = ""
+                    for paragraph in doc.paragraphs:
+                        if paragraph.text:
+                            text += paragraph.text + "\n"
+                    extracted_text = text.strip()
+                    if extracted_text:
+                        logger.info(
+                            f"Successfully extracted {len(extracted_text)} characters from DOCX")
+                        return extracted_text
+                    else:
+                        logger.warning(
+                            f"DOCX extraction returned empty text for {file_url}")
+                        return "DOCX text extraction returned empty"
+                except Exception as e:
+                    logger.error(
+                        f"Error extracting text from DOCX: {str(e)}", exc_info=True)
+                    return f"Error extracting DOCX text: {str(e)}"
+            else:
+                logger.warning(
+                    "DOCX extraction not available (python-docx not installed)")
+                return "DOCX extraction not available (python-docx not installed)"
+
         # First, check if content is HTML (error page)
         try:
             content_str = file_content.decode('utf-8', errors='ignore')
@@ -908,6 +937,9 @@ def process_fcc_scraper(url, document_id, wait_time=10):
                         if doc_content.startswith(b'%PDF'):
                             logger.info(
                                 f"Document {doc_idx + 1} is a PDF (detected by content)")
+                        elif doc_content[:4] == b'PK\x03\x04':
+                            logger.info(
+                                f"Document {doc_idx + 1} is a DOCX/ZIP file (detected by content signature)")
                         else:
                             logger.info(
                                 f"Document {doc_idx + 1} content type: first 50 bytes = {doc_content[:50]}")
