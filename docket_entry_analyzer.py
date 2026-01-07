@@ -323,7 +323,35 @@ def analyze_docket_entry(
         if docket_type and docket_type != "N/A":
             query_filter["metadata.docket_type"] = docket_type
         if docket_number and docket_number != "N/A":
-            query_filter["metadata.docket_number"] = docket_number
+            # Handle both string and number types in database
+            # MongoDB is type-sensitive, so we need to check both string and numeric versions
+            docket_number_values = [docket_number]
+
+            # Try to convert to number if it's a numeric string
+            try:
+                if isinstance(docket_number, str):
+                    # Try integer first
+                    try:
+                        docket_number_values.append(int(docket_number))
+                    except ValueError:
+                        pass
+                    # Try float if int fails
+                    try:
+                        docket_number_values.append(float(docket_number))
+                    except ValueError:
+                        pass
+                elif isinstance(docket_number, (int, float)):
+                    # If it's already a number, also check string version
+                    docket_number_values.append(str(docket_number))
+            except (ValueError, TypeError):
+                pass
+
+            # Use $in to match any of the possible type variations
+            if len(docket_number_values) > 1:
+                query_filter["metadata.docket_number"] = {
+                    "$in": docket_number_values}
+            else:
+                query_filter["metadata.docket_number"] = docket_number
 
         # Sort by metadata.date for chronological order within docket_type (older to newer)
         all_entries = list(collection.find(
