@@ -405,6 +405,9 @@ def monitor_brazil_deals(headless=True):
     """
     print("=" * 80)
     print("🔍 CADE Brazil Deal Update Monitor")
+    print(f"🖥️  Environment: {'HEADLESS' if headless else 'VISIBLE'}")
+    print(
+        f"🔑 2Captcha API Key: {'SET' if os.getenv('2CAPTCHA_API_KEY') or os.getenv('CAPTCHA_API_KEY') else 'NOT SET'}")
     print("=" * 80)
 
     # Get all deals with Brazil node
@@ -474,7 +477,18 @@ def monitor_brazil_deals(headless=True):
 
                 # Get existing table records
                 existing_records = brazil_data.get("table_records", [])
-                print(f"📊 Existing table records: {len(existing_records)}")
+                print(
+                    f"📊 Existing table records in MongoDB: {len(existing_records)}")
+
+                # DETAILED LOGGING - Show what's in MongoDB
+                if existing_records:
+                    print(f"📝 Existing records in MongoDB:")
+                    for rec in existing_records:
+                        doc_id = rec.get("documento_processo") or rec.get(
+                            "document_process", "N/A")
+                        doc_date = rec.get("data_documento") or rec.get(
+                            "document_date", "N/A")
+                        print(f"   - {doc_id} ({doc_date})")
 
                 # Scrape current table records from detail page
                 print(f"🌐 Scraping current table records from detail page...")
@@ -483,8 +497,21 @@ def monitor_brazil_deals(headless=True):
                         page, context, detail_url)
                     print(
                         f"📊 Current table records found: {len(current_records)}")
+
+                    # DETAILED LOGGING - Show what was actually scraped
+                    if current_records:
+                        print(f"📝 Scraped records details:")
+                        for rec in current_records:
+                            doc_id = rec.get("documento_processo", "N/A")
+                            doc_date = rec.get("data_documento", "N/A")
+                            print(f"   - {doc_id} ({doc_date})")
+                    else:
+                        print(f"⚠️ WARNING: No records scraped from detail page!")
+
                 except Exception as e:
                     print(f"❌ Error scraping detail page: {e}")
+                    import traceback
+                    traceback.print_exc()
                     continue
 
                 # Compare records
