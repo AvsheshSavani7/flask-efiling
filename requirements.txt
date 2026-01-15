@@ -16,3 +16,6 @@ anthropic==0.40.0
 pymongo==4.10.1
 openai==1.109.1
 flask_cors==6.0.1
+scrapfly-sdk
+python-dotenv==1.0.1
+
