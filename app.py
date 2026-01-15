@@ -9,18 +9,35 @@ from docket_manager import get_dockets
 from fcc_html_scraper import process_fcc_scraper
 from mergers_manager import get_all_mergers
 from nm_prc_service import login_nm_prc, get_html_from_nm_prc, extract_pdf_text_from_nm_prc
+from cade_public_notice_brazil import main as cade_main
+from cade_brazil_update_monitor import monitor_brazil_deals
+from mongodb_connection import init_mongodb_connection, close_mongodb_connection, is_connected
 import logging
 import os
 import asyncio
 import socket
 import subprocess
 import platform
+import datetime
+import atexit
+import threading
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# Initialize MongoDB connection on server startup
+logger.info("Initializing MongoDB connection...")
+mongodb_success, mongodb_message = init_mongodb_connection()
+if mongodb_success:
+    logger.info(f"✓ {mongodb_message}")
+else:
+    logger.warning(f"⚠ {mongodb_message} - Some features may not work")
+
+# Register cleanup function to close MongoDB connection on server shutdown
+atexit.register(close_mongodb_connection)
 
 # Configure CORS to allow requests from http://localhost:8080
 CORS(app, origins=["http://localhost:8080",
@@ -44,6 +61,8 @@ def home():
             "/nm-prc-login": "POST - Login to NM PRC eDocket system and save cookies",
             "/nm-prc-get-html": "POST - Fetch HTML from protected NM PRC eDocket URL (requires login first)",
             "/nm-prc-extract-pdf": "POST - Fetch PDF from protected NM PRC eDocket URL and extract text (requires login first)",
+            "/brazil-scraper": "GET - Scrape CADE public notices and match with deals (date range: yesterday to today, query param: headless)",
+            "/cade-brazil-monitor": "GET - Monitor existing Brazil deals for new table records updates (query param: headless)",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -322,9 +341,11 @@ def fetch_dockets():
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
+    mongodb_status = "connected" if is_connected() else "disconnected"
     return jsonify({
         "status": "healthy",
-        "service": "Minnesota E-filing Scraper API"
+        "service": "Minnesota E-filing Scraper API",
+        "mongodb": mongodb_status
     }), 200
 
 
@@ -607,6 +628,128 @@ def nm_prc_extract_pdf():
         return jsonify({
             "success": False,
             "error": f"Error extracting PDF text: {str(e)}"
+        }), 500
+
+
+@app.route('/brazil-scraper', methods=['GET'])
+def brazil_scraper():
+    """
+    Scrape CADE public notices and match with deals.
+    Date range is hardcoded: yesterday to today.
+    Process runs in background - returns immediately.
+
+    Query parameters:
+        headless: string (optional, "true" or "false", default: "true") - Run browser in headless mode
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        # Hardcode date range: yesterday to today
+        end_date = datetime.datetime.now()
+        start_date = end_date - datetime.timedelta(days=1)
+
+        # Get headless parameter from query
+        headless_str = request.args.get('headless', 'true')
+        headless = headless_str.lower() in ('true', '1', 'yes')
+
+        # Run the scraping process in background thread
+        def run_scraper():
+            try:
+                logger.info(
+                    f"Starting CADE scraper in background (date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')})")
+                result = cade_main(start_date=start_date,
+                                   end_date=end_date, headless=headless)
+                if result.get("success"):
+                    logger.info(
+                        f"CADE scraper completed successfully. Found {result.get('total_matched', 0)} matches.")
+                else:
+                    logger.warning(
+                        f"CADE scraper completed with errors: {result.get('error', 'Unknown error')}")
+            except Exception as e:
+                logger.error(f"Error in background CADE scraper: {str(e)}")
+
+        # Start background thread
+        thread = threading.Thread(target=run_scraper, daemon=True)
+        thread.start()
+
+        # Return immediate response
+        return jsonify({
+            "success": True,
+            "message": "Process started in background",
+            "status": "running",
+            "date_range": {
+                "start": start_date.strftime("%Y-%m-%d"),
+                "end": end_date.strftime("%Y-%m-%d")
+            }
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting CADE scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/cade-brazil-monitor', methods=['GET'])
+def brazil_monitor():
+    """
+    Monitor existing Brazil deals for new table records updates.
+    Process runs in background - returns immediately.
+
+    Query parameters:
+        headless: string (optional, "true" or "false", default: "true") - Run browser in headless mode
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        # Get headless parameter from query
+        headless_str = request.args.get('headless', 'true')
+        headless = headless_str.lower() in ('true', '1', 'yes')
+
+        # Run the monitoring process in background thread
+        def run_monitor():
+            try:
+                logger.info("Starting CADE Brazil deal monitor in background")
+                result = monitor_brazil_deals(headless=headless)
+                if result.get("success"):
+                    logger.info(
+                        f"CADE Brazil monitor completed. Checked {result.get('total_deals_checked', 0)} deals, "
+                        f"found updates in {result.get('deals_with_updates', 0)} deals "
+                        f"({result.get('total_new_records', 0)} new records total).")
+                else:
+                    logger.warning(
+                        f"CADE Brazil monitor completed with errors: {result.get('error', 'Unknown error')}")
+            except Exception as e:
+                logger.error(
+                    f"Error in background CADE Brazil monitor: {str(e)}")
+
+        # Start background thread
+        thread = threading.Thread(target=run_monitor, daemon=True)
+        thread.start()
+
+        # Return immediate response
+        return jsonify({
+            "success": True,
+            "message": "Brazil deal monitoring process started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting CADE Brazil monitor: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
         }), 500
 
 
