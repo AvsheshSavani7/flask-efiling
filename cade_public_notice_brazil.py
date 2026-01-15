@@ -842,6 +842,15 @@ def solve_image_captcha(page, api_key=None):
         else:
             print("📥 Downloading CAPTCHA image...")
             try:
+                # Convert relative URL to absolute URL if needed
+                if not img_src.startswith("http://") and not img_src.startswith("https://"):
+                    # Get the page's current URL to build absolute URL
+                    page_url = page.url
+                    # Use urljoin to properly combine base URL with relative path
+                    from urllib.parse import urljoin
+                    img_src = urljoin(page_url, img_src)
+                    print(f"📝 Converted to absolute URL: {img_src[:100]}...")
+
                 img_response = requests.get(img_src, timeout=10)
                 if img_response.status_code != 200:
                     print(
