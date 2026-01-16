@@ -11,6 +11,8 @@ from mergers_manager import get_all_mergers
 from nm_prc_service import login_nm_prc, get_html_from_nm_prc, extract_pdf_text_from_nm_prc
 from cade_public_notice_brazil import main as cade_main
 from cade_brazil_update_monitor import monitor_brazil_deals
+from samr_public_notice_db import main as samr_main
+from samr_conditional_approval_playwright import main as samr_conditional_main
 from mongodb_connection import init_mongodb_connection, close_mongodb_connection, is_connected
 import logging
 import os
@@ -63,6 +65,8 @@ def home():
             "/nm-prc-extract-pdf": "POST - Fetch PDF from protected NM PRC eDocket URL and extract text (requires login first)",
             "/brazil-scraper": "GET - Scrape CADE public notices and match with deals (date range: yesterday to today, query param: headless)",
             "/cade-brazil-monitor": "GET - Monitor existing Brazil deals for new table records updates (query param: headless)",
+            "/samr-public-scraper": "GET - Scrape SAMR China public notices and match with deals (query param: headless)",
+            "/samr-conditional-scraper": "GET - Scrape SAMR China conditional approval notices and match with deals (query params: headless, use_html)",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -747,6 +751,134 @@ def brazil_monitor():
 
     except Exception as e:
         logger.error(f"Error starting CADE Brazil monitor: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/samr-public-scraper', methods=['GET'])
+def samr_public_scraper():
+    """
+    Scrape SAMR China public notices and match with deals.
+    Extracts records from SAMR website with cutoff date filtering.
+    Process runs in background - returns immediately.
+
+    Query parameters:
+        headless: string (optional, "true" or "false", default: "true") - Run browser in headless mode
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        # Get query parameters
+        headless_str = request.args.get('headless', 'true')
+        headless = headless_str.lower() in ('true', '1', 'yes')
+
+        # Run the scraping process in background thread
+        def run_scraper():
+            try:
+                logger.info(
+                    f"Starting SAMR public notice scraper in background (headless={headless})")
+                result = samr_main(headless=headless)
+                if result.get("success"):
+                    logger.info(
+                        f"SAMR scraper completed successfully. Extracted {result.get('total_extracted', 0)} records, "
+                        f"found {result.get('total_matched', 0)} matches.")
+                else:
+                    logger.warning(
+                        f"SAMR scraper completed with errors: {result.get('error', 'Unknown error')}")
+            except Exception as e:
+                logger.error(f"Error in background SAMR scraper: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        # Start background thread
+        thread = threading.Thread(target=run_scraper, daemon=True)
+        thread.start()
+
+        # Return immediate response
+        return jsonify({
+            "success": True,
+            "message": "SAMR public notice scraping process started in background",
+            "status": "running",
+            "headless": headless
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting SAMR scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/samr-conditional-scraper', methods=['GET'])
+def samr_conditional_scraper():
+    """
+    Scrape SAMR China conditional approval notices and match with deals.
+    Extracts records from SAMR website with cutoff date filtering.
+    Process runs in background - returns immediately.
+
+    Query parameters:
+        headless: string (optional, "true" or "false", default: "true") - Run browser in headless mode
+        use_html: string (optional, "true" or "false", default: "false") - Extract from existing HTML files instead of scraping
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        # Get query parameters
+        headless_str = request.args.get('headless', 'true')
+        headless = headless_str.lower() in ('true', '1', 'yes')
+
+        use_html_str = request.args.get('use_html', 'false')
+        use_html = use_html_str.lower() in ('true', '1', 'yes')
+
+        # Run the scraping process in background thread
+        def run_scraper():
+            try:
+                logger.info(
+                    f"Starting SAMR conditional approval scraper in background (headless={headless}, use_html={use_html})")
+                result = samr_conditional_main(
+                    use_existing_html=use_html, headless=headless)
+                if result.get("success"):
+                    logger.info(
+                        f"SAMR conditional approval scraper completed successfully. Extracted {result.get('total_extracted', 0)} records, "
+                        f"found {result.get('total_matched', 0)} matches.")
+                else:
+                    logger.warning(
+                        f"SAMR conditional approval scraper completed with errors: {result.get('error', 'Unknown error')}")
+            except Exception as e:
+                logger.error(
+                    f"Error in background SAMR conditional approval scraper: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        # Start background thread
+        thread = threading.Thread(target=run_scraper, daemon=True)
+        thread.start()
+
+        # Return immediate response
+        return jsonify({
+            "success": True,
+            "message": "SAMR conditional approval scraping process started in background",
+            "status": "running",
+            "headless": headless,
+            "use_html": use_html
+        }), 200
+
+    except Exception as e:
+        logger.error(
+            f"Error starting SAMR conditional approval scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
