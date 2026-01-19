@@ -7,6 +7,7 @@ import json
 import os
 from openai import OpenAI
 from bs4 import BeautifulSoup
+from tqdm import tqdm
 import re
 from bson import ObjectId
 from mongodb_connection import get_deals_collection, get_mongo_client, is_connected
@@ -14,14 +15,19 @@ from html import escape as escape_html
 
 # Configuration
 # CUTOFF_DATE: Extract records >= this date. Stop when records are < this date.
-# Example: If CUTOFF_DATE = 2026-01-15, extract 2026-01-15 and newer, stop at 2026-01-14
-CUTOFF_DATE = datetime.datetime.now().replace(
-    hour=0, minute=0, second=0, microsecond=0)
-BASE_URL = "https://www.samr.gov.cn/fldes/tzgg/ftj/"
-EXTRACTED_RECORDS_JSON = "samr_conditional_extracted_records.json"
-MATCHED_OUTPUT_JSON = "samr_conditional_matched_deals.json"
+# Example: If CUTOFF_DATE = 2025-02-15, extract 2025-02-15 and newer, stop at 2025-02-14
+# CUTOFF_DATE = datetime.datetime.now().replace(
+#     hour=0, minute=0, second=0, microsecond=0)
+CUTOFF_DATE = CUTOFF_DATE = datetime.datetime.strptime(
+    "2025-12-26", "%Y-%m-%d")
+BASE_URL = "https://www.samr.gov.cn/fldes/ajgs/wtjjz/"
+OUTPUT_JSON = "deals_with_unconditional.json"
+EXTRACTED_RECORDS_JSON = "samr_unconditional_extracted_records.json"
+MATCHED_OUTPUT_JSON = "samr_unconditional_matched_deals.json"
+DEALS_PATH = "deals.json"
+PROMPT_LOG_PATH = "gpt_prompts.log"
 ENV_PATH = ".env"
-HTML_OUTPUT_DIR = "samr_conditional_html_pages"
+HTML_OUTPUT_DIR = "samr_unconditional_html_pages"
 
 # Create HTML output directory if it doesn't exist
 os.makedirs(HTML_OUTPUT_DIR, exist_ok=True)
@@ -39,18 +45,21 @@ deals = []
 # Store matched results
 matched_data = []
 
+# Normalize company names
+all_companies = set()
+
 
 def normalize_company(name):
     """Normalize company name for matching."""
     return name.lower().replace(",", "").replace(" inc.", "").replace(" ltd.", "").replace(" plc", "").strip()
 
 
-def get_deals_from_mongodb(include_conditional=False):
+def get_deals_from_mongodb(include_samr_unconditional=False):
     """
     Fetch deals from MongoDB collection 'deals' using global connection.
 
     Args:
-        include_conditional: If False, only return deals that don't have a 'samr_conditional' node
+        include_samr_unconditional: If False, only return deals that don't have a 'samr_unconditional' node
 
     Returns:
         List of deal dictionaries
@@ -63,10 +72,10 @@ def get_deals_from_mongodb(include_conditional=False):
             print("⚠️ MongoDB connection not available. Deals collection not accessible.")
             return []
 
-        # Build query - exclude deals with 'samr_conditional' node if include_conditional is False
+        # Build query - exclude deals with 'samr_unconditional' node if include_samr_unconditional is False
         query = {}
-        if not include_conditional:
-            query = {"samr_conditional": {"$exists": False}}
+        if not include_samr_unconditional:
+            query = {"samr_unconditional": {"$exists": False}}
 
         # Fetch documents from the deals collection
         all_deals = list(collection.find(query))
@@ -77,7 +86,7 @@ def get_deals_from_mongodb(include_conditional=False):
                 deal["deal_id"] = str(deal["_id"])
                 deal.pop("_id", None)
 
-        filter_msg = "without 'samr_conditional' node" if not include_conditional else "all"
+        filter_msg = "without 'samr_unconditional' node" if not include_samr_unconditional else "all"
         print(f"✅ Fetched {len(all_deals)} deals from MongoDB ({filter_msg})")
         return all_deals
 
@@ -88,22 +97,34 @@ def get_deals_from_mongodb(include_conditional=False):
         return []
 
 
-def load_deals(include_conditional=False):
+def load_deals(include_samr_unconditional=False):
     """
     Load deals from MongoDB. Can be called multiple times to refresh.
 
     Args:
-        include_conditional: If False, only load deals that don't have a 'samr_conditional' node
+        include_samr_unconditional: If False, only load deals that don't have a 'samr_unconditional' node
     """
-    global deals
-    deals = get_deals_from_mongodb(include_conditional=include_conditional)
+    global deals, all_companies
+    deals = get_deals_from_mongodb(
+        include_samr_unconditional=include_samr_unconditional)
     print(f"📊 Loaded {len(deals)} deals from MongoDB")
+
+    # Update all_companies set
+    all_companies = set()
+    for d in deals:
+        acquirer = d.get("acquirer") or d.get("acquire_name", "")
+        target = d.get("target") or d.get("target_name", "")
+        if acquirer:
+            all_companies.add(normalize_company(acquirer))
+        if target:
+            all_companies.add(normalize_company(target))
+
     return deals
 
 
-def detail_url_exists_in_conditional_data(detail_url):
+def detail_url_exists_in_samr_data(detail_url):
     """
-    Check if detail_url already exists in any deal's samr_conditional data.
+    Check if detail_url already exists in any deal's samr_unconditional data.
 
     Args:
         detail_url: The detail URL to check
@@ -116,8 +137,13 @@ def detail_url_exists_in_conditional_data(detail_url):
         if collection is None:
             return False
 
-        # Search for deals where samr_conditional.url matches
-        query = {"samr_conditional.url": detail_url}
+        # Search for deals where samr_unconditional.url or samr_unconditional.approval_link matches
+        query = {
+            "$or": [
+                {"samr_unconditional.url": detail_url},
+                {"samr_unconditional.approval_link": detail_url}
+            ]
+        }
         existing_deal = collection.find_one(query)
 
         if existing_deal:
@@ -142,11 +168,11 @@ def translate_to_english(text):
             "dt": "t",
             "q": text,
         }
-        response = requests.get(url, params=params, timeout=5)
+        response = requests.get(url, params=params)
         if response.status_code == 200:
             return response.json()[0][0][0]
     except Exception as e:
-        print(f"⚠️ Translation failed for: {text[:50]}... → {e}")
+        print(f"⚠️ Translation failed for: {text} → {e}")
     return "[Translation failed]"
 
 # Extract records from HTML
@@ -161,10 +187,19 @@ def extract_records_from_html(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
 
     # Find all list items in the page content
-    items = soup.select("div.page-content ul li.content-3-left-text")
+    items = soup.select("div.page-content ul li")
 
     for item in items:
         try:
+            # Extract date from first div
+            divs = item.find_all("div")
+            if not divs:
+                continue
+
+            date_text = divs[0].get_text(strip=True)
+            if not date_text:
+                continue
+
             # Extract link and title
             link = item.find("a")
             if not link:
@@ -182,10 +217,6 @@ def extract_records_from_html(html_content):
                 base_domain = "https://www.samr.gov.cn"
                 url = requests.compat.urljoin(base_domain, url)
 
-            # Extract date
-            date_div = item.find("div", class_="contentRight01time")
-            date_str = date_div.get_text(strip=True) if date_div else ""
-
             # Translate title (using cleaned version)
             title_en = translate_to_english(title_cn)
 
@@ -193,114 +224,17 @@ def extract_records_from_html(html_content):
                 "title_cn": title_cn,
                 "title_en": title_en,
                 "url": url,
-                "date": date_str
+                "date": date_text
             }
 
             records.append(record)
-            print(f"📋 Extracted: {date_str} - {title_en}")
+            print(f"📋 Extracted: {date_text} - {title_en}")
 
         except Exception as e:
             print(f"⚠️ Error extracting record: {e}")
             continue
 
     return records
-
-# Match company with LLM
-
-
-def match_deal_with_llm(title_en, title_cn):
-    """Match an English translated title with deals using LLM"""
-    global deals
-
-    # Reload deals if list is empty (connection might not have been ready earlier)
-    # Only load deals without 'samr_conditional' node to avoid re-processing
-    if not deals:
-        print("⚠️ Deals list is empty, reloading from MongoDB (excluding deals with 'samr_conditional' node)...")
-        load_deals(include_conditional=False)
-
-    # Build deals list with all relevant information
-    deals_list = []
-    for deal in deals:
-        deal_info = {
-            "deal_id": deal.get("deal_id", ""),
-        }
-
-        # Handle both old format (target/acquirer) and new format (target_name/acquire_name)
-        target = deal.get("target") or deal.get("target_name", "")
-        acquirer = deal.get("acquirer") or deal.get("acquire_name", "")
-
-        if target:
-            deal_info["target"] = target
-        if acquirer:
-            deal_info["acquirer"] = acquirer
-
-        if target or acquirer:
-            deals_list.append(deal_info)
-
-    if not deals_list:
-        print("⚠️ No deals with company names found")
-        return "None"
-
-    # Build structured prompt with deal information
-    deals_text = "\n".join([
-        f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {d.get('target', 'N/A')} | Acquirer: {d.get('acquirer', 'N/A')}"
-        for d in deals_list
-    ])
-
-    prompt = f"""
-You are an M&A deal analyst. Given the translated title of a Chinese conditional approval notice, determine whether it explicitly relates to any of the companies listed below.
-
-DEALS TO MATCH:
-{deals_text}
-
-TITLE (English translation):
-{title_en}
-
-TITLE (Original Chinese):
-{title_cn}
-
-INSTRUCTIONS:
-1. Compare the title text with BOTH Target and Acquirer names in the deals list.
-2. Look for EXACT matches, partial matches, or variations of company names.
-3. Consider that the title might be:
-   - The full company name
-   - A department/division name that matches the company
-   - A translated version of the company name
-4. If the title text appears in ANY form in a deal's Target or Acquirer field, it's a match.
-5. Be thorough - check if the title is contained within or matches any company name.
-6. Accept suffix variations (Inc., Ltd., PLC).
-
-MATCHING EXAMPLES:
-- "General Motors" matches "General Motors Corporation" (partial match)
-- "Vibra Residencial" matches "Vibra Residencial Ltda." (partial match)
-- "Compass" matches "Compass Digital Acquisition Corp." (partial match)
-
-RESPONSE FORMAT:
-- If you find a match, respond EXACTLY in this format:
-  Match: DEAL_ID|COMPANY_NAME|(target|acquirer)
-  Example: Match: 69665014d0bb42af1044aecd|General Motors|acquirer
-
-- If NO match is found after thorough checking, respond with:
-  None
-
-IMPORTANT: Check carefully - if the title matches or is contained in any Target or Acquirer name, return the match.
-"""
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are an expert in M&A deal recognition. Your job is to find matches between conditional approval notice titles and deal companies. If the title matches or is contained in any Target or Acquirer name, return the match. Be thorough and check all possibilities."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.1,
-            max_tokens=200,
-        )
-        result = response.choices[0].message.content.strip()
-        print(f"🧠 LLM Response: {result}")
-        return result
-    except Exception as e:
-        print(f"⚠️ LLM Error: {e}")
-        return "None"
 
 
 def convert_datetime_to_string(obj):
@@ -324,12 +258,12 @@ def convert_datetime_to_string(obj):
         return obj
 
 
-def generate_conditional_approval_email_html(conditional_data, deal_match):
+def generate_samr_unconditional_email_html(samr_data, deal_match):
     """
-    Generate HTML email for SAMR China conditional approval notice match.
+    Generate HTML email for SAMR China unconditional approval match.
 
     Args:
-        conditional_data: The conditional approval data dictionary
+        samr_data: The SAMR data dictionary
         deal_match: The matched deal object
 
     Returns:
@@ -341,15 +275,15 @@ def generate_conditional_approval_email_html(conditional_data, deal_match):
         "acquirer") or deal_match.get("acquire_name", "N/A")
     deal_id = deal_match.get("deal_id", "N/A")
 
-    # Extract conditional approval data
-    title_cn = conditional_data.get("title_cn", "N/A")
-    title_en = conditional_data.get("title_en", "N/A")
-    date = conditional_data.get("date", "N/A")
-    url = conditional_data.get("url", "")
-    approval_date = conditional_data.get("approval_date", "N/A")
+    # Extract SAMR data
+    title_cn = samr_data.get("title_cn", "N/A")
+    title_en = samr_data.get("title_en", "N/A")
+    date = samr_data.get("date", "N/A")
+    url = samr_data.get("url") or samr_data.get("approval_link", "")
+    approval_date = samr_data.get("approval_date", date)
 
-    title_text = f"SAMR China Conditional Approval – {target} / {acquirer}" if target != "N/A" and acquirer != "N/A" else f"SAMR China Conditional Approval – {title_en[:50]}"
-    subject = f"SAMR China Conditional Approval – {target} / {acquirer}"
+    title_text = f"SAMR China Unconditional Approval – {target} / {acquirer}" if target != "N/A" and acquirer != "N/A" else f"SAMR China Unconditional Approval – {title_en[:50]}"
+    subject = f"SAMR China Unconditional Approval – {target} / {acquirer}"
 
     html_email = f"""
 <!DOCTYPE html>
@@ -360,7 +294,7 @@ def generate_conditional_approval_email_html(conditional_data, deal_match):
 </head>
 <body style="margin:0; padding:0; font-family:Arial,sans-serif; background-color:#f4f4f4;">
   <div style="max-width:900px; margin:20px auto; background-color:#ffffff; padding:30px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1);">
-    <h2 style="color:#333; text-align:center; margin-top:0; padding-bottom:20px; border-bottom:3px solid #e74c3c;">
+    <h2 style="color:#333; text-align:center; margin-top:0; padding-bottom:20px; border-bottom:3px solid #27ae60;">
       {escape_html(title_text)}
     </h2>
 
@@ -392,15 +326,14 @@ def generate_conditional_approval_email_html(conditional_data, deal_match):
       <tr>
         <td style="padding:8px; font-weight:bold; color:#555;">Title (English):</td>
         <td style="padding:8px; color:#333;">{escape_html(str(title_en))}</td>
-      </tr>
-      """
+      </tr>"""
 
     if url:
         html_email += f"""
       <tr style="background-color:#f9f9f9;">
         <td style="padding:8px; font-weight:bold; color:#555;">Detail URL:</td>
         <td style="padding:8px;">
-          <a href="{escape_html(url)}" style="color:#e74c3c; text-decoration:none;" target="_blank">
+          <a href="{escape_html(url)}" style="color:#27ae60; text-decoration:none;" target="_blank">
             View SAMR Detail Page
           </a>
         </td>
@@ -410,7 +343,7 @@ def generate_conditional_approval_email_html(conditional_data, deal_match):
     </table>
 
     <div style="margin-top:30px; padding-top:20px; border-top:1px solid #e0e0e0; text-align:center; color:#999; font-size:12px;">
-      <p>This is an automated email generated from SAMR China conditional approval notice matches.</p>
+      <p>This is an automated email generated from SAMR China unconditional approval matches.</p>
     </div>
   </div>
 </body>
@@ -420,12 +353,12 @@ def generate_conditional_approval_email_html(conditional_data, deal_match):
     return subject, html_email
 
 
-def send_conditional_approval_email_via_webhook(conditional_data, deal_match):
+def send_samr_unconditional_email_via_webhook(samr_data, deal_match):
     """
-    Send email notification via n8n webhook after saving conditional approval data.
+    Send email notification via n8n webhook after saving SAMR unconditional data.
 
     Args:
-        conditional_data: The conditional approval data dictionary
+        samr_data: The SAMR data dictionary
         deal_match: The matched deal object
 
     Returns:
@@ -433,8 +366,8 @@ def send_conditional_approval_email_via_webhook(conditional_data, deal_match):
     """
     try:
         # Generate email HTML
-        subject, html_email = generate_conditional_approval_email_html(
-            conditional_data, deal_match)
+        subject, html_email = generate_samr_unconditional_email_html(
+            samr_data, deal_match)
         print(f"📝 Generated email subject: {subject}")
 
         # Get n8n webhook URL from environment variable
@@ -456,12 +389,11 @@ def send_conditional_approval_email_via_webhook(conditional_data, deal_match):
             'deal_id': deal_id,
             'target': target,
             'acquirer': acquirer,
-            'title_cn': conditional_data.get("title_cn", "N/A"),
-            'title_en': conditional_data.get("title_en", "N/A"),
-            'date': conditional_data.get("date", "N/A"),
-            'url': conditional_data.get("url", ""),
-            'approval_date': conditional_data.get("approval_date", "N/A"),
-
+            'title_cn': samr_data.get("title_cn", "N/A"),
+            'title_en': samr_data.get("title_en", "N/A"),
+            'date': samr_data.get("date", "N/A"),
+            'approval_date': samr_data.get("approval_date", samr_data.get("date", "N/A")),
+            'url': samr_data.get("url") or samr_data.get("approval_link", "")
         }
 
         # Send POST request to n8n webhook
@@ -472,6 +404,14 @@ def send_conditional_approval_email_via_webhook(conditional_data, deal_match):
             timeout=30
         )
         response.raise_for_status()
+
+        # Log response for debugging
+        try:
+            response_data = response.json() if response.content else {}
+            print(f"📧 Webhook response: {response_data}")
+        except:
+            print(
+                f"📧 Webhook response status: {response.status_code}, content: {response.text[:200]}")
 
         print(
             f"✅ Email sent successfully via n8n webhook! Status: {response.status_code}")
@@ -487,16 +427,16 @@ def send_conditional_approval_email_via_webhook(conditional_data, deal_match):
         return False
 
 
-def save_conditional_approval_data_to_deal(deal_match, matched_result):
+def save_samr_unconditional_data_to_deal(deal_match, matched_result):
     """
-    Save matched result to MongoDB deal record under 'samr_conditional' node.
+    Save matched result to MongoDB deal record under 'samr_unconditional' node.
 
     Args:
         deal_match: The matched deal object (must have deal_id to identify)
         matched_result: The matched result object to save
     """
     try:
-        print(f"💾 Saving conditional approval data to deal...")
+        print(f"💾 Saving SAMR unconditional data to deal...")
 
         # Use global MongoDB connection
         if not is_connected():
@@ -510,11 +450,11 @@ def save_conditional_approval_data_to_deal(deal_match, matched_result):
 
         # Remove matched_deal from the result to avoid circular reference
         # Keep only the matched data
-        conditional_data = {k: v for k, v in matched_result.items() if k !=
-                            "matched_deal"}
+        samr_data = {k: v for k, v in matched_result.items() if k !=
+                     "matched_deal"}
 
         print(
-            f"📝 Preparing conditional approval data with keys: {list(conditional_data.keys())}")
+            f"📝 Preparing SAMR unconditional data with keys: {list(samr_data.keys())}")
 
         # Find the deal by deal_id (preferred) or by acquirer and target
         query = {}
@@ -551,20 +491,18 @@ def save_conditional_approval_data_to_deal(deal_match, matched_result):
                 "⚠️ Cannot identify deal (no deal_id, acquirer, or target), skipping MongoDB save")
             return False
 
-        # Convert datetime objects in conditional_data to strings for MongoDB
-        conditional_data_serializable = convert_datetime_to_string(
-            conditional_data)
+        # Convert datetime objects in samr_data to strings for MongoDB
+        samr_data_serializable = convert_datetime_to_string(samr_data)
 
         print(f"🔍 Searching for deal with query: {query}")
 
-        # Update the deal document with samr_conditional data
-        # Also mark as conditionally_approved
+        # Update the deal document with samr_unconditional data
+        # Use $set to replace/update the samr_unconditional node with the matched object
         update_result = collection.update_one(
             query,
             {
                 "$set": {
-                    "samr_conditional": conditional_data_serializable,
-                    "conditionally_approved": True
+                    "samr_unconditional": samr_data_serializable
                 }
             }
         )
@@ -573,12 +511,12 @@ def save_conditional_approval_data_to_deal(deal_match, matched_result):
             f"📊 Update result: matched={update_result.matched_count}, modified={update_result.modified_count}")
 
         if update_result.modified_count > 0:
-            print(f"✅ Saved conditional approval data to deal record in MongoDB")
+            print(f"✅ Saved SAMR unconditional data to deal record in MongoDB")
 
             # Send email notification via n8n webhook
             try:
-                send_conditional_approval_email_via_webhook(
-                    conditional_data_serializable, deal_match)
+                send_samr_unconditional_email_via_webhook(
+                    samr_data_serializable, deal_match)
             except Exception as e:
                 print(f"⚠️ Error sending email notification: {e}")
                 # Don't fail the save operation if email fails
@@ -605,6 +543,127 @@ def save_conditional_approval_data_to_deal(deal_match, matched_result):
             traceback.print_exc()
         return False
 
+# Extract approval info from detail page
+
+
+def extract_approval_info(page, url):
+    """
+    Extract approval information from a detail page.
+    Returns: (matches, translated_table)
+    """
+    try:
+        # Open new page context
+        context = page.context
+        new_page = context.new_page()
+        new_page.goto(url, wait_until="domcontentloaded")
+        new_page.wait_for_timeout(2000)
+
+        html = new_page.content()
+
+        soup = BeautifulSoup(html, "html.parser")
+
+        table = soup.find("table")
+        rows = table.find_all("tr") if table else []
+
+        raw_rows = []
+        approval_dates = []
+        for row in rows[1:]:  # skip header
+            cols = [col.get_text(strip=True)
+                    for col in row.find_all(["td", "th"])]
+            if cols:
+                raw_rows.append(" | ".join(cols))
+                # Extract date if present (last column or date-like string)
+                for col in reversed(cols):
+                    if re.match(r"\d{4}年\d{1,2}月\d{1,2}日", col):
+                        try:
+                            parsed_date = datetime.datetime.strptime(
+                                col, "%Y年%m月%d日").strftime("%Y-%m-%d")
+                            approval_dates.append(parsed_date)
+                            break
+                        except:
+                            continue
+
+        # Translate row by row
+        translated_rows = []
+        for raw_row in raw_rows:
+            translated = translate_to_english(raw_row)
+            translated_rows.append(translated)
+            time.sleep(0.2)
+
+        translated_table = "\n".join(translated_rows)
+
+        print("📄 Translated Table Preview:\n", translated_table[:800])
+
+        prompt = f"""
+You are a professional M&A analyst.
+
+Below is a translated table of unconditional merger approvals issued by SAMR.
+Each row includes the case name, the parties involved, and the approval date.
+
+Your task is:
+- Match any company involved in these cases to the known set below using partial or fuzzy match.
+- Return only matched companies, using their original names from the table, and attach the approval date.
+
+Known companies:
+{', '.join(all_companies)}
+
+Translated Table:
+{translated_table}
+
+Return a JSON array of matched companies using fuzzy or partial name matching.
+Each match must include:
+- "company": full party name from the table
+- "matched_known_name": matched name from known set
+- "approval_date": approval date in YYYY-MM-DD (from the row)
+Respond strictly as:
+[
+  {{ "company": "...", "matched_known_name": "...", "approval_date": "YYYY-MM-DD" }}
+]
+If none, return []
+"""
+
+        with open(PROMPT_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(
+                f"\n{'='*80}\n{datetime.datetime.now()} - Prompt for: {url}\n{prompt}\n")
+
+        try:
+            res = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system",
+                        "content": "You identify unconditional M&A approvals."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0,
+                max_tokens=700
+            )
+            content = res.choices[0].message.content.strip()
+
+            if content.startswith("```"):
+                content = re.sub(r"^```json|^```|```$", "", content).strip()
+
+            json_start = content.find("[")
+            json_str = content[json_start:] if json_start != -1 else "[]"
+
+            try:
+                parsed = json.loads(json_str)
+            except json.JSONDecodeError as e:
+                print("❌ GPT parsing error:", e)
+                parsed = []
+
+            new_page.close()
+            return parsed, translated_table
+        except Exception as e:
+            print("❌ GPT failed:", e)
+            new_page.close()
+            return [], translated_table
+    except Exception as e:
+        print(f"❌ Failed to extract from {url}: {e}")
+        try:
+            new_page.close()
+        except:
+            pass
+        return [], ""
 
 # Extract records from current page
 
@@ -621,16 +680,7 @@ def extract_page_records(page, page_num=1):
     # Wait for items to load
     page.wait_for_selector("div.page-content ul li", timeout=10000)
 
-    # Save listing page HTML
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    listing_html_filename = f"listing_page_{page_num}_{timestamp}.html"
-    listing_html_filepath = os.path.join(
-        HTML_OUTPUT_DIR, listing_html_filename)
-
     html_content = page.content()
-    with open(listing_html_filepath, "w", encoding="utf-8") as f:
-        f.write(html_content)
-    print(f"💾 Saved HTML: {listing_html_filename}")
 
     # Extract all records from the HTML
     page_records = extract_records_from_html(html_content)
@@ -666,12 +716,117 @@ def extract_page_records(page, page_num=1):
     return filtered_records, should_stop
 
 
+# Match records with deals
+def match_records_with_deals(records):
+    """
+    Match extracted records with deals by extracting approval info from detail pages.
+    Saves matched records to MongoDB under 'samr_unconditional' node.
+    """
+    global matched_data, deals
+
+    print(f"\n{'='*60}")
+    print(f"🔍 Matching {len(records)} records with deals...")
+    print(f"{'='*60}\n")
+
+    matched_count = 0
+
+    # Reload deals if list is empty (connection might not have been ready earlier)
+    # Only load deals without 'samr_unconditional' node to avoid re-processing
+    if not deals:
+        print("⚠️ Deals list is empty, reloading from MongoDB (excluding deals with 'samr_unconditional' node)...")
+        load_deals(include_samr_unconditional=False)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
+
+        try:
+            for idx, record in enumerate(records, 1):
+                title_en = record.get("title_en", "")
+                title_cn = record.get("title_cn", "")
+                date_str = record.get("date", "")
+                url = record.get("url", "")
+
+                print(f"[{idx}/{len(records)}] {date_str} - {title_en[:70]}...")
+
+                if not url:
+                    print("  ⏩ Skipped (no URL)")
+                    continue
+
+                # Extract approval info from detail page
+                matches, translated_table = extract_approval_info(
+                    page, url)
+
+                if matches:
+                    for m in matches:
+                        company = normalize_company(m["matched_known_name"])
+                        print(f"  🎯 Match found: {company}")
+
+                        # Find the deal
+                        deal_match = None
+                        for deal in deals:
+                            acquirer = deal.get("acquirer") or deal.get(
+                                "acquire_name", "")
+                            target = deal.get("target") or deal.get(
+                                "target_name", "")
+
+                            if normalize_company(acquirer) == company or normalize_company(target) == company:
+                                deal_match = deal
+                                print(
+                                    f"  ✅ Found deal: {acquirer} / {target}")
+                                break
+
+                        if deal_match:
+                            # Build the matched result object
+                            matched_result = {
+                                "deal_id": deal_match.get("deal_id", ""),
+                                "title_cn": title_cn,
+                                "title_en": title_en,
+                                "url": url,
+                                "approval_link": url,
+                                "date": date_str,
+                                "approval_date": m.get("approval_date", date_str),
+                                "translated_table": translated_table,
+                                "matched_company": m.get("company", ""),
+                                "matched_known_name": m.get("matched_known_name", ""),
+                                "matched_deal": deal_match
+                            }
+
+                            matched_data.append(matched_result)
+                            print(f"  ✅ Match added to results!")
+
+                            # Save to MongoDB under 'samr_unconditional' node in the deal record
+                            save_result = save_samr_unconditional_data_to_deal(
+                                deal_match, matched_result)
+                            if save_result:
+                                print(
+                                    f"  ✅ Saved SAMR unconditional data to deal record in MongoDB")
+                            else:
+                                print(
+                                    f"  ⚠️ Failed to save SAMR unconditional data to MongoDB")
+
+                            matched_count += 1
+                        else:
+                            print(
+                                f"  ⚠️ Match found but deal not found: {company}")
+                else:
+                    print(f"  ➖ No match")
+
+        finally:
+            browser.close()
+
+    print(f"\n{'='*60}")
+    print(f"✅ Matching complete: {matched_count} records matched with deals")
+    print(f"{'='*60}\n")
+
+    return matched_count
+
+
 # Extract from existing HTML files
-
-
 def extract_from_existing_html_files():
     """
-    Extract records from already saved HTML files in samr_conditional_html_pages directory.
+    Extract records from already saved HTML files in samr_unconditional_html_pages directory.
     Returns list of extracted records.
     """
     from glob import glob
@@ -721,9 +876,10 @@ def main(use_existing_html=False, headless=True):
 
     Phase 2: Match with Deals  
         6. Load all extracted records
-        7. Match each record with deals using LLM
-        8. If match found, save to MongoDB and send email notification
-        9. Save matched results to JSON
+        7. For each record, extract approval info from detail page
+        8. Match companies using LLM
+        9. If match found, save to MongoDB under 'samr_unconditional' node
+        10. Save matched results to JSON
 
     Args:
         use_existing_html: If True, extract from existing HTML files instead of scraping
@@ -744,12 +900,12 @@ def main(use_existing_html=False, headless=True):
     matched_data = []
 
     # Load deals from MongoDB when main() is called (connection should be ready by then)
-    # Only load deals without 'samr_conditional' node to avoid re-processing
-    print("📊 Loading deals from MongoDB (excluding deals with 'samr_conditional' node)...")
-    load_deals(include_conditional=False)
+    # Only load deals without 'samr_unconditional' node to avoid re-processing
+    print("📊 Loading deals from MongoDB (excluding deals with 'samr_unconditional' node)...")
+    load_deals(include_samr_unconditional=False)
 
     print(f"\n{'='*60}")
-    print(f"🚀 PHASE 1: EXTRACT ALL CONDITIONAL APPROVAL RECORDS")
+    print(f"🚀 PHASE 1: EXTRACT ALL UNCONDITIONAL APPROVAL RECORDS")
     print(f"{'='*60}\n")
 
     if use_existing_html:
@@ -810,9 +966,9 @@ def main(use_existing_html=False, headless=True):
             finally:
                 browser.close()
 
-    # Save all extracted records to JSON
+    # Step 5: Save all extracted records to JSON
     print(f"\n{'='*60}")
-    print(f"📍 SAVE EXTRACTED RECORDS TO JSON")
+    print(f"📍 Step 5: SAVE EXTRACTED RECORDS TO JSON")
     print(f"{'='*60}")
     print(f"   Total records extracted: {len(all_extracted_records)}")
     print(f"   Saving to: {EXTRACTED_RECORDS_JSON}")
@@ -826,13 +982,13 @@ def main(use_existing_html=False, headless=True):
     print(f"🚀 PHASE 2: MATCH RECORDS WITH DEALS")
     print(f"{'='*60}\n")
 
-    # Filter out records that are already processed (url exists in samr_conditional data)
+    # Filter out records that are already processed (url exists in samr_unconditional data)
     print(f"🔍 Checking which records are already processed...")
     filtered_records = []
     skipped_count = 0
     for record in all_extracted_records:
         detail_url = record.get('url')
-        if detail_url and detail_url_exists_in_conditional_data(detail_url):
+        if detail_url and detail_url_exists_in_samr_data(detail_url):
             skipped_count += 1
         else:
             filtered_records.append(record)
@@ -844,111 +1000,7 @@ def main(use_existing_html=False, headless=True):
     print(
         f"🔍 Processing {len(all_extracted_records)} new records to match with deals...\n")
 
-    for idx, record in enumerate(all_extracted_records, 1):
-        title_en = record.get("title_en", "")
-        title_cn = record.get("title_cn", "")
-        date_str = record.get("date", "")
-        url = record.get("url", "")
-
-        print(
-            f"\n[{idx}/{len(all_extracted_records)}] {date_str} - {title_en[:70]}...")
-
-        # Skip if translation failed
-        if title_en == "[Translation failed]":
-            print("  ⏩ Skipped (translation failed)")
-            continue
-
-        # Match with LLM
-        match_result = match_deal_with_llm(title_en, title_cn)
-
-        if match_result and match_result.lower() != "none" and match_result.lower().startswith("match"):
-            try:
-                # Remove "Match: " prefix
-                match_data = match_result.replace(
-                    "Match:", "").replace("match:", "").strip()
-
-                # Split by pipe
-                parts = match_data.split("|")
-                if len(parts) >= 3:
-                    deal_id = parts[0].strip()
-                    company_name = parts[1].strip()
-                    match_type = parts[2].strip().lower().replace(
-                        "(", "").replace(")", "")
-
-                    # Find deal by deal_id (most reliable)
-                    deal_match = None
-                    for deal in deals:
-                        if deal.get("deal_id") == deal_id:
-                            deal_match = deal
-                            print(f"  ✅ Found deal by ID: {deal_id}")
-                            break
-
-                    # Fallback: find by company name if deal_id didn't work
-                    if not deal_match:
-                        for deal in deals:
-                            target = deal.get("target") or deal.get(
-                                "target_name", "")
-                            acquirer = deal.get("acquirer") or deal.get(
-                                "acquire_name", "")
-
-                            if match_type == "target" and target and normalize_company(target) == normalize_company(company_name):
-                                deal_match = deal
-                                print(
-                                    f"  ✅ Found deal by target name: {company_name}")
-                                break
-                            elif match_type == "acquirer" and acquirer and normalize_company(acquirer) == normalize_company(company_name):
-                                deal_match = deal
-                                print(
-                                    f"  ✅ Found deal by acquirer name: {company_name}")
-                                break
-
-                    if deal_match:
-                        # Optionally extract additional info from detail page
-                        # For now, use basic record data
-                        conditional_data = {
-                            "title_cn": title_cn,
-                            "title_en": title_en,
-                            "url": url,
-                            "date": date_str
-                        }
-
-                        # Build the matched result object
-                        matched_result = {
-                            "deal_id": deal_match.get("deal_id", ""),
-                            "title_cn": title_cn,
-                            "title_en": title_en,
-                            "url": url,
-                            "date": date_str,
-                            "matched_deal": deal_match
-                        }
-
-                        # Add any additional extracted fields if available
-                        if "approval_date" in record:
-                            conditional_data["approval_date"] = record["approval_date"]
-                            matched_result["approval_date"] = record["approval_date"]
-
-                        matched_data.append(matched_result)
-                        print(f"  ✅ Match added to results!")
-
-                        # Save to MongoDB under 'samr_conditional' node in the deal record
-                        save_result = save_conditional_approval_data_to_deal(
-                            deal_match, matched_result)
-                        if save_result:
-                            print(
-                                f"  ✅ Saved conditional approval data to deal record in MongoDB")
-                        else:
-                            print(
-                                f"  ⚠️ Failed to save conditional approval data to MongoDB")
-                    else:
-                        print(
-                            f"  ⚠️ LLM found match but deal not found: {deal_id} / {company_name}")
-
-            except Exception as e:
-                print(f"  ⚠️ Error processing match: {e}")
-                import traceback
-                traceback.print_exc()
-        else:
-            print(f"  ➖ No match")
+    matched_count = match_records_with_deals(all_extracted_records)
 
     # Prepare output - convert all datetime objects to strings
     matched_data_serializable = convert_datetime_to_string(matched_data)
@@ -965,6 +1017,7 @@ def main(use_existing_html=False, headless=True):
     with open(MATCHED_OUTPUT_JSON, "w", encoding="utf-8") as f:
         json.dump(matched_output, f, ensure_ascii=False, indent=2, default=str)
 
+    # Final summary
     print(f"\n{'='*60}")
     print(f"✅ ALL DONE!")
     print(f"{'='*60}")
@@ -993,11 +1046,11 @@ if __name__ == "__main__":
             print("🖥️  Mode: Running with visible browser")
         elif sys.argv[1] in ["--help"]:
             print(
-                "\nUsage: python samr_conditional_approval_playwright.py [OPTIONS]")
+                "\nUsage: python samr_unconditional_approval_playwright.py [OPTIONS]")
             print("\nOptions:")
             print("  --use-html, -h    Extract from existing HTML files (no scraping)")
-            print("  --headed          Run browser in headed mode (visible)")
-            print("  --help            Show this help message")
+            print("  --headed           Run browser in headed mode (visible)")
+            print("  --help             Show this help message")
             print("\nDefault: Scrape new pages from SAMR website in headless mode\n")
             sys.exit(0)
 
