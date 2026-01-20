@@ -14,6 +14,7 @@ from cade_brazil_update_monitor import monitor_brazil_deals
 from samr_public_notice_db import main as samr_main
 from samr_conditional_approval_playwright import main as samr_conditional_main
 from samr_unconditional_approval_playwright import main as samr_unconditional_main
+from uk_cma_mergers_scraper import main as uk_cma_main
 from mongodb_connection import init_mongodb_connection, close_mongodb_connection, is_connected
 import logging
 import os
@@ -69,6 +70,7 @@ def home():
             "/samr-public-scraper": "GET - Scrape SAMR China public notices and match with deals (query param: headless)",
             "/samr-conditional-scraper": "GET - Scrape SAMR China conditional approval notices and match with deals (query params: headless, use_html)",
             "/samr-unconditional-scraper": "GET - Scrape SAMR China unconditional approval notices and match with deals (query params: headless, use_html)",
+            "/uk-cma-scraper": "GET - Scrape UK CMA merger cases and match with deals (query params: use_html)",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -949,6 +951,62 @@ def samr_unconditional_scraper():
     except Exception as e:
         logger.error(
             f"Error starting SAMR unconditional approval scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/uk-cma-scraper', methods=['GET'])
+def uk_cma_scraper():
+    """
+    Scrape UK CMA merger cases and match with deals.
+    Extracts records from CMA website with cutoff date filtering.
+    Process runs in background - returns immediately.
+
+    Query parameters:
+        use_html: string (optional, "true" or "false", default: "false") - Extract from existing HTML files instead of scraping
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        # Get query parameters
+        use_html_str = request.args.get('use_html', 'false')
+        use_html = use_html_str.lower() in ('true', '1', 'yes')
+
+        # Run the scraping process in background thread
+        def run_scraper():
+            try:
+                logger.info(
+                    f"Starting CMA merger cases scraper in background (use_html={use_html})")
+                uk_cma_main(use_existing_html=use_html)
+                logger.info(
+                    f"CMA merger cases scraper completed successfully.")
+            except Exception as e:
+                logger.error(
+                    f"Error in background CMA scraper: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        # Start background thread
+        thread = threading.Thread(target=run_scraper, daemon=True)
+        thread.start()
+
+        # Return immediate response
+        return jsonify({
+            "success": True,
+            "message": "CMA merger cases scraping process started in background",
+            "status": "running",
+            "use_html": use_html
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting CMA scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
