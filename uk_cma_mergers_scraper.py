@@ -13,7 +13,8 @@ from mongodb_connection import get_deals_collection, get_mongo_client, is_connec
 from html import escape as escape_html
 
 # Configuration
-CUTOFF_DATE = datetime.datetime.strptime("2025-10-01", "%Y-%m-%d")
+CUTOFF_DATE = datetime.datetime.now().replace(
+    hour=0, minute=0, second=0, microsecond=0)
 BASE_URL = "https://www.gov.uk/cma-cases?case_type%5B%5D=mergers"
 OUTPUT_JSON = "deals_with_cma.json"
 EXTRACTED_RECORDS_JSON = "cma_extracted_records.json"
