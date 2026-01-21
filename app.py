@@ -14,7 +14,7 @@ from cade_brazil_update_monitor import monitor_brazil_deals
 from samr_public_notice_db import main as samr_main
 from samr_conditional_approval_playwright import main as samr_conditional_main
 from samr_unconditional_approval_playwright import main as samr_unconditional_main
-from uk_cma_mergers_scraper import main as uk_cma_main
+from uk_cma_mergers_scraper_atom import main as uk_cma_main
 from bundeskartellamt_scraper import main as bundeskartellamt_main
 from mongodb_connection import init_mongodb_connection, close_mongodb_connection, is_connected
 import logging
