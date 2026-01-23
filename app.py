@@ -16,6 +16,7 @@ from samr_conditional_approval_playwright import main as samr_conditional_main
 from samr_unconditional_approval_playwright import main as samr_unconditional_main
 from uk_cma_mergers_scraper_atom import main as uk_cma_main
 from bundeskartellamt_scraper import main as bundeskartellamt_main
+from ec_case_filter import main as ec_case_filter_main
 from mongodb_connection import init_mongodb_connection, close_mongodb_connection, is_connected
 import logging
 import os
@@ -73,6 +74,8 @@ def home():
             "/samr-unconditional-scraper": "GET - Scrape SAMR China unconditional approval notices and match with deals (query params: headless, use_html)",
             "/uk-cma-scraper": "GET - Scrape UK CMA merger cases and match with deals (query params: use_html)",
             "/bundeskartellamt-scraper": "GET - Scrape Bundeskartellamt German merger cases and match with deals",
+            "/ec-case-filter": "GET - Filter and match EC merger cases with deals",
+            "/ec-case-update-monitor": "GET - Monitor EC merger cases for updates and send email notifications",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -1062,6 +1065,105 @@ def bundeskartellamt_scraper():
 
     except Exception as e:
         logger.error(f"Error starting Bundeskartellamt scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/ec-case-filter', methods=['GET'])
+def ec_case_filter():
+    """
+    Filter and match EC merger cases with deals.
+    Downloads EC case data, filters by criteria, and matches with MongoDB deals.
+    Process runs in background - returns immediately.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        # Run the filtering process in background thread
+        def run_filter():
+            try:
+                logger.info("Starting EC case filter in background")
+                result = ec_case_filter_main()
+                if result and result.get("success"):
+                    logger.info(
+                        f"EC case filter completed successfully. Filtered {result.get('total_filtered', 0)} cases, "
+                        f"matched {result.get('total_matched', 0)} with deals.")
+                else:
+                    error_msg = result.get('error', 'Unknown error') if result else 'No result returned'
+                    logger.warning(
+                        f"EC case filter completed with errors: {error_msg}")
+            except Exception as e:
+                logger.error(f"Error in background EC case filter: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        # Start background thread
+        thread = threading.Thread(target=run_filter, daemon=True)
+        thread.start()
+
+        # Return immediate response
+        return jsonify({
+            "success": True,
+            "message": "EC case filtering process started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting EC case filter: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/ec-case-update-monitor', methods=['GET'])
+def ec_case_update_monitor():
+    """
+    Monitor EC merger cases for updates.
+    Compares latest EC case data with stored MongoDB records and sends email notifications for changes.
+    Process runs in background - returns immediately.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        from ec_case_update_monitor import process_case_updates
+
+        # Run the monitor process in background thread
+        def run_monitor():
+            try:
+                logger.info("Starting EC case update monitor in background")
+                process_case_updates()
+                logger.info("✅ EC case update monitor completed successfully")
+            except Exception as e:
+                logger.error(f"❌ Error in EC case update monitor: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        # Start background thread
+        thread = threading.Thread(target=run_monitor, daemon=True)
+        thread.start()
+
+        # Return immediate response
+        return jsonify({
+            "success": True,
+            "message": "EC case update monitor started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Error starting EC case update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
