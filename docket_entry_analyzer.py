@@ -286,10 +286,31 @@ def analyze_docket_entry(
     date = metadata.get("date", "N/A")
     on_behalf_of = metadata.get("on_behalf_of", "N/A")
 
+    # Initialize target_company_name (will be populated from mergers collection if found)
+    target_company_name = ""
+
     try:
         mongo_client = MongoClient(mongodb_uri)
         db = mongo_client.get_database()
         collection = db["docket"]
+
+        # Query mergers collection to find target_company_name
+        if docket_type and docket_type != "N/A" and docket_number and docket_number != "N/A":
+            try:
+                mergers_collection = db["mergers"]
+                merger = mergers_collection.find_one({
+                    "dockets": {
+                        "$elemMatch": {
+                            "docket_type": docket_type,
+                            "docket_number": docket_number
+                        }
+                    }
+                })
+                if merger:
+                    target_company_name = merger.get("target_company_name", "")
+                    print(f"Found target company: {target_company_name} for docket {docket_type}/{docket_number}")
+            except Exception as e:
+                print(f"Warning: Could not query mergers collection: {str(e)}")
 
         existing_entry = collection.find_one(
             {"metadata.document_id": doc_number})
@@ -425,7 +446,8 @@ def analyze_docket_entry(
         "on_behalf_of": metadata.get("on_behalf_of", "N/A"),
         "docket_number": metadata.get("docket_number", "N/A"),
         "document_id": doc_number,
-        "docket_type": docket_type
+        "docket_type": docket_type,
+        "target_company_name": target_company_name,
     }
 
     # Estimate token count (rough estimate: 1 token ≈ 4 characters)
