@@ -12,10 +12,12 @@ import re
 from bson import ObjectId
 from mongodb_connection import get_deals_collection, get_mongo_client, is_connected
 from html import escape as escape_html
+from llm_verification_service import verify_usa_relation
 
 # Configuration
 # CUTOFF_DATE: Extract records >= this date. Stop when records are < this date.
 # Example: If CUTOFF_DATE = 2026-01-15, extract 2026-01-15 and newer, stop at 2026-01-14
+# CUTOFF_DATE = datetime.datetime.strptime("2026-01-22", "%Y-%m-%d")
 CUTOFF_DATE = datetime.datetime.now().replace(
     hour=0, minute=0, second=0, microsecond=0)
 BASE_URL = "https://www.samr.gov.cn/fldes/ajgs/jyaj/"
@@ -473,6 +475,144 @@ def send_samr_email_via_webhook(samr_data, deal_match):
         return False
 
 
+def generate_unmatched_samr_email_html(record: dict) -> tuple:
+    """
+    Generate HTML email for unmatched China SAMR public notice case that is USA-related.
+
+    Args:
+        record: The SAMR public notice record dictionary
+
+    Returns:
+        Tuple of (subject, html_email)
+    """
+    # Extract record data
+    title_cn = record.get("title_cn", "N/A")
+    title_en = record.get("title_en", "N/A")
+    date_str = record.get("date", "N/A")
+    url = record.get("url", "")
+
+    # Build subject
+    subject = f"SAMR China Public Notice (USA-Related, No Match) – {title_en[:60]}"
+
+    html_email = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{escape_html(subject)}</title>
+</head>
+<body style="margin:0; padding:0; font-family:Arial,sans-serif; background-color:#f4f4f4;">
+  <div style="max-width:900px; margin:20px auto; background-color:#ffffff; padding:30px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1);">
+    <h2 style="color:#333; text-align:center; margin-top:0; padding-bottom:20px; border-bottom:3px solid #f59e0b;">
+      SAMR China Public Notice (USA-Related, No Match)
+    </h2>
+    <div style="text-align:center; margin-bottom:20px;">
+      <div style="background-color:#f59e0b; color:white; padding:8px 16px; border-radius:4px; display:inline-block; margin-bottom:15px; font-weight:bold;">🇺🇸 USA-RELATED</div>
+    </div>
+
+    <table style="width:100%; border-collapse:collapse; margin-bottom:20px;">
+      <tr>
+        <td style="padding:8px; font-weight:bold; width:170px; color:#555;">Date:</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(date_str))}</td>
+      </tr>
+      <tr style="background-color:#f9f9f9;">
+        <td style="padding:8px; font-weight:bold; color:#555;">Title (Chinese):</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(title_cn))}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px; font-weight:bold; color:#555;">Title (English):</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(title_en))}</td>
+      </tr>"""
+
+    if url:
+        html_email += f"""
+      <tr style="background-color:#f9f9f9;">
+        <td style="padding:8px; font-weight:bold; color:#555;">Detail URL:</td>
+        <td style="padding:8px;">
+          <a href="{escape_html(url)}" style="color:#e74c3c; text-decoration:none;" target="_blank">
+            View SAMR Detail Page
+          </a>
+        </td>
+      </tr>"""
+
+    html_email += """
+    </table>
+
+    <div style="margin-top:30px; padding-top:20px; border-top:1px solid #e0e0e0; text-align:center; color:#999; font-size:12px;">
+      <p>This is an automated email generated from SAMR China public notice monitoring.</p>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+    return subject, html_email
+
+
+def send_unmatched_samr_email_via_webhook(record: dict) -> bool:
+    """
+    Send email notification via n8n webhook for unmatched China SAMR public notice case that is USA-related.
+
+    Args:
+        record: The SAMR public notice record dictionary
+
+    Returns:
+        bool: True if email sent successfully, False otherwise
+    """
+    try:
+        # Generate email HTML
+        subject, html_email = generate_unmatched_samr_email_html(record)
+        print(f"📝 Generated email subject: {subject}")
+
+        # Get n8n webhook URL from environment variable
+        webhook_url = os.getenv(
+            "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6")
+        print(f"📤 Sending email via n8n webhook: {webhook_url}")
+
+        # Extract record information
+        title_cn = record.get("title_cn", "N/A")
+        title_en = record.get("title_en", "N/A")
+        date_str = record.get("date", "N/A")
+        url = record.get("url", "")
+
+        # Prepare payload for n8n webhook
+        payload = {
+            'subject': subject,
+            'html': html_email,
+            'deal_id': 'N/A',  # No deal match
+            'target': 'N/A',  # No deal match
+            'acquirer': 'N/A',  # No deal match
+            'title_cn': title_cn,
+            'title_en': title_en,
+            'date': date_str,
+            'url': url,
+            'is_unmatched': True,
+            'usa_related': True,
+        }
+
+        # Send POST request to n8n webhook
+        response = requests.post(
+            webhook_url,
+            json=payload,
+            headers={'Content-Type': 'application/json'},
+            timeout=30
+        )
+        response.raise_for_status()
+
+        print(
+            f"✅ Email sent successfully via n8n webhook! Status: {response.status_code}")
+        return True
+
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️ Error sending email via webhook: {e}")
+        return False
+    except Exception as e:
+        print(f"⚠️ Error generating/sending email: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def save_samr_data_to_deal(deal_match, matched_result):
     """
     Save matched result to MongoDB deal record under 'samr_public' node.
@@ -853,6 +993,24 @@ def main(headless=True):
                 traceback.print_exc()
         else:
             print(f"  ➖ No match")
+            # Verify if case title is USA-related
+            try:
+                # Use title_en for verification as it's in English
+                company_details = title_en if title_en and title_en != "[Translation failed]" else title_cn
+                is_usa_related = verify_usa_relation(
+                    company_details=company_details,
+                    case_type="CHINA"
+                )
+                if is_usa_related:
+                    print(
+                        f"   🇺🇸 USA-related case detected - sending email notification")
+                    send_unmatched_samr_email_via_webhook(record)
+                else:
+                    print(f"   ℹ️ Not USA-related - no action taken")
+            except Exception as e:
+                print(f"   ⚠️ Error verifying USA relation: {e}")
+                import traceback
+                traceback.print_exc()
 
     # Prepare output - convert all datetime objects to strings
     matched_data_serializable = convert_datetime_to_string(matched_data)
