@@ -989,7 +989,7 @@ def uk_cma_scraper():
             try:
                 logger.info(
                     f"Starting CMA merger cases scraper in background (use_html={use_html})")
-                uk_cma_main(use_existing_html=use_html)
+                uk_cma_main()
                 logger.info(
                     f"CMA merger cases scraper completed successfully.")
             except Exception as e:
