@@ -8,6 +8,7 @@ from openai import OpenAI
 from bson import ObjectId
 from mongodb_connection import get_deals_collection, get_mongo_client, is_connected, init_mongodb_connection
 from html import escape as escape_html
+
 from llm_verification_service import verify_usa_relation
 
 # Constants
@@ -15,6 +16,8 @@ DATA_URL = "https://compcases-open-data-portal-files-prod.s3.eu-west-1.amazonaws
 # Temporary: use local file
 LOCAL_DATA_PATH = "case-data-M.json"
 # CUTOFF_DATE = datetime.strptime("2026-01-05", "%Y-%m-%d")
+# CUTOFF_DATE = datetime.now().replace(hour=0, minute=0, second=0,
+#                                      microsecond=0) - timedelta(days=1)
 CUTOFF_DATE = datetime.now().replace(
     hour=0, minute=0, second=0, microsecond=0)
 OUTPUT_PATH = "ec_filtered_cases.json"
@@ -1288,10 +1291,10 @@ def main():
             }
 
         # Download JSON data
-        # data = download_json(DATA_URL)
+        data = download_json(DATA_URL)
 
         # Load JSON data from local file (temporary)
-        data = load_json_from_file(LOCAL_DATA_PATH)
+        # data = load_json_from_file(LOCAL_DATA_PATH)
 
         # Filter cases
         filtered_cases = filter_cases(data)

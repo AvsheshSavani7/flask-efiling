@@ -10,11 +10,13 @@ from bson import ObjectId
 from mongodb_connection import get_deals_collection, get_mongo_client, is_connected, init_mongodb_connection
 from html import escape as escape_html
 import xml.etree.ElementTree as ET
+from llm_verification_service import verify_usa_relation
 
 # Configuration
 # CUTOFF_DATE = datetime.datetime.strptime("2026-01-20", "%Y-%m-%d")
 CUTOFF_DATE = datetime.datetime.now().replace(
     hour=0, minute=0, second=0, microsecond=0)
+
 ATOM_FEED_URL = "https://www.gov.uk/cma-cases.atom?case_type%5B%5D=mergers"
 OUTPUT_JSON = "deals_with_cma.json"
 EXTRACTED_RECORDS_JSON = "cma_extracted_records.json"
@@ -757,6 +759,147 @@ def send_cma_case_email_via_webhook(case_info, deal_match, is_new_case=False, ch
         return False
 
 
+def generate_unmatched_cma_case_email_html(record: dict) -> tuple:
+    """
+    Generate HTML email for unmatched UK CMA case that is USA-related.
+
+    Args:
+        record: The UK CMA record dictionary
+
+    Returns:
+        Tuple of (subject, html_email)
+    """
+    # Extract record data
+    title = record.get("title", "N/A")
+    updated_date = record.get("updated", "N/A")
+    url = record.get("url", "")
+    record_id = record.get("id", "")
+
+    # Build subject
+    subject = f"UK CMA Merger Case (USA-Related, No Match) – {title[:60]}"
+
+    html_email = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{escape_html(subject)}</title>
+</head>
+<body style="margin:0; padding:0; font-family:Arial,sans-serif; background-color:#f4f4f4;">
+  <div style="max-width:900px; margin:20px auto; background-color:#ffffff; padding:30px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1);">
+    <h2 style="color:#333; text-align:center; margin-top:0; padding-bottom:20px; border-bottom:3px solid #f59e0b;">
+      UK CMA Merger Case (USA-Related, No Match)
+    </h2>
+    <div style="text-align:center; margin-bottom:20px;">
+      <div style="background-color:#f59e0b; color:white; padding:8px 16px; border-radius:4px; display:inline-block; margin-bottom:15px; font-weight:bold;">🇺🇸 USA-RELATED</div>
+    </div>
+
+    <table style="width:100%; border-collapse:collapse; margin-bottom:20px;">
+      <tr>
+        <td style="padding:8px; font-weight:bold; width:170px; color:#555;">Case Title:</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(title))}</td>
+      </tr>
+      <tr style="background-color:#f9f9f9;">
+        <td style="padding:8px; font-weight:bold; color:#555;">Updated Date:</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(updated_date))}</td>
+      </tr>"""
+
+    if record_id:
+        html_email += f"""
+      <tr>
+        <td style="padding:8px; font-weight:bold; color:#555;">Case ID:</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(record_id))}</td>
+      </tr>"""
+
+    if url:
+        html_email += f"""
+      <tr style="background-color:#f9f9f9;">
+        <td style="padding:8px; font-weight:bold; color:#555;">Case URL:</td>
+        <td style="padding:8px;">
+          <a href="{escape_html(url)}" style="color:#0066cc; text-decoration:none;" target="_blank">
+            View CMA Case Page
+          </a>
+        </td>
+      </tr>"""
+
+    html_email += """
+    </table>
+
+    
+
+    
+  </div>
+</body>
+</html>
+"""
+
+    return subject, html_email
+
+
+def send_unmatched_cma_case_email_via_webhook(record: dict) -> bool:
+    """
+    Send email notification via n8n webhook for unmatched UK CMA case that is USA-related.
+
+    Args:
+        record: The UK CMA record dictionary
+
+    Returns:
+        bool: True if email sent successfully, False otherwise
+    """
+    try:
+        # Generate email HTML
+        subject, html_email = generate_unmatched_cma_case_email_html(record)
+        print(f"📝 Generated email subject: {subject}")
+
+        # Get n8n webhook URL from environment variable
+        webhook_url = os.getenv(
+            "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6")
+        print(f"📤 Sending email via n8n webhook: {webhook_url}")
+
+        # Extract record information
+        title = record.get("title", "N/A")
+        updated_date = record.get("updated", "N/A")
+        url = record.get("url", "")
+        record_id = record.get("id", "")
+
+        # Prepare payload for n8n webhook
+        payload = {
+            'subject': subject,
+            'html': html_email,
+            'deal_id': 'N/A',  # No deal match
+            'target': 'N/A',  # No deal match
+            'acquirer': 'N/A',  # No deal match
+            'title': title,
+            'updated_date': updated_date,
+            'url': url,
+            'id': record_id,
+            'is_unmatched': True,
+            'usa_related': True,
+        }
+
+        # Send POST request to n8n webhook
+        response = requests.post(
+            webhook_url,
+            json=payload,
+            headers={'Content-Type': 'application/json'},
+            timeout=30
+        )
+        response.raise_for_status()
+
+        print(
+            f"✅ Email sent successfully via n8n webhook! Status: {response.status_code}")
+        return True
+
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️ Error sending email via webhook: {e}")
+        return False
+    except Exception as e:
+        print(f"⚠️ Error generating/sending email: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def save_cma_case_data_to_deal(deal_match, case_info):
     """
     Save matched CMA case data to MongoDB deal record under 'uk_cma_cases' node.
@@ -1049,6 +1192,22 @@ def match_records_with_deals(records):
                         print(f"       Deal {i+1}: {a} / {t}")
         else:
             print(f"  ➖ No match")
+            # Verify if case title is USA-related
+            try:
+                is_usa_related = verify_usa_relation(
+                    company_details=title,
+                    case_type="UK"
+                )
+                if is_usa_related:
+                    print(
+                        f"   🇺🇸 USA-related case detected - sending email notification")
+                    send_unmatched_cma_case_email_via_webhook(record)
+                else:
+                    print(f"   ℹ️ Not USA-related - no action taken")
+            except Exception as e:
+                print(f"   ⚠️ Error verifying USA relation: {e}")
+                import traceback
+                traceback.print_exc()
 
     print(f"\n{'='*60}")
     print(f"✅ Matching complete: {matched_count} records matched with deals")
