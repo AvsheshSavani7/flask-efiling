@@ -1017,6 +1017,8 @@ def uk_cma_scraper():
             "error": str(e)
         }), 500
 
+# German Bundeskartellamt Scraper
+
 
 @app.route('/bundeskartellamt-scraper', methods=['GET'])
 def bundeskartellamt_scraper():
@@ -1096,7 +1098,8 @@ def ec_case_filter():
                         f"EC case filter completed successfully. Filtered {result.get('total_filtered', 0)} cases, "
                         f"matched {result.get('total_matched', 0)} with deals.")
                 else:
-                    error_msg = result.get('error', 'Unknown error') if result else 'No result returned'
+                    error_msg = result.get(
+                        'error', 'Unknown error') if result else 'No result returned'
                     logger.warning(
                         f"EC case filter completed with errors: {error_msg}")
             except Exception as e:

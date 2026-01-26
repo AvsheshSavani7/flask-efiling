@@ -9,14 +9,15 @@ from bson import ObjectId
 from mongodb_connection import get_deals_collection, get_mongo_client, is_connected, init_mongodb_connection
 from html import escape as escape_html
 from datetime import datetime, timedelta
+from llm_verification_service import verify_usa_relation
 
 # Constants
 DATA_URL = "https://compcases-open-data-portal-files-prod.s3.eu-west-1.amazonaws.com/case-data-M.json"
 # Temporary: use local file
-LOCAL_DATA_PATH = "/Users/joshuatackel/Downloads/case-data-M.json"
-# CUTOFF_DATE = datetime.strptime("2026-01-01", "%Y-%m-%d")
-CUTOFF_DATE = datetime.now().replace(hour=0, minute=0, second=0,
-                                     microsecond=0) - timedelta(days=1)
+LOCAL_DATA_PATH = "case-data-M.json"
+# CUTOFF_DATE = datetime.strptime("2026-01-05", "%Y-%m-%d")
+CUTOFF_DATE = datetime.datetime.now().replace(
+    hour=0, minute=0, second=0, microsecond=0)
 OUTPUT_PATH = "ec_filtered_cases.json"
 MATCHED_DEALS_OUTPUT = "ec_matched_deals.json"
 ENV_PATH = ".env"
@@ -103,9 +104,9 @@ def matches_criteria(case_data: Dict[str, Any]) -> bool:
         return False
 
     # Check decisions (must be empty array)
-    # decisions = case_data.get("decisions", [])
-    # if decisions:
-    #     return False
+    decisions = case_data.get("decisions", [])
+    if decisions:
+        return False
 
     # Check caseInitiationDate > cutoff date
     case_initiation_dates = metadata.get("caseInitiationDate", [])
@@ -670,6 +671,325 @@ def send_ec_case_email_via_webhook(case_data: Dict[str, Any], deal_match: Dict[s
         return False
 
 
+def generate_unmatched_ec_case_email_html(case_data: Dict[str, Any]) -> tuple:
+    """
+    Generate HTML email for unmatched EC case that is USA-related.
+
+    Args:
+        case_data: The EC case data dictionary
+
+    Returns:
+        Tuple of (subject, html_email)
+    """
+    # Extract case metadata
+    metadata = case_data.get("metadata", {})
+    case_num = metadata.get("caseNumber", ["N/A"])[0]
+    case_title = metadata.get("caseTitle", ["N/A"])[0]
+    case_instrument = metadata.get("caseInstrument", ["Merger"])[0]
+    case_simplified = metadata.get("caseSimplified", [""])[0]
+    case_companies = metadata.get("caseCompanies", [])
+    last_decision_date = metadata.get("caseLastDecisionDate", [])
+    case_regulation = metadata.get("caseRegulation", [])
+    notification_date = metadata.get("caseNotificationDate", [])
+    deadline_date = metadata.get("caseDeadlineDate", [])
+    case_sectors = metadata.get("caseSectors", [])
+    decisions = case_data.get("decisions", [])
+    case_attachments = case_data.get("caseAttachments", [])
+
+    # Build subject
+    companies_str = " / ".join(case_companies) if case_companies else "N/A"
+    subject = f"EC Merger Case (USA-Related, No Match) – {case_num}: {companies_str}"
+
+    # Build HTML with inline styles (same style as matched cases)
+    html = f'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>EC Case (USA-Related) - {case_num}</title>
+</head>
+<body style="margin:0;background:#f5f7fb;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#1f2937;">
+<div style="max-width:980px;margin:28px auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:10px;box-shadow:0 6px 18px rgba(17,24,39,0.06);overflow:hidden;">
+<div style="padding:28px 28px 12px 28px;">
+<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+<div style="font-size:28px;font-weight:800;letter-spacing:0.2px;color:#111827;">{case_num}</div>
+<span style="display:inline-flex;align-items:center;justify-content:center;height:28px;padding:0 14px;border-radius:999px;font-size:13px;font-weight:700;border:1px solid #ef4444;color:#ef4444;background:#fff;">{case_instrument}</span>
+<span style="display:inline-flex;align-items:center;justify-content:center;height:28px;padding:0 14px;border-radius:999px;font-size:13px;font-weight:700;border:1px solid #f59e0b;color:#f59e0b;background:#fff;">USA-Related</span>'''
+
+    if case_simplified:
+        html += f'<div style="margin-left:2px;font-size:14px;color:#6b7280;font-style:italic;">{case_simplified}</div>'
+
+    html += f'''</div>
+<div style="margin-top:18px;font-size:26px;font-weight:900;color:#111827;">{case_title}</div>
+<div style="margin-top:18px;">'''
+
+    # 1. Companies - ALWAYS SHOW
+    companies_str = case_companies[0] if case_companies else ""
+    html += '<div style="font-size:14px;color:#111827;margin-bottom:8px;">'
+    html += '<span style="color:#6b7280;">Companies:</span> '
+    if companies_str:
+        company_list = [c.strip()
+                        for c in companies_str.split("/") if c.strip()]
+        for i, company in enumerate(company_list):
+            html += f'<a href="https://competition-cases.ec.europa.eu/search?caseInstrument=M&caseTitleOrCompanyName={company}" style="color:#2563eb;text-decoration:none;font-weight:700;">{company}</a>'
+            if i < len(company_list) - 1:
+                html += '<span style="color:#9ca3af;margin:0 8px;">|</span>'
+    else:
+        html += 'N/A'
+    html += '</div>'
+
+    # Case URL
+    html += '<div style="font-size:14px;color:#111827;margin-bottom:8px;">'
+    html += '<span style="color:#6b7280;">Case URL:</span> '
+    html += f'<a href="https://competition-cases.ec.europa.eu/cases/{case_num}" target="_blank" style="color:#2563eb;text-decoration:none;font-weight:700;">https://competition-cases.ec.europa.eu/cases/{case_num}</a><span style="color:#9ca3af;margin-left:6px;">↗</span>'
+    html += '</div>'
+
+    # 2. Last decision date - ALWAYS SHOW
+    html += '<div style="font-size:14px;color:#111827;margin-bottom:8px;">'
+    html += '<span style="color:#6b7280;">Last decision date:</span> '
+    html += '<span style="font-weight:800;">'
+    html += format_date(last_decision_date[0]) if last_decision_date else 'N/A'
+    html += '</span></div>'
+
+    # 3. Regulation - ALWAYS SHOW
+    html += '<div style="font-size:14px;color:#111827;margin-bottom:8px;">'
+    html += '<span style="color:#6b7280;">Regulation:</span> '
+    html += case_regulation[0] if case_regulation else 'N/A'
+    html += '</div>'
+
+    # 4. Notification date - ALWAYS SHOW
+    html += '<div style="font-size:14px;color:#111827;margin-bottom:8px;">'
+    html += '<span style="color:#6b7280;">Notification date:</span> '
+    html += format_date(notification_date[0]) if notification_date else 'N/A'
+    html += '</div>'
+
+    # 5. Provisional deadline - ALWAYS SHOW
+    html += '<div style="font-size:14px;color:#111827;margin-bottom:8px;">'
+    html += '<span style="color:#6b7280;">Provisional deadline:</span> '
+    html += format_date(deadline_date[0]) if deadline_date else 'N/A'
+    html += '</div>'
+
+    # 6. Economic activities - ALWAYS SHOW
+    html += '<div style="font-size:14px;color:#111827;margin-bottom:8px;">'
+    html += '<span style="color:#6b7280;">Economic activities:</span> '
+    if case_sectors:
+        for sector_str in case_sectors:
+            sector_data = parse_json_field(sector_str)
+            if sector_data:
+                code = sector_data.get("code", "")
+                label = sector_data.get("label", "")
+                if code and label:
+                    # Transform code from "NaceV2Sector_M_68.2" to "*M_68.2"
+                    sector_code = code.replace("NaceV2Sector_", "*")
+                    html += f'<a href="https://competition-cases.ec.europa.eu/search?caseInstrument=M&caseSectors={sector_code}&sortField=caseLastDecisionDate&sortOrder=DESC" style="color:#2563eb;text-decoration:none;font-weight:700;">{label}</a>'
+                    html += f'<span style="color:#6b7280;"> (NACE Rev. 2.1)</span>'
+    else:
+        html += 'N/A'
+    html += '</div>'
+
+    # Prior publication in OJ - SHOW IF AVAILABLE
+    oj_info = get_oj_prior_publication(decisions)
+
+    if oj_info:
+        html += '<div style="font-size:14px;color:#111827;margin-bottom:8px;">'
+        html += '<span style="color:#6b7280;">Prior publication in OJ:</span> '
+        if oj_info.get("reference"):
+            ref = oj_info["reference"]
+            ref_number = ref.replace("C", "").replace("c", "")
+            year = oj_info["publishedDate"][:4] if oj_info.get(
+                "publishedDate") else ""
+            if ref_number and year:
+                html += f'<a href="https://eur-lex.europa.eu/eli/C/{year}/{ref_number}/oj" target="_blank" style="color:#2563eb;text-decoration:none;font-weight:700;">OJEU {ref}</a>'
+                html += f'<span style="color:#9ca3af;margin:0 6px;">↗</span>'
+            else:
+                html += f'OJEU {ref}'
+        if oj_info.get("publishedDate"):
+            html += f'<span style="color:#111827;"> of {format_date(oj_info["publishedDate"])}</span>'
+        html += '</div>'
+
+    html += '</div></div>'
+
+    # Decisions section - ALWAYS SHOW if there are decisions
+    if decisions:
+        html += '<div style="height:1px;background:#e5e7eb;"></div>'
+        html += f'<div style="padding:18px 28px 8px 28px;"><div style="font-size:18px;font-weight:900;color:#111827;margin-bottom:14px;">Decisions</div>'
+
+        for decision in decisions:
+            decision_metadata = decision.get("metadata", {})
+            decision_types = decision_metadata.get("decisionTypes", [])
+            decision_adoption_date = decision_metadata.get(
+                "decisionAdoptionDate", [])
+
+            if decision_types or decision_adoption_date:
+                html += '<div style="padding:14px 0;"><div style="font-size:14px;color:#111827;">'
+
+                if decision_types:
+                    decision_type_data = parse_json_field(decision_types[0])
+                    if decision_type_data:
+                        html += f'<span style="font-weight:900;">{decision_type_data.get("label", "")}</span>'
+
+                if decision_adoption_date:
+                    html += f'<span style="color:#6b7280;"> of {format_date(decision_adoption_date[0])}</span>'
+
+                html += '</div>'
+
+                # Decision details
+                decision_attachments = decision.get("decisionAttachments", [])
+                press_releases = decision_metadata.get(
+                    "decisionPressReleases", [])
+
+                if decision_attachments or press_releases:
+                    html += '<div style="margin-top:10px;">'
+
+                    if decision_attachments:
+                        html += '<div style="font-size:14px;color:#111827;margin-bottom:10px;">'
+                        html += '<span style="color:#6b7280;">Decision text(s):</span> '
+
+                        for idx, attachment in enumerate(decision_attachments):
+                            att_metadata = attachment.get("metadata", {})
+                            att_link = att_metadata.get(
+                                "attachmentLink", [""])[0]
+                            att_lang = att_metadata.get(
+                                "attachmentLanguage", ["EN"])[0]
+                            att_pub_date = att_metadata.get(
+                                "attachmentPublicationBusinessDate", [""])[0]
+
+                            if att_link:
+                                html += '<span style="display:inline-flex;align-items:center;gap:6px;margin-right:12px;">'
+                                html += '<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:1px solid #ef4444;border-radius:3px;color:#ef4444;font-size:9px;font-weight:900;">PDF</span>'
+                                html += f'<a href="{att_link}" target="_blank" style="color:#2563eb;text-decoration:none;font-weight:800;">{att_lang}</a>'
+                                if att_pub_date:
+                                    html += f'<span style="color:#6b7280;font-size:13px;">published on {format_date(att_pub_date)}</span>'
+                                html += '</span>'
+
+                        html += '</div>'
+
+                    if press_releases:
+                        html += '<div style="font-size:14px;color:#111827;">'
+                        html += '<span style="color:#6b7280;">Press communication:</span> '
+                        try:
+                            pr_data = json.loads(press_releases[0]) if isinstance(
+                                press_releases[0], str) else press_releases[0]
+                            items = pr_data.get("items", [])
+                            for idx, item in enumerate(items):
+                                ref = item.get("reference", "")
+                                if idx > 0:
+                                    html += ' '
+                                html += f'<a href="http://europa.eu/rapid/pressReleasesAction.do?reference={ref}" target="_blank" style="color:#2563eb;text-decoration:none;font-weight:800;">{ref}</a>'
+                                html += '<span style="color:#9ca3af;margin-left:4px;">↗</span>'
+                        except:
+                            pass
+                        html += '</div>'
+
+                    html += '</div>'
+                html += '</div>'
+
+        html += '</div>'
+
+    # Other case related information - ALWAYS SHOW if there are attachments
+    if case_attachments:
+        html += '<div style="height:1px;background:#e5e7eb;"></div>'
+        html += f'<div style="padding:18px 28px 26px 28px;"><div style="font-size:18px;font-weight:900;color:#111827;margin-bottom:14px;">Other case related information</div>'
+
+        for attachment in case_attachments:
+            att_metadata = attachment.get("metadata", {})
+            att_category = att_metadata.get("attachmentCategory", [""])[0]
+            att_sent_date = att_metadata.get("attachmentSentDate", [""])[0]
+            att_link = att_metadata.get("attachmentLink", [""])[0]
+            att_pub_date = att_metadata.get(
+                "attachmentPublicationBusinessDate", [""])[0]
+            att_lang = att_metadata.get("attachmentLanguage", ["EN"])[0]
+
+            if att_category:
+                html += '<div style="font-size:14px;color:#111827;margin-bottom:10px;">'
+                html += '<span style="color:#6b7280;">'
+                html += att_category
+                if att_sent_date:
+                    html += f' of {format_date(att_sent_date)}'
+                html += ':</span> '
+
+                if att_link:
+                    html += '<span style="display:inline-flex;align-items:center;gap:6px;">'
+                    html += '<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:1px solid #ef4444;border-radius:3px;color:#ef4444;font-size:9px;font-weight:900;">PDF</span>'
+                    html += f'<a href="{att_link}" target="_blank" style="color:#2563eb;text-decoration:none;font-weight:800;">{att_lang}</a>'
+                    if att_pub_date:
+                        html += f'<span style="color:#6b7280;font-size:13px;">published on {format_date(att_pub_date)}</span>'
+                    html += '</span>'
+                html += '</div>'
+
+        html += '</div>'
+
+    html += '''</div>
+</body>
+</html>'''
+
+    return subject, html
+
+
+def send_unmatched_ec_case_email_via_webhook(case_data: Dict[str, Any]) -> bool:
+    """
+    Send email notification via n8n webhook for unmatched EC case that is USA-related.
+
+    Args:
+        case_data: The EC case data dictionary
+
+    Returns:
+        bool: True if email sent successfully, False otherwise
+    """
+    try:
+        # Generate email HTML
+        subject, html_email = generate_unmatched_ec_case_email_html(case_data)
+        print(f"📝 Generated email subject: {subject}")
+
+        # Get n8n webhook URL from environment variable
+        webhook_url = os.getenv(
+            "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6")
+        print(f"📤 Sending email via n8n webhook: {webhook_url}")
+
+        # Extract case metadata
+        metadata = case_data.get("metadata", {})
+        case_number = metadata.get("caseNumber", ["N/A"])[0]
+        case_title = metadata.get("caseTitle", ["N/A"])[0]
+        case_companies = metadata.get("caseCompanies", [])
+        companies_str = " / ".join(case_companies) if case_companies else "N/A"
+
+        # Prepare payload for n8n webhook
+        payload = {
+            'subject': subject,
+            'html': html_email,
+            'deal_id': 'N/A',  # No deal match
+            'target': 'N/A',  # No deal match
+            'acquirer': 'N/A',  # No deal match
+            'case_number': case_number,
+            'case_title': case_title,
+            'case_companies': companies_str,
+            'is_unmatched': True,
+            'usa_related': True,
+        }
+
+        # Send POST request to n8n webhook
+        response = requests.post(
+            webhook_url,
+            json=payload,
+            headers={'Content-Type': 'application/json'},
+            timeout=30
+        )
+        response.raise_for_status()
+
+        print(
+            f"✅ Email sent successfully via n8n webhook! Status: {response.status_code}")
+        return True
+
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️ Error sending email via webhook: {e}")
+        return False
+    except Exception as e:
+        print(f"⚠️ Error generating/sending email: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def save_ec_case_to_deal(deal_match, case_data, matched_company, matched_role):
     """
     Save matched EC case to MongoDB deal record under 'ec_cases' array.
@@ -910,6 +1230,22 @@ def match_cases_with_deals(filtered_cases: Dict[str, Any], deals: List[Dict[str,
                 traceback.print_exc()
         else:
             print(f"   ➖ No match")
+            # Verify if case companies are USA-related
+            try:
+                is_usa_related = verify_usa_relation(
+                    company_details=case_companies,
+                    case_type="EC"
+                )
+                if is_usa_related:
+                    print(
+                        f"   🇺🇸 USA-related case detected - sending email notification")
+                    send_unmatched_ec_case_email_via_webhook(case_data)
+                else:
+                    print(f"   ℹ️ Not USA-related - no action taken")
+            except Exception as e:
+                print(f"   ⚠️ Error verifying USA relation: {e}")
+                import traceback
+                traceback.print_exc()
 
     print(f"\n{'='*60}")
     print(f"✅ Matching complete: {matched_count} cases matched with deals")
@@ -953,10 +1289,10 @@ def main():
             }
 
         # Download JSON data
-        data = download_json(DATA_URL)
+        # data = download_json(DATA_URL)
 
         # Load JSON data from local file (temporary)
-        # data = load_json_from_file(LOCAL_DATA_PATH)
+        data = load_json_from_file(LOCAL_DATA_PATH)
 
         # Filter cases
         filtered_cases = filter_cases(data)
