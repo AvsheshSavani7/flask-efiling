@@ -8,7 +8,6 @@ from openai import OpenAI
 from bson import ObjectId
 from mongodb_connection import get_deals_collection, get_mongo_client, is_connected, init_mongodb_connection
 from html import escape as escape_html
-from datetime import datetime, timedelta
 from llm_verification_service import verify_usa_relation
 
 # Constants
@@ -16,7 +15,7 @@ DATA_URL = "https://compcases-open-data-portal-files-prod.s3.eu-west-1.amazonaws
 # Temporary: use local file
 LOCAL_DATA_PATH = "case-data-M.json"
 # CUTOFF_DATE = datetime.strptime("2026-01-05", "%Y-%m-%d")
-CUTOFF_DATE = datetime.datetime.now().replace(
+CUTOFF_DATE = datetime.now().replace(
     hour=0, minute=0, second=0, microsecond=0)
 OUTPUT_PATH = "ec_filtered_cases.json"
 MATCHED_DEALS_OUTPUT = "ec_matched_deals.json"
