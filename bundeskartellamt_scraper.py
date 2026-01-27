@@ -9,6 +9,7 @@ from datetime import datetime, date
 from bson import ObjectId
 from mongodb_connection import get_deals_collection, get_mongo_client, is_connected
 from html import escape as escape_html
+from llm_verification_service import verify_country_relation
 
 # Load OpenAI Key
 load_dotenv(".env")
@@ -450,6 +451,136 @@ def send_german_scrap_email_via_webhook(german_scrap_data, deal_match, updated_f
         return False
 
 
+def german_file_number_exists(file_number: str) -> bool:
+    """
+    Check whether this Bundeskartellamt file_number already exists in MongoDB.
+    Used to gate "new record" vs "update" for unmatched USA verification emails.
+    """
+    try:
+        if not file_number:
+            return False
+        collection = get_deals_collection()
+        if collection is None:
+            return False
+        existing = collection.find_one(
+            {"german_scrap.file_number": file_number})
+        return existing is not None
+    except Exception:
+        return False
+
+
+def generate_unmatched_german_scrap_email_html(record: dict) -> tuple:
+    """
+    Generate HTML email for unmatched Bundeskartellamt record that is USA-related.
+    """
+    file_number = record.get("file_number", "N/A")
+    date_val = record.get("date", "")
+    pursue_en = record.get("pursue_en", "")
+    pursue = record.get("pursue", "")
+    product_area_en = record.get("product_area_en", "")
+    product_area = record.get("product_area", "")
+
+    subject = f"Bundeskartellamt (USA-Related) – {file_number}"
+
+    html_email = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{escape_html(subject)}</title>
+</head>
+<body style="margin:0; padding:0; font-family:Arial,sans-serif; background-color:#f4f4f4;">
+  <div style="max-width:900px; margin:20px auto; background-color:#ffffff; padding:30px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1);">
+    <h2 style="color:#333; text-align:center; margin-top:0; padding-bottom:20px; border-bottom:3px solid #f59e0b;">
+      Bundeskartellamt (USA-Related)
+    </h2>
+    <div style="text-align:center; margin-bottom:20px;">
+      <div style="background-color:#f59e0b; color:white; padding:8px 16px; border-radius:4px; display:inline-block; margin-bottom:15px; font-weight:bold;">
+        🇺🇸 USA-RELATED
+      </div>
+    </div>
+
+    <table style="width:100%; border-collapse:collapse; margin-bottom:20px;">
+      <tr>
+        <td style="padding:8px; font-weight:bold; width:170px; color:#555;">File number:</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(file_number))}</td>
+      </tr>
+      <tr style="background-color:#f9f9f9;">
+        <td style="padding:8px; font-weight:bold; color:#555;">Date:</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(date_val))}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px; font-weight:bold; color:#555;">Pursue (EN):</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(pursue_en))}</td>
+      </tr>
+      <tr style="background-color:#f9f9f9;">
+        <td style="padding:8px; font-weight:bold; color:#555;">Pursue (DE):</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(pursue))}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px; font-weight:bold; color:#555;">Product areas (EN):</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(product_area_en))}</td>
+      </tr>
+      <tr style="background-color:#f9f9f9;">
+        <td style="padding:8px; font-weight:bold; color:#555;">Product areas (DE):</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(product_area))}</td>
+      </tr>
+    </table>
+  </div>
+</body>
+</html>
+"""
+    return subject, html_email
+
+
+def send_unmatched_german_scrap_email_via_webhook(record: dict) -> bool:
+    """
+    Send email notification via n8n webhook for unmatched Bundeskartellamt record that is USA-related.
+    """
+    try:
+        subject, html_email = generate_unmatched_german_scrap_email_html(
+            record)
+        print(f"📝 Generated email subject: {subject}")
+
+        webhook_url = os.getenv(
+            "N8N_WEBHOOK_URL",
+            "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6",
+        )
+        print(f"📤 Sending email via n8n webhook: {webhook_url}")
+
+        payload = {
+            "subject": subject,
+            "html": html_email,
+            "deal_id": "N/A",
+            "target": "N/A",
+            "acquirer": "N/A",
+            "file_number": record.get("file_number", "N/A"),
+            "date": record.get("date", ""),
+            "pursue_en": record.get("pursue_en", ""),
+            "product_area_en": record.get("product_area_en", ""),
+            "usa_related": True,
+            "is_unmatched": True,
+        }
+
+        response = requests.post(
+            webhook_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        print(f"✅ Email sent successfully! Status: {response.status_code}")
+        return True
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️ Error sending email via webhook: {e}")
+        return False
+    except Exception as e:
+        print(f"⚠️ Error generating/sending email: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def save_german_scrap_data_to_deal(deal_match, german_scrap_data, updated_fields=None):
     """
     Save matched result to MongoDB deal record under 'german_scrap' node.
@@ -739,6 +870,29 @@ def match_records_with_deals(records):
                 traceback.print_exc()
         else:
             print(f"  ➖ No match")
+            # If no deal match, verify USA-related AND new-record only, then email
+            try:
+                company_details = {
+                    # Provide today's date so LLM can judge "new vs update"
+                    "today_date": datetime.now().strftime("%Y-%m-%d"),
+                    "record": record,
+                }
+
+                is_usa_related_and_new = verify_country_relation(
+                    company_details=company_details,
+                    country="USA",
+                    case_type="GERMANY",
+                )
+
+                if is_usa_related_and_new:
+                    print("   🇺🇸 USA-related NEW record detected - sending email")
+                    send_unmatched_german_scrap_email_via_webhook(record)
+                else:
+                    print("   ℹ️ Not USA-related and new - no action taken")
+            except Exception as e:
+                print(f"   ⚠️ Error verifying USA relation: {e}")
+                import traceback
+                traceback.print_exc()
 
     print(f"\n{'='*60}")
     print(

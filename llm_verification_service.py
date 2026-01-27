@@ -225,7 +225,8 @@ def verify_country_relation(
             # Extract JSON array region defensively
             start = content.find("[")
             end = content.rfind("]")
-            json_str = content[start:end + 1] if start != -1 and end != -1 and end > start else "[]"
+            json_str = content[start:end + 1] if start != - \
+                1 and end != -1 and end > start else "[]"
 
             try:
                 parsed = json.loads(json_str)
@@ -258,6 +259,54 @@ def verify_country_relation(
             print(f"⚠️ LLM Verification Error: {e}")
             # Default to empty list on error to avoid false positives
             return []
+    elif case_type.upper() == "GERMANY":
+        context_info = "Bundeskartellamt merger review (Germany)"
+
+        prompt = f"""
+You are a business analyst specializing in M&A and competition law cases.
+
+Decide if this record is related to {country} AND the record looks NEWLY ADDED (not merely an update/extension of an older item).
+
+Rules:
+- Use the provided "today_date" to judge newness.
+- If the record appears to be an older item that was updated (e.g., deadline extended, return/diploma dates, or clearly old original date), answer "false".
+- Answer "true" only if BOTH:
+  1) The record is USA-related ({country}) (HQ, major operations/subsidiaries, US listing, or clear US market impact)
+  2) The record looks newly added relative to today_date (not a routine update)
+
+Record details:
+{company_details}
+
+Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanation).
+""".strip()
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an expert analyst. Reply only 'true' or 'false'.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0,
+                max_tokens=10,
+            )
+
+            result = response.choices[0].message.content.strip().lower()
+            if result == "true":
+                return True
+            if result == "false":
+                return False
+
+            print(
+                f"⚠️ LLM returned unexpected result: '{result}', defaulting to False")
+            return False
+        except Exception as e:
+            print(f"⚠️ LLM Verification Error: {e}")
+            return False
+
     elif case_type.upper() == "BRAZIL":
         context_info = "Brazil CADE merger case"
 
