@@ -6,6 +6,7 @@ Can be used across different case types (EC, China, Brazil, etc.).
 """
 
 import os
+import json
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -19,7 +20,7 @@ def verify_country_relation(
     company_details: Any,
     country: str = "USA",
     case_type: str = "EC",
-) -> bool:
+) -> Any:
     """
     Verify if companies/deals are related to a specific country using LLM.
 
@@ -181,6 +182,82 @@ def verify_country_relation(
             print(f"⚠️ LLM Verification Error: {e}")
             # Default to False on error to avoid false positives
             return False
+
+    elif case_type.upper() == "CHINA-UNCONDITIONAL":
+        context_info = "China-unconditional SAMR merger case"
+
+        prompt = f"""
+            You are a business analyst specializing in M&A and competition law cases.
+
+            From the company details below, identify which company names are related to {country}.
+            "Related" means the company is headquartered in {country}, has significant operations/subsidiaries in {country},
+            is publicly traded in {country}, or the transaction clearly impacts {country} markets.
+
+            Company Details:
+            {company_details}
+
+            Return ONLY a valid JSON array of company names (strings).
+            - If none are related, return []
+            - Do not include any explanation or extra keys
+            Example: ["Apple", "Microsoft"]
+            """
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system",
+                        "content": f"You are an expert analyst. Return ONLY a JSON array of company names related to {country}."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0,
+                max_tokens=200,
+            )
+
+            print(f"🔍 SAMR prompt: {prompt}")
+            content = response.choices[0].message.content.strip()
+
+            # Strip common code-fence wrappers
+            if content.startswith("```"):
+                content = content.strip().strip("`")
+                content = content.replace("json", "", 1).strip()
+
+            # Extract JSON array region defensively
+            start = content.find("[")
+            end = content.rfind("]")
+            json_str = content[start:end + 1] if start != -1 and end != -1 and end > start else "[]"
+
+            try:
+                parsed = json.loads(json_str)
+            except Exception as e:
+                print(f"⚠️ Could not parse JSON array from LLM: {e}")
+                parsed = []
+
+            if not isinstance(parsed, list):
+                print(f"⚠️ LLM returned non-list for company array, defaulting to []")
+                return []
+
+            # Normalize: keep non-empty strings, unique, preserve order
+            companies: List[str] = []
+            seen = set()
+            for item in parsed:
+                if not isinstance(item, str):
+                    continue
+                name = item.strip()
+                if not name:
+                    continue
+                key = name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                companies.append(name)
+
+            return companies
+
+        except Exception as e:
+            print(f"⚠️ LLM Verification Error: {e}")
+            # Default to empty list on error to avoid false positives
+            return []
     elif case_type.upper() == "BRAZIL":
         context_info = "Brazil CADE merger case"
 
@@ -281,7 +358,7 @@ def verify_country_relation(
 def verify_usa_relation(
     company_details: Any,
     case_type: str = "EC",
-) -> bool:
+) -> Any:
     """
     Convenience function to verify if companies are related to USA.
 
@@ -291,7 +368,7 @@ def verify_usa_relation(
         additional_context: Optional additional context to provide to LLM
 
     Returns:
-        bool: True if companies are related to USA, False otherwise
+        Usually bool. For `case_type="CHINA-UNCONDITIONAL"` returns a list of USA-related company names.
     """
     return verify_country_relation(
         company_details=company_details,

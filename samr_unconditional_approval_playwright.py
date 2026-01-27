@@ -12,14 +12,15 @@ import re
 from bson import ObjectId
 from mongodb_connection import get_deals_collection, get_mongo_client, is_connected
 from html import escape as escape_html
+from llm_verification_service import verify_usa_relation
 
 # Configuration
 # CUTOFF_DATE: Extract records >= this date. Stop when records are < this date.
 # Example: If CUTOFF_DATE = 2025-02-15, extract 2025-02-15 and newer, stop at 2025-02-14
-CUTOFF_DATE = datetime.datetime.now().replace(
-    hour=0, minute=0, second=0, microsecond=0)
-# CUTOFF_DATE = CUTOFF_DATE = datetime.datetime.strptime(
-#     "2025-12-26", "%Y-%m-%d")
+# CUTOFF_DATE = datetime.datetime.now().replace(
+#     hour=0, minute=0, second=0, microsecond=0)
+CUTOFF_DATE = datetime.datetime.strptime(
+    "2026-01-26", "%Y-%m-%d")
 BASE_URL = "https://www.samr.gov.cn/fldes/ajgs/wtjjz/"
 OUTPUT_JSON = "deals_with_unconditional.json"
 EXTRACTED_RECORDS_JSON = "samr_unconditional_extracted_records.json"
@@ -427,6 +428,130 @@ def send_samr_unconditional_email_via_webhook(samr_data, deal_match):
         return False
 
 
+def generate_unmatched_samr_unconditional_email_html(record: dict, usa_company: str, translated_table: str) -> tuple:
+    """
+    Generate HTML email for unmatched SAMR China unconditional approval case that is USA-related.
+
+    Args:
+        record: Extracted record dict (title_en/title_cn/url/date)
+        usa_company: Company identified as USA-related
+        translated_table: Translated table/details extracted from the page
+
+    Returns:
+        Tuple of (subject, html_email)
+    """
+    title_cn = record.get("title_cn", "N/A")
+    title_en = record.get("title_en", "N/A")
+    date_str = record.get("date", "N/A")
+    url = record.get("url", "")
+
+    subject = f"SAMR China Unconditional (USA-Related) – {usa_company}"
+
+    safe_table = escape_html(translated_table or "")
+
+    html_email = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{escape_html(subject)}</title>
+</head>
+<body style="margin:0; padding:0; font-family:Arial,sans-serif; background-color:#f4f4f4;">
+  <div style="max-width:900px; margin:20px auto; background-color:#ffffff; padding:30px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1);">
+    <h2 style="color:#333; text-align:center; margin-top:0; padding-bottom:20px; border-bottom:3px solid #f59e0b;">
+      SAMR China Unconditional Approval (USA-Related)
+    </h2>
+    <div style="text-align:center; margin-bottom:20px;">
+      <div style="background-color:#f59e0b; color:white; padding:8px 16px; border-radius:4px; display:inline-block; margin-bottom:15px; font-weight:bold;">
+        🇺🇸 USA-RELATED COMPANY: {escape_html(usa_company)}
+      </div>
+    </div>
+
+    <table style="width:100%; border-collapse:collapse; margin-bottom:20px;">
+      <tr>
+        <td style="padding:8px; font-weight:bold; width:170px; color:#555;">Notice Date:</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(date_str))}</td>
+      </tr>
+      <tr style="background-color:#f9f9f9;">
+        <td style="padding:8px; font-weight:bold; color:#555;">Title (Chinese):</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(title_cn))}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px; font-weight:bold; color:#555;">Title (English):</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(title_en))}</td>
+      </tr>"""
+
+    if url:
+        html_email += f"""
+      <tr style="background-color:#f9f9f9;">
+        <td style="padding:8px; font-weight:bold; color:#555;">Detail URL:</td>
+        <td style="padding:8px;">
+          <a href="{escape_html(url)}" style="color:#27ae60; text-decoration:none;" target="_blank">
+            View SAMR Detail Page
+          </a>
+        </td>
+      </tr>"""
+
+    html_email += f"""
+    </table>
+
+   
+  </div>
+</body>
+</html>
+"""
+    return subject, html_email
+
+
+def send_unmatched_samr_unconditional_email_via_webhook(record: dict, usa_company: str, translated_table: str) -> bool:
+    """
+    Send email notification via n8n webhook for unmatched SAMR unconditional approval case that is USA-related.
+    Sends ONE email per usa_company.
+    """
+    try:
+        subject, html_email = generate_unmatched_samr_unconditional_email_html(
+            record, usa_company, translated_table)
+        print(f"📝 Generated email subject: {subject}")
+
+        webhook_url = os.getenv(
+            "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6")
+        print(f"📤 Sending email via n8n webhook: {webhook_url}")
+
+        payload = {
+            "subject": subject,
+            "html": html_email,
+            "deal_id": "N/A",
+            "target": "N/A",
+            "acquirer": "N/A",
+            "title_cn": record.get("title_cn", "N/A"),
+            "title_en": record.get("title_en", "N/A"),
+            "date": record.get("date", "N/A"),
+            "url": record.get("url", ""),
+            "usa_related": True,
+            "is_unmatched": True,
+            "usa_related_company": usa_company,
+        }
+
+        response = requests.post(
+            webhook_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        response.raise_for_status()
+
+        print(f"✅ Email sent successfully! Status: {response.status_code}")
+        return True
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️ Error sending email via webhook: {e}")
+        return False
+    except Exception as e:
+        print(f"⚠️ Error generating/sending email: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def save_samr_unconditional_data_to_deal(deal_match, matched_result):
     """
     Save matched result to MongoDB deal record under 'samr_unconditional' node.
@@ -812,6 +937,43 @@ def match_records_with_deals(records):
                                 f"  ⚠️ Match found but deal not found: {company}")
                 else:
                     print(f"  ➖ No match")
+                    # For unconditional: when no matched deals found, check USA-related companies via LLM
+                    try:
+                        # Use translated_table as the primary signal, per your request
+                        company_details = f"""
+Title (EN): {title_en}
+Title (CN): {title_cn}
+Date: {date_str}
+URL: {url}
+
+Translated Table:
+{translated_table}
+""".strip()
+
+                        usa_companies = verify_usa_relation(
+                            company_details=company_details,
+                            case_type="CHINA-UNCONDITIONAL",
+                        )
+
+                        # Defensive: ensure we have a list of companies
+                        if isinstance(usa_companies, bool):
+                            usa_companies = []
+                        elif not isinstance(usa_companies, list):
+                            usa_companies = []
+
+                        if usa_companies:
+                            print(
+                                f"   🇺🇸 USA-related companies detected: {usa_companies}")
+                            for usa_company in usa_companies:
+                                send_unmatched_samr_unconditional_email_via_webhook(
+                                    record, usa_company, translated_table
+                                )
+                        else:
+                            print("   ℹ️ Not USA-related - no action taken")
+                    except Exception as e:
+                        print(f"   ⚠️ Error verifying USA relation: {e}")
+                        import traceback
+                        traceback.print_exc()
 
         finally:
             browser.close()

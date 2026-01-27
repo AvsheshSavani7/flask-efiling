@@ -776,7 +776,7 @@ def generate_unmatched_cma_case_email_html(record: dict) -> tuple:
     record_id = record.get("id", "")
 
     # Build subject
-    subject = f"UK CMA Merger Case (USA-Related, No Match) – {title[:60]}"
+    subject = f"UK CMA Merger Case (USA-Related) – {title[:60]}"
 
     html_email = f"""
 <!DOCTYPE html>
@@ -788,7 +788,7 @@ def generate_unmatched_cma_case_email_html(record: dict) -> tuple:
 <body style="margin:0; padding:0; font-family:Arial,sans-serif; background-color:#f4f4f4;">
   <div style="max-width:900px; margin:20px auto; background-color:#ffffff; padding:30px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1);">
     <h2 style="color:#333; text-align:center; margin-top:0; padding-bottom:20px; border-bottom:3px solid #f59e0b;">
-      UK CMA Merger Case (USA-Related, No Match)
+      UK CMA Merger Case (USA-Related)
     </h2>
     <div style="text-align:center; margin-bottom:20px;">
       <div style="background-color:#f59e0b; color:white; padding:8px 16px; border-radius:4px; display:inline-block; margin-bottom:15px; font-weight:bold;">🇺🇸 USA-RELATED</div>

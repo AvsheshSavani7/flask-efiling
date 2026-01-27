@@ -700,7 +700,7 @@ def generate_unmatched_ec_case_email_html(case_data: Dict[str, Any]) -> tuple:
 
     # Build subject
     companies_str = " / ".join(case_companies) if case_companies else "N/A"
-    subject = f"EC Merger Case (USA-Related, No Match) – {case_num}: {companies_str}"
+    subject = f"EC Merger Case (USA-Related) – {case_num}: {companies_str}"
 
     # Build HTML with inline styles (same style as matched cases)
     html = f'''<!doctype html>
