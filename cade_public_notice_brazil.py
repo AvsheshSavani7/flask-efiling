@@ -14,6 +14,7 @@ from pymongo import MongoClient
 from bson import ObjectId
 from mongodb_connection import get_deals_collection, get_mongo_client, is_connected
 from html import escape as escape_html
+from llm_verification_service import verify_usa_relation
 
 # Configuration
 BASE_URL = "https://sei.cade.gov.br/sei/modulos/pesquisa/md_pesq_processo_pesquisar.php?acao_externa=protocolo_pesquisar&acao_origem_externa=protocolo_pesquisar&id_orgao_acesso_externo=0"
@@ -538,6 +539,135 @@ def send_brazil_email_via_webhook(brazil_data, deal_match):
             f"✅ Email sent successfully via n8n webhook! Status: {response.status_code}")
         return True
 
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️ Error sending email via webhook: {e}")
+        return False
+    except Exception as e:
+        print(f"⚠️ Error generating/sending email: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def generate_unmatched_brazil_email_html(brazil_data: dict) -> tuple:
+    """
+    Generate HTML email for unmatched CADE Brazil notice that is USA-related.
+
+    Args:
+        brazil_data: dict containing case/notice data
+
+    Returns:
+        Tuple of (subject, html_email)
+    """
+    process = brazil_data.get("process", "N/A")
+    notice_type = brazil_data.get("type", "N/A")
+    registration_date = brazil_data.get("registration_date", "N/A")
+    interessados = brazil_data.get("interessados", "N/A")
+    translated = brazil_data.get("interessados_en", "")
+    detail_url = brazil_data.get("detail_url", "")
+
+    subject = f"CADE Brazil (USA-Related) – {process}"
+
+    html_email = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{escape_html(subject)}</title>
+</head>
+<body style="margin:0; padding:0; font-family:Arial,sans-serif; background-color:#f4f4f4;">
+  <div style="max-width:900px; margin:20px auto; background-color:#ffffff; padding:30px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1);">
+    <h2 style="color:#333; text-align:center; margin-top:0; padding-bottom:20px; border-bottom:3px solid #f59e0b;">
+      CADE Brazil (USA-Related)
+    </h2>
+    <div style="text-align:center; margin-bottom:20px;">
+      <div style="background-color:#f59e0b; color:white; padding:8px 16px; border-radius:4px; display:inline-block; margin-bottom:15px; font-weight:bold;">
+        🇺🇸 USA-RELATED
+      </div>
+    </div>
+
+    <table style="width:100%; border-collapse:collapse; margin-bottom:20px;">
+      <tr>
+        <td style="padding:8px; font-weight:bold; width:170px; color:#555;">Process:</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(process))}</td>
+      </tr>
+      <tr style="background-color:#f9f9f9;">
+        <td style="padding:8px; font-weight:bold; color:#555;">Type:</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(notice_type))}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px; font-weight:bold; color:#555;">Registration Date:</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(registration_date))}</td>
+      </tr>
+      <tr style="background-color:#f9f9f9;">
+        <td style="padding:8px; font-weight:bold; color:#555;">Interested Parties (PT):</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(interessados))}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px; font-weight:bold; color:#555;">Interested Parties (EN):</td>
+        <td style="padding:8px; color:#333;">{escape_html(str(translated))}</td>
+      </tr>"""
+
+    if detail_url:
+        html_email += f"""
+      <tr style="background-color:#f9f9f9;">
+        <td style="padding:8px; font-weight:bold; color:#555;">Detail URL:</td>
+        <td style="padding:8px;">
+          <a href="{escape_html(detail_url)}" style="color:#0066cc; text-decoration:none;" target="_blank">
+            View CADE Detail Page
+          </a>
+        </td>
+      </tr>"""
+
+    html_email += """
+    </table>
+  </div>
+</body>
+</html>
+"""
+
+    return subject, html_email
+
+
+def send_unmatched_brazil_email_via_webhook(brazil_data: dict) -> bool:
+    """
+    Send email notification via n8n webhook for unmatched CADE Brazil notice that is USA-related.
+    """
+    try:
+        subject, html_email = generate_unmatched_brazil_email_html(brazil_data)
+        print(f"📝 Generated email subject: {subject}")
+
+        webhook_url = os.getenv(
+            "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/7235c844-154b-4e64-a30b-fc980181f8f4")
+        print(f"📤 Sending email via n8n webhook: {webhook_url}")
+
+        payload = {
+            "subject": subject,
+            "html": html_email,
+            "deal_id": "N/A",
+            "target": "N/A",
+            "acquirer": "N/A",
+            "process": brazil_data.get("process", "N/A"),
+            "type": brazil_data.get("type", "N/A"),
+            "registration_date": brazil_data.get("registration_date", "N/A"),
+            "detail_url": brazil_data.get("detail_url", ""),
+            "interessados": brazil_data.get("interessados", "N/A"),
+            "interessados_en": brazil_data.get("interessados_en", ""),
+            "usa_related": True,
+            "is_unmatched": True,
+        }
+
+        response = requests.post(
+            webhook_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        response.raise_for_status()
+
+        print(
+            f"✅ Email sent successfully via n8n webhook! Status: {response.status_code}")
+        return True
     except requests.exceptions.RequestException as e:
         print(f"⚠️ Error sending email via webhook: {e}")
         return False
@@ -1644,7 +1774,7 @@ def main(start_date=None, end_date=None, headless=True):
     if end_date is None:
         end_date = datetime.datetime.now()
     if start_date is None:
-        start_date = end_date - datetime.timedelta(days=30)
+        start_date = end_date - datetime.timedelta(days=10)
 
     with sync_playwright() as p:
         # Launch browser with options similar to Selenium
@@ -1969,6 +2099,42 @@ def main(start_date=None, end_date=None, headless=True):
                             except Exception as e:
                                 print(f"⚠️ Error parsing LLM result: {e}")
                                 deal_match = {"llm_match": llm_result}
+                        else:
+                            # No deal match found - verify if USA-related and email if True
+                            try:
+                                company_details = f"""
+Process: {autuacao_info.get("process", "")}
+Type: {autuacao_info.get("type", "")}
+Registration Date: {autuacao_info.get("registration_date", "")}
+Interested Parties (PT): {interessados_text}
+Interested Parties (EN): {translated}
+Detail URL: {detail_url}
+""".strip()
+
+                                is_usa_related = verify_usa_relation(
+                                    company_details=company_details,
+                                    case_type="BRAZIL",
+                                )
+
+                                if is_usa_related:
+                                    print(
+                                        "🇺🇸 USA-related CADE record detected - sending email")
+                                    unmatched_data = {
+                                        "process": autuacao_info.get("process", ""),
+                                        "type": autuacao_info.get("type", ""),
+                                        "registration_date": autuacao_info.get("registration_date", ""),
+                                        "interessados": interessados_text,
+                                        "interessados_en": translated,
+                                        "detail_url": detail_url,
+                                    }
+                                    send_unmatched_brazil_email_via_webhook(
+                                        unmatched_data)
+                                else:
+                                    print("ℹ️ Not USA-related - no action taken")
+                            except Exception as e:
+                                print(f"⚠️ Error verifying USA relation: {e}")
+                                import traceback
+                                traceback.print_exc()
 
                     if deal_match:
                         # Extract table data from detail page

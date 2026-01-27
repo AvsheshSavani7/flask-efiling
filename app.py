@@ -664,7 +664,8 @@ def brazil_scraper():
     try:
         # Hardcode date range: yesterday to today
         end_date = datetime.datetime.now()
-        start_date = end_date - datetime.timedelta(days=1)
+        start_date = datetime.datetime.now()
+        # start_date = end_date - datetime.timedelta(days=1)
 
         # Get headless parameter from query
         headless_str = request.args.get('headless', 'true')
