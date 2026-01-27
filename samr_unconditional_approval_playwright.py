@@ -17,10 +17,10 @@ from llm_verification_service import verify_usa_relation
 # Configuration
 # CUTOFF_DATE: Extract records >= this date. Stop when records are < this date.
 # Example: If CUTOFF_DATE = 2025-02-15, extract 2025-02-15 and newer, stop at 2025-02-14
-# CUTOFF_DATE = datetime.datetime.now().replace(
-#     hour=0, minute=0, second=0, microsecond=0)
-CUTOFF_DATE = datetime.datetime.strptime(
-    "2026-01-26", "%Y-%m-%d")
+CUTOFF_DATE = datetime.datetime.now().replace(
+    hour=0, minute=0, second=0, microsecond=0)
+# CUTOFF_DATE = datetime.datetime.strptime(
+#     "2026-01-26", "%Y-%m-%d")
 BASE_URL = "https://www.samr.gov.cn/fldes/ajgs/wtjjz/"
 OUTPUT_JSON = "deals_with_unconditional.json"
 EXTRACTED_RECORDS_JSON = "samr_unconditional_extracted_records.json"
