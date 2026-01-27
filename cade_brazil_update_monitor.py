@@ -340,7 +340,7 @@ def send_update_email_via_webhook(brazil_data, deal_info, new_records):
 
         # Get n8n webhook URL from environment variable
         webhook_url = os.getenv(
-            "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/7235c844-154b-4e64-a30b-fc980181f8f4")
+            "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6")
         print(f"📤 Sending update email via n8n webhook: {webhook_url}")
 
         # Extract deal information for payload
