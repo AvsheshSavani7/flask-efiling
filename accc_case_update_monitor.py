@@ -67,56 +67,26 @@ def extract_current_detail_page_info(page, url: str) -> Dict[str, Any]:
         except Exception as e:
             print(f"      ⚠️ Error extracting stage: {e}")
 
-        # Extract ACCC Determination (if exists in decisions table)
+        # Extract ACCC Determination (Approved, Not opposed, etc.) from Status section
         try:
-            # Look for determination in the decisions/events table
-            determination_rows = page.query_selector_all(
-                ".field--name-field-acccgov-decisions table tbody tr")
-            for row in determination_rows:
-                event_desc = row.query_selector("td:nth-child(2)")
-                if event_desc:
-                    desc_text = event_desc.inner_text().strip().lower()
-                    if "determination" in desc_text and "published" in desc_text:
-                        date_elem = row.query_selector("time")
-                        if date_elem:
-                            current_info["determination_publication_date"] = date_elem.inner_text(
-                            ).strip()
-                        break
-        except Exception as e:
-            print(f"      ⚠️ Error extracting determination: {e}")
-
-        # Extract end of determination period
-        try:
-            end_period_elem = page.query_selector(
-                ".field--name-field-acccgov-end-determination .field__item time")
-            if end_period_elem:
-                current_info["end_of_determination_period"] = end_period_elem.inner_text(
-                ).strip()
-        except Exception as e:
-            print(
-                f"      ⚠️ Error extracting end of determination period: {e}")
-
-        # Extract ACCC determination outcome (Approved, Not opposed, etc.)
-        try:
-            # Look for the determination outcome in various places
             determination_elem = page.query_selector(
-                ".field--name-field-acccgov-determination .field__item")
+                ".field--name-field-acccgov-acquisition-deter .field__item")
             if determination_elem:
                 current_info["accc_determination"] = determination_elem.inner_text(
                 ).strip()
-            else:
-                # Alternative: check in decisions for determination type
-                decision_rows = page.query_selector_all(
-                    ".field--name-field-acccgov-decisions table tbody tr")
-                for row in decision_rows:
-                    event_desc = row.query_selector("td:nth-child(2)")
-                    if event_desc:
-                        desc_text = event_desc.inner_text().strip()
-                        if any(keyword in desc_text.lower() for keyword in ["approved", "not opposed", "withdrawn", "determination"]):
-                            current_info["accc_determination"] = desc_text
-                            break
         except Exception as e:
             print(f"      ⚠️ Error extracting ACCC determination: {e}")
+
+        # Extract Determination publication date from Status section
+        try:
+            pub_date_elem = page.query_selector(
+                ".field--name-field-acccgov-pub-reg-end-date .field__item time")
+            if pub_date_elem:
+                current_info["determination_publication_date"] = pub_date_elem.inner_text(
+                ).strip()
+        except Exception as e:
+            print(
+                f"      ⚠️ Error extracting determination publication date: {e}")
 
         return current_info
 
