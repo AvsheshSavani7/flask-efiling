@@ -17,6 +17,8 @@ from samr_unconditional_approval_playwright import main as samr_unconditional_ma
 from uk_cma_mergers_scraper_atom import main as uk_cma_main
 from bundeskartellamt_scraper import main as bundeskartellamt_main
 from ec_case_filter import main as ec_case_filter_main
+from accc_acquisitions import main as accc_acquisitions_main
+from accc_case_update_monitor import process_accc_case_updates
 from mongodb_connection import init_mongodb_connection, close_mongodb_connection, is_connected
 import logging
 import os
@@ -76,6 +78,8 @@ def home():
             "/bundeskartellamt-scraper": "GET - Scrape Bundeskartellamt German merger cases and match with deals",
             "/ec-case-filter": "GET - Filter and match EC merger cases with deals",
             "/ec-case-update-monitor": "GET - Monitor EC merger cases for updates and send email notifications",
+            "/accc-acquisitions-scraper": "GET - Scrape ACCC acquisitions and match with deals",
+            "/accc-case-update-monitor": "GET - Monitor ACCC acquisition cases for updates and send email notifications",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -1168,6 +1172,103 @@ def ec_case_update_monitor():
 
     except Exception as e:
         logger.error(f"❌ Error starting EC case update monitor: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/accc-acquisitions-scraper', methods=['GET'])
+def accc_acquisitions_scraper():
+    """
+    Scrape ACCC acquisitions and match with deals.
+    Fetches latest ACCC acquisition records and matches them with deals in MongoDB.
+    Process runs in background - returns immediately.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        # Run the scraper process in background thread
+        def run_scraper():
+            try:
+                logger.info("Starting ACCC acquisitions scraper in background")
+                accc_acquisitions_main()
+                logger.info(
+                    "✅ ACCC acquisitions scraper completed successfully")
+            except Exception as e:
+                logger.error(f"❌ Error in ACCC acquisitions scraper: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        # Start background thread
+        thread = threading.Thread(target=run_scraper, daemon=True)
+        thread.start()
+
+        # Return immediate response
+        return jsonify({
+            "success": True,
+            "message": "ACCC acquisitions scraper started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Error starting ACCC acquisitions scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/accc-case-update-monitor', methods=['GET'])
+def accc_case_update_monitor():
+    """
+    Monitor ACCC acquisition cases for updates.
+    Checks existing ACCC cases in MongoDB for changes in:
+    - Acquisition status
+    - Stage
+    - Determination publication date
+    - ACCC Determination
+    Sends email notifications when changes are detected.
+    Process runs in background - returns immediately.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        # Run the monitor process in background thread
+        def run_monitor():
+            try:
+                logger.info("Starting ACCC case update monitor in background")
+                process_accc_case_updates()
+                logger.info(
+                    "✅ ACCC case update monitor completed successfully")
+            except Exception as e:
+                logger.error(f"❌ Error in ACCC case update monitor: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        # Start background thread
+        thread = threading.Thread(target=run_monitor, daemon=True)
+        thread.start()
+
+        # Return immediate response
+        return jsonify({
+            "success": True,
+            "message": "ACCC case update monitor started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Error starting ACCC case update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
