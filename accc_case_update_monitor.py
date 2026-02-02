@@ -88,6 +88,52 @@ def extract_current_detail_page_info(page, url: str) -> Dict[str, Any]:
             print(
                 f"      ⚠️ Error extracting determination publication date: {e}")
 
+        # Extract Decisions and key events
+        try:
+            events = []
+            event_rows = page.query_selector_all(
+                ".field--name-field-acccgov-merger-events table tbody tr")
+
+            for row in event_rows:
+                event = {}
+
+                # Extract date
+                date_elem = row.query_selector(
+                    "td.acccgov-timeline__date time")
+                if date_elem:
+                    event["date"] = date_elem.inner_text().strip()
+
+                # Extract event description (2nd td)
+                desc_elem = row.query_selector("td:nth-child(2)")
+                if desc_elem:
+                    event["description"] = desc_elem.inner_text().strip()
+
+                # Extract attachment link and size if present
+                link_elem = row.query_selector(
+                    "td.acccgov-timeline__file-link a")
+                if link_elem:
+                    href = link_elem.get_attribute("href")
+                    if href:
+                        # Make absolute URL if relative
+                        if href.startswith("/"):
+                            event["attachment_url"] = f"https://www.accc.gov.au{href}"
+                        else:
+                            event["attachment_url"] = href
+
+                        # Extract file size from badge
+                        size_elem = link_elem.query_selector("span.badge")
+                        if size_elem:
+                            event["attachment_size"] = size_elem.inner_text().strip()
+
+                if event.get("description"):  # Only add if has description
+                    events.append(event)
+
+            if events:
+                current_info["decisions_and_events"] = events
+                print(f"      📋 Extracted {len(events)} event(s)")
+        except Exception as e:
+            print(f"      ⚠️ Error extracting decisions and events: {e}")
+
         return current_info
 
     except Exception as e:
@@ -148,6 +194,30 @@ def detect_changes(old_case: Dict[str, Any], current_info: Dict[str, Any]) -> Li
             # Field updated
             changes.append((field_label, old_normalized,
                            new_normalized, 'updated'))
+
+    # Check for new events in decisions_and_events
+    old_events = old_case.get("decisions_and_events", [])
+    if not old_events:
+        old_events = old_case.get("details", {}).get(
+            "decisions_and_events", [])
+
+    new_events = current_info.get("decisions_and_events", [])
+
+    if new_events:
+        # Find new events by comparing descriptions and dates
+        old_event_keys = {
+            f"{e.get('date', '')}|{e.get('description', '')}" for e in old_events}
+        new_event_list = []
+
+        for event in new_events:
+            event_key = f"{event.get('date', '')}|{event.get('description', '')}"
+            if event_key not in old_event_keys:
+                new_event_list.append(event)
+
+        if new_event_list:
+            # Add as a special change entry
+            changes.append(("Decisions and key events",
+                           None, new_event_list, 'new'))
 
     return changes
 
@@ -415,14 +485,73 @@ This case has been updated. Changed fields: {', '.join(change_summary)}
 
         # Description
         if description:
-            # Truncate long descriptions
-            desc_display = description[:500] + \
-                "..." if len(description) > 500 else description
             html += f'''
 <div>Description:</div>
-<div style="line-height:1.55;">{desc_display}</div>'''
+<div style="line-height:1.55;">{description}</div>'''
 
         html += '''
+</div>
+</div>'''
+
+    # Decisions and key events section (after About the acquisition)
+    decisions_events = case_info.get("decisions_and_events", [])
+    if not decisions_events:
+        decisions_events = details.get("decisions_and_events", [])
+
+    if decisions_events:
+        html += '''
+<!-- Decisions and key events -->
+<div style="margin-top:36px;">
+<div style="font-size:22px;font-weight:800;margin-bottom:14px;">Decisions and key events</div>
+<div style="height:1px;background:#e5e7eb;"></div>
+
+<div style="padding-top:18px;">
+<table style="width:100%;border-collapse:collapse;">
+<tbody>'''
+
+        # Check if any events are new
+        new_event_list = []
+        if "Decisions and key events" in changed_fields:
+            _, new_event_list = changed_fields["Decisions and key events"]
+
+        for event in decisions_events:
+            event_date = event.get("date", "N/A")
+            event_desc = event.get("description", "N/A")
+            event_url = event.get("attachment_url", "")
+            event_size = event.get("attachment_size", "")
+
+            # Check if this event is new
+            is_new_event = any(
+                e.get("date") == event_date and e.get(
+                    "description") == event_desc
+                for e in new_event_list
+            )
+            new_flag = ' <span style="color:#10b981;font-size:0.85em;font-weight:700;margin-left:6px;">(new)</span>' if is_new_event else ''
+
+            html += f'''
+<tr style="border-bottom:1px solid #e5e7eb;">
+<td style="padding:12px 8px 12px 0;vertical-align:top;width:120px;color:#6b7280;font-size:14px;">{event_date}</td>
+<td style="padding:12px 8px;vertical-align:top;font-weight:600;">{event_desc}{new_flag}</td>'''
+
+            if event_url:
+                html += f'''
+<td style="padding:12px 0 12px 8px;vertical-align:top;text-align:right;width:180px;">
+<a href="{event_url}" target="_blank" style="color:#2563eb;text-decoration:none;font-size:14px;">
+📄 Attachment'''
+                if event_size:
+                    html += f''' <span style="color:#6b7280;font-size:12px;">({event_size})</span>'''
+                html += '''
+</a>
+</td>'''
+            else:
+                html += '<td></td>'
+
+            html += '''
+</tr>'''
+
+        html += '''
+</tbody>
+</table>
 </div>
 </div>'''
 
@@ -655,13 +784,20 @@ def process_accc_case_updates():
                     # Changes found!
                     print(f"      🔄 Changes detected ({len(changes)} fields)")
                     for field_name, old_val, new_val, change_type in changes:
-                        old_display = str(
-                            old_val) if old_val is not None else "N/A"
-                        new_display = str(
-                            new_val) if new_val is not None else "N/A"
-                        change_indicator = "NEW" if change_type == 'new' else "UPDATED"
-                        print(
-                            f"         • {field_name}: {old_display} → {new_display} ({change_indicator})")
+                        if field_name == "Decisions and key events":
+                            # Special handling for events
+                            event_count = len(new_val) if isinstance(
+                                new_val, list) else 0
+                            print(
+                                f"         • {field_name}: {event_count} new event(s) (NEW)")
+                        else:
+                            old_display = str(
+                                old_val) if old_val is not None else "N/A"
+                            new_display = str(
+                                new_val) if new_val is not None else "N/A"
+                            change_indicator = "NEW" if change_type == 'new' else "UPDATED"
+                            print(
+                                f"         • {field_name}: {old_display} → {new_display} ({change_indicator})")
 
                     # Update the existing case data with new values
                     updated_case = existing_case.copy()
@@ -671,11 +807,26 @@ def process_accc_case_updates():
                             "Acquisition status": "acquisition_status",
                             "Stage": "stage",
                             "Determination publication date": "determination_publication_date",
-                            "ACCC Determination": "accc_determination"
+                            "ACCC Determination": "accc_determination",
+                            "Decisions and key events": "decisions_and_events"
                         }
                         field_key = field_key_map.get(field_name)
                         if field_key and new_val is not None:
-                            updated_case[field_key] = new_val
+                            if field_key == "decisions_and_events":
+                                # Merge new events with existing events
+                                existing_events = updated_case.get(
+                                    "decisions_and_events", [])
+                                if not existing_events:
+                                    existing_events = updated_case.get(
+                                        "details", {}).get("decisions_and_events", [])
+
+                                # Add new events to the list
+                                for new_event in new_val:
+                                    existing_events.append(new_event)
+
+                                updated_case[field_key] = existing_events
+                            else:
+                                updated_case[field_key] = new_val
 
                     # Generate HTML email
                     html_content = generate_accc_update_email_html(
