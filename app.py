@@ -16,6 +16,8 @@ from samr_conditional_approval_playwright import main as samr_conditional_main
 from samr_unconditional_approval_playwright import main as samr_unconditional_main
 from uk_cma_mergers_scraper_atom import main as uk_cma_main
 from bundeskartellamt_scraper import main as bundeskartellamt_main
+from bundeskartellamt_initial import main as bundeskartellamt_initial_main
+from bundeskartellamt_press_release import main as bundeskartellamt_press_release_main
 from ec_case_filter import main as ec_case_filter_main
 from accc_acquisitions import main as accc_acquisitions_main
 from accc_case_update_monitor import process_accc_case_updates
@@ -76,6 +78,8 @@ def home():
             "/samr-unconditional-scraper": "GET - Scrape SAMR China unconditional approval notices and match with deals (query params: headless, use_html)",
             "/uk-cma-scraper": "GET - Scrape UK CMA merger cases and match with deals (query params: use_html)",
             "/bundeskartellamt-scraper": "GET - Scrape Bundeskartellamt German merger cases and match with deals",
+            "/bundeskartellamt-initial": "GET - Scrape Bundeskartellamt Laufende Verfahren (initial filing) and match with deals",
+            "/bundeskartellamt-press-release": "GET - Scrape Bundeskartellamt press releases and match with deals",
             "/ec-case-filter": "GET - Filter and match EC merger cases with deals",
             "/ec-case-update-monitor": "GET - Monitor EC merger cases for updates and send email notifications",
             "/accc-acquisitions-scraper": "GET - Scrape ACCC acquisitions and match with deals",
@@ -1076,6 +1080,86 @@ def bundeskartellamt_scraper():
             "success": False,
             "error": str(e)
         }), 500
+
+
+@app.route('/bundeskartellamt-initial', methods=['GET'])
+def bundeskartellamt_initial():
+    """
+    Scrape Bundeskartellamt Laufende Verfahren (initial filing) and match with deals.
+    Extracts table from Laufende Verfahren form URL, applies cutoff date, matches with deals via LLM,
+    appends to deal german_scrap array with source: initial_filing.
+    Process runs in background - returns immediately.
+    """
+    try:
+        def run_scraper():
+            try:
+                logger.info(
+                    "Starting Bundeskartellamt Laufende Verfahren (initial) scraper in background")
+                result = bundeskartellamt_initial_main()
+                if result.get("success"):
+                    logger.info(
+                        f"Bundeskartellamt initial scraper completed. Extracted {result.get('total_extracted', 0)} records, "
+                        f"matched {result.get('total_matched', 0)}.")
+                else:
+                    logger.warning(
+                        f"Bundeskartellamt initial scraper failed: {result.get('error', 'Unknown error')}")
+            except Exception as e:
+                logger.error(
+                    f"Error in background Bundeskartellamt initial scraper: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_scraper, daemon=True)
+        thread.start()
+        return jsonify({
+            "success": True,
+            "message": "Bundeskartellamt Laufende Verfahren (initial) scraping started in background",
+            "status": "running"
+        }), 200
+    except Exception as e:
+        logger.error(
+            f"Error starting Bundeskartellamt initial scraper: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/bundeskartellamt-press-release', methods=['GET'])
+def bundeskartellamt_press_release():
+    """
+    Scrape Bundeskartellamt press releases and match with deals.
+    Extracts press release list from Expertensuche URL, applies cutoff date, matches headline with deals via LLM,
+    appends to deal german_scrap array with source: press_release.
+    Process runs in background - returns immediately.
+    """
+    try:
+        def run_scraper():
+            try:
+                logger.info(
+                    "Starting Bundeskartellamt press release scraper in background")
+                result = bundeskartellamt_press_release_main()
+                if result.get("success"):
+                    logger.info(
+                        f"Bundeskartellamt press release scraper completed. Extracted {result.get('total_extracted', 0)} records, "
+                        f"matched {result.get('total_matched', 0)}.")
+                else:
+                    logger.warning(
+                        f"Bundeskartellamt press release scraper failed: {result.get('error', 'Unknown error')}")
+            except Exception as e:
+                logger.error(
+                    f"Error in background Bundeskartellamt press release scraper: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_scraper, daemon=True)
+        thread.start()
+        return jsonify({
+            "success": True,
+            "message": "Bundeskartellamt press release scraping started in background",
+            "status": "running"
+        }), 200
+    except Exception as e:
+        logger.error(
+            f"Error starting Bundeskartellamt press release scraper: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route('/ec-case-filter', methods=['GET'])
