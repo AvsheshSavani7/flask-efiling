@@ -13,7 +13,7 @@ import os
 import tempfile
 import time
 from typing import Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import anthropic
 from openai import OpenAI
 from pymongo import MongoClient
@@ -44,18 +44,42 @@ def _load_env_file(env_path: str) -> None:
 
 def convert_date_to_datetime(date_str: str) -> Optional[datetime]:
     """
-    Convert date string to datetime object.
+    Convert date string to timezone-aware UTC datetime for MongoDB-friendly filtering.
 
     Args:
-        date_str: Date string in MM/DD/YYYY format
+        date_str: Date string in MM/DD/YYYY, ISO 8601 (e.g. 2026-02-04T23:07:37.966853Z),
+                  or 2025-01-09T00:00:00.000+00:00
 
     Returns:
-        datetime object, or None if conversion fails
+        Timezone-aware datetime in UTC (e.g. 2025-01-09T00:00:00.000+00:00), or None if conversion fails.
+        Use in MongoDB filters for correct date-wise queries.
     """
-    try:
-        return datetime.strptime(date_str.strip(), "%m/%d/%Y")
-    except Exception:
+    s = date_str.strip()
+    # strptime %z expects +0000 not +00:00
+    s_normalized = s.replace("+00:00", "+0000").replace("-00:00", "-0000")
+    formats = (
+        "%m/%d/%Y",
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%d",
+    )
+    dt = None
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(s_normalized, fmt)
+            break
+        except ValueError:
+            continue
+    if dt is None:
         return None
+    # Always return UTC timezone-aware for MongoDB
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt
 
 
 def _generate_comprehensive_summary_with_file_upload(
@@ -308,7 +332,8 @@ def analyze_docket_entry(
                 })
                 if merger:
                     target_company_name = merger.get("target_company_name", "")
-                    print(f"Found target company: {target_company_name} for docket {docket_type}/{docket_number}")
+                    print(
+                        f"Found target company: {target_company_name} for docket {docket_type}/{docket_number}")
             except Exception as e:
                 print(f"Warning: Could not query mergers collection: {str(e)}")
 
