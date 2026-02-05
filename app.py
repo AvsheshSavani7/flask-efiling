@@ -9,6 +9,7 @@ from docket_manager import get_dockets
 from fcc_html_scraper import process_fcc_scraper
 from mergers_manager import get_all_mergers
 from nm_prc_service import login_nm_prc, get_html_from_nm_prc, extract_pdf_text_from_nm_prc
+from nm_prc_document_download_extract import download_and_extract
 from cade_public_notice_brazil import main as cade_main
 from cade_brazil_update_monitor import monitor_brazil_deals
 from samr_public_notice_db import main as samr_main
@@ -71,6 +72,7 @@ def home():
             "/nm-prc-login": "POST - Login to NM PRC eDocket system and save cookies",
             "/nm-prc-get-html": "POST - Fetch HTML from protected NM PRC eDocket URL (requires login first)",
             "/nm-prc-extract-pdf": "POST - Fetch PDF from protected NM PRC eDocket URL and extract text (requires login first)",
+            "/nm-prc-download-extract": "POST - Download NM PRC e360 document by document param and extract text",
             "/brazil-scraper": "GET - Scrape CADE public notices and match with deals (date range: yesterday to today, query param: headless)",
             "/cade-brazil-monitor": "GET - Monitor existing Brazil deals for new table records updates (query param: headless)",
             "/samr-public-scraper": "GET - Scrape SAMR China public notices and match with deals (query param: headless)",
@@ -649,6 +651,45 @@ def nm_prc_extract_pdf():
         return jsonify({
             "success": False,
             "error": f"Error extracting PDF text: {str(e)}"
+        }), 500
+
+
+@app.route('/nm-prc-download-extract', methods=['POST'])
+def nm_prc_download_extract():
+    """
+    Download NM PRC e360 document via API and extract text.
+
+    Uses e360 APIs: get download token, download document, extract PDF text.
+    Request body: document param object (must include "id" as documentId), e.g.:
+    {
+        "row_number": 2,
+        "Docket Number": "24-00266-UT",
+        "caseId": "...",
+        "id": "29205b89-7d22-402c-a90e-b3e501832893",
+        "documentnumber": "DOC-000180445-26",
+        "documentname": "...",
+        ...
+    }
+
+    Returns the same param object with "extracted_text" added (and optionally
+    "extracted_text_error" on failure).
+    """
+    try:
+        data = request.get_json() or {}
+        if not data.get("id"):
+            return jsonify({
+                "success": False,
+                "error": "Request body must include 'id' (documentId)"
+            }), 400
+
+        result = download_and_extract(data)
+        return jsonify(result), 200
+
+    except Exception as e:
+        logger.error(f"Error in nm-prc-download-extract: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
         }), 500
 
 
