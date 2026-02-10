@@ -120,7 +120,8 @@ def detect_changes(
     old_docs = old_case.get("documents") or []
     new_docs = current_info.get("documents") or []
     old_doc_keys = {_document_key(d) for d in old_docs}
-    new_doc_entries = [d for d in new_docs if _document_key(d) not in old_doc_keys]
+    new_doc_entries = [
+        d for d in new_docs if _document_key(d) not in old_doc_keys]
     if new_doc_entries:
         changes.append(
             ("Documents", None, new_doc_entries, "new")
@@ -169,7 +170,8 @@ def generate_nz_update_email_html(
 ) -> str:
     """Generate HTML email for NZ ComCom case update notification."""
     target = deal_match.get("target") or deal_match.get("target_name", "N/A")
-    acquirer = deal_match.get("acquirer") or deal_match.get("acquire_name", "N/A")
+    acquirer = deal_match.get(
+        "acquirer") or deal_match.get("acquire_name", "N/A")
     title = case_info.get("title", "N/A")
     detail_url = case_info.get("detail_url", "")
     details = case_info.get("case_details") or {}
@@ -237,7 +239,8 @@ Changed: {', '.join(change_summary)}
         new_timeline_list = []
         if "Timeline" in changed_fields:
             _, new_timeline_list = changed_fields["Timeline"]
-        new_timeline_keys = {_timeline_key(e) for e in (new_timeline_list or [])}
+        new_timeline_keys = {_timeline_key(e)
+                             for e in (new_timeline_list or [])}
         html += """
 <h3 style="font-size:16px;margin:24px 0 10px 0;">Timeline</h3>
 <div style="padding-top:8px;">
@@ -324,7 +327,8 @@ Changed: {', '.join(change_summary)}
 def save_html_file(case_number: str, html_content: str) -> str:
     """Save HTML content to a file."""
     os.makedirs(HTML_OUTPUT_DIR, exist_ok=True)
-    safe_case_number = (case_number or "unknown").replace(".", "_").replace("/", "_")
+    safe_case_number = (case_number or "unknown").replace(
+        ".", "_").replace("/", "_")
     filename = f"nz_{safe_case_number}_update_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
     filepath = os.path.join(HTML_OUTPUT_DIR, filename)
     try:
@@ -345,17 +349,20 @@ def send_nz_update_email_via_webhook(
 ) -> bool:
     """Send NZ ComCom update email via n8n webhook."""
     try:
-        target = deal_match.get("target") or deal_match.get("target_name", "N/A")
-        acquirer = deal_match.get("acquirer") or deal_match.get("acquire_name", "N/A")
+        target = deal_match.get("target") or deal_match.get(
+            "target_name", "N/A")
+        acquirer = deal_match.get(
+            "acquirer") or deal_match.get("acquire_name", "N/A")
         deal_id = deal_match.get("deal_id", "N/A")
-        case_number = (case_info.get("case_details") or {}).get("Case number", "N/A")
+        case_number = (case_info.get("case_details")
+                       or {}).get("Case number", "N/A")
 
         subject = f"NZ ComCom Case Update – {case_number}: {target} / {acquirer}"
         print(f"      📝 Subject: {subject}")
 
         webhook_url = os.getenv(
             "N8N_WEBHOOK_URL",
-            "https://n8n-xwx1.onrender.com/webhook/80830c6d-ff5b-45e3-9ef3-a061db1fbf0c",
+            "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6",
         )
         payload = {
             "subject": subject,
@@ -410,7 +417,8 @@ def update_case_in_db(
 
         updated = False
         for i, existing in enumerate(deal["nz_cases"]):
-            existing_number = (existing.get("case_details") or {}).get("Case number")
+            existing_number = (existing.get("case_details")
+                               or {}).get("Case number")
             existing_url = existing.get("detail_url", "")
             if case_number and existing_number == case_number:
                 deal["nz_cases"][i] = updated_case_data
@@ -422,7 +430,8 @@ def update_case_in_db(
                 break
 
         if not updated:
-            print(f"      ⚠️ Case not found in deal nz_cases (case_number={case_identifier})")
+            print(
+                f"      ⚠️ Case not found in deal nz_cases (case_number={case_identifier})")
             return False
 
         result = collection.update_one(
@@ -478,13 +487,16 @@ def process_nz_case_updates() -> None:
                 total_cases_checked += 1
                 detail_url = existing_case.get("detail_url")
                 title = existing_case.get("title", "N/A")
-                case_number = (existing_case.get("case_details") or {}).get("Case number", "")
+                case_number = (existing_case.get("case_details")
+                               or {}).get("Case number", "")
 
                 if not detail_url:
-                    print(f"   [{case_idx}/{len(nz_cases)}] No detail_url, skipping")
+                    print(
+                        f"   [{case_idx}/{len(nz_cases)}] No detail_url, skipping")
                     continue
 
-                print(f"\n   [{case_idx}/{len(nz_cases)}] {title or case_number}")
+                print(
+                    f"\n   [{case_idx}/{len(nz_cases)}] {title or case_number}")
                 print(f"      📄 Fetching: {detail_url}")
 
                 try:
@@ -505,27 +517,36 @@ def process_nz_case_updates() -> None:
                             print(f"         • Case details: updated")
                             continue
                         if field_name == "Timeline" and isinstance(new_val, list):
-                            print(f"         • Timeline: {len(new_val)} new entry(ies)")
+                            print(
+                                f"         • Timeline: {len(new_val)} new entry(ies)")
                             continue
                         if field_name == "Documents" and isinstance(new_val, list):
-                            print(f"         • Documents: {len(new_val)} new document(s)")
+                            print(
+                                f"         • Documents: {len(new_val)} new document(s)")
                             continue
                         if field_name == "Updates/Media" and isinstance(new_val, list):
-                            print(f"         • Updates/Media: {len(new_val)} new entry(ies)")
+                            print(
+                                f"         • Updates/Media: {len(new_val)} new entry(ies)")
                             continue
                         print(f"         • {field_name}: {change_type}")
 
                     # Build updated case (merge current into existing, replacing lists with full current)
                     updated_case = dict(existing_case)
-                    updated_case["description"] = current_info.get("description", updated_case.get("description"))
-                    updated_case["case_details"] = current_info.get("case_details") or updated_case.get("case_details")
+                    updated_case["description"] = current_info.get(
+                        "description", updated_case.get("description"))
+                    updated_case["case_details"] = current_info.get(
+                        "case_details") or updated_case.get("case_details")
                     updated_case["timeline"] = current_info.get("timeline", [])
-                    updated_case["documents"] = current_info.get("documents", [])
-                    updated_case["updates_media"] = current_info.get("updates_media", [])
+                    updated_case["documents"] = current_info.get(
+                        "documents", [])
+                    updated_case["updates_media"] = current_info.get(
+                        "updates_media", [])
 
-                    html_content = generate_nz_update_email_html(updated_case, deal, changes)
+                    html_content = generate_nz_update_email_html(
+                        updated_case, deal, changes)
                     save_html_file(case_number or "nz_case", html_content)
-                    send_nz_update_email_via_webhook(updated_case, deal, html_content, changes)
+                    send_nz_update_email_via_webhook(
+                        updated_case, deal, html_content, changes)
 
                     if update_case_in_db(deal_id, case_number or detail_url, updated_case):
                         total_cases_updated += 1
