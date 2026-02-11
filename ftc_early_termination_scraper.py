@@ -37,9 +37,9 @@ FTC_URLS = [
 ]
 
 # Filter: only process records with date >= CUTOFF_DATE (today)
-# CUTOFF_DATE = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-CUTOFF_DATE = datetime.strptime(
-    "2026-02-09", "%Y-%m-%d")
+CUTOFF_DATE = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+# CUTOFF_DATE = datetime.strptime(
+#     "2026-02-09", "%Y-%m-%d")
 
 OUTPUT_PATH = "ftc_early_termination_matched_deals.json"
 ENV_PATH = ".env"
