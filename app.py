@@ -22,6 +22,7 @@ from bundeskartellamt_press_release import main as bundeskartellamt_press_releas
 from ec_case_filter import main as ec_case_filter_main
 from accc_acquisitions import main as accc_acquisitions_main
 from accc_case_update_monitor import process_accc_case_updates
+from ftc_early_termination_scraper import main as ftc_early_termination_main
 from nz_comcom_case_register import main as nz_comcom_case_register_main
 from nz_comcom_case_update_monitor import process_nz_case_updates
 from mongodb_connection import init_mongodb_connection, close_mongodb_connection, is_connected
@@ -88,6 +89,7 @@ def home():
             "/ec-case-update-monitor": "GET - Monitor EC merger cases for updates and send email notifications",
             "/accc-acquisitions-scraper": "GET - Scrape ACCC acquisitions and match with deals",
             "/accc-case-update-monitor": "GET - Monitor ACCC acquisition cases for updates and send email notifications",
+            "/ftc-early-termination-scraper": "GET - Scrape FTC early termination notices and match with deals",
             "/nz-comcom-case-register": "GET - Scrape NZ ComCom case register and match with deals",
             "/nz-comcom-case-update-monitor": "GET - Monitor NZ ComCom cases for updates and send email notifications",
             "/system-check": "GET - Check system dependencies for document extraction",
@@ -1347,6 +1349,49 @@ def accc_acquisitions_scraper():
 
     except Exception as e:
         logger.error(f"❌ Error starting ACCC acquisitions scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/ftc-early-termination-scraper', methods=['GET'])
+def ftc_early_termination_scraper():
+    """
+    Scrape FTC early termination notices and match with deals.
+    Fetches page 0 and 1 of FTC legal library early termination notices,
+    filters by current date, matches with deals via LLM, saves to deals and sends emails.
+    Process runs in background - returns immediately.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        def run_scraper():
+            try:
+                logger.info("Starting FTC early termination scraper in background")
+                ftc_early_termination_main()
+                logger.info("✅ FTC early termination scraper completed successfully")
+            except Exception as e:
+                logger.error(f"❌ Error in FTC early termination scraper: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_scraper, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "FTC early termination scraper started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Error starting FTC early termination scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
