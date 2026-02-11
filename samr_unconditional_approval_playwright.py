@@ -10,12 +10,17 @@ from bs4 import BeautifulSoup
 from tqdm import tqdm
 import re
 from bson import ObjectId
-from mongodb_connection import get_deals_collection, get_mongo_client, is_connected
+from mongodb_connection import (
+    get_deals_collection,
+    get_mongo_client,
+    init_mongodb_connection,
+    is_connected,
+)
 from html import escape as escape_html
 from llm_verification_service import verify_usa_relation
 
 # Configuration
-# CUTOFF_DATE: Extract records >= this date. Stop when records are < this date.
+# CUTOFF_DATE: Extract records == this date. Stop when records are < this date.
 # Example: If CUTOFF_DATE = 2025-02-15, extract 2025-02-15 and newer, stop at 2025-02-14
 CUTOFF_DATE = datetime.datetime.now().replace(
     hour=0, minute=0, second=0, microsecond=0)
@@ -639,12 +644,12 @@ def save_samr_unconditional_data_to_deal(deal_match, matched_result):
             print(f"✅ Saved SAMR unconditional data to deal record in MongoDB")
 
             # Send email notification via n8n webhook
-            try:
-                send_samr_unconditional_email_via_webhook(
-                    samr_data_serializable, deal_match)
-            except Exception as e:
-                print(f"⚠️ Error sending email notification: {e}")
-                # Don't fail the save operation if email fails
+            # try:
+            #     send_samr_unconditional_email_via_webhook(
+            #         samr_data_serializable, deal_match)
+            # except Exception as e:
+            #     print(f"⚠️ Error sending email notification: {e}")
+            # Don't fail the save operation if email fails
 
             return True
         elif update_result.matched_count > 0:
@@ -762,6 +767,9 @@ If none, return []
                 temperature=0,
                 max_tokens=700
             )
+
+            print("GPT response:", res.choices[0].message.content)
+            breakpoint()
             content = res.choices[0].message.content.strip()
 
             if content.startswith("```"):
@@ -811,7 +819,7 @@ def extract_page_records(page, page_num=1):
     page_records = extract_records_from_html(html_content)
     print(f"📊 Found {len(page_records)} records on page")
 
-    # Filter records: only keep records >= CUTOFF_DATE
+    # Filter records: only keep records == CUTOFF_DATE
     filtered_records = []
     should_stop = False
 
@@ -820,8 +828,8 @@ def extract_page_records(page, page_num=1):
             record_date = datetime.datetime.strptime(
                 record["date"], "%Y-%m-%d")
 
-            if record_date >= CUTOFF_DATE:
-                # Keep this record (date is >= cutoff)
+            if record_date == CUTOFF_DATE:
+                # Keep this record (date is == cutoff)
                 filtered_records.append(record)
             else:
                 # This record is older than cutoff - don't include it and stop
@@ -919,6 +927,7 @@ def match_records_with_deals(records):
                             }
 
                             matched_data.append(matched_result)
+                            breakpoint()
                             print(f"  ✅ Match added to results!")
 
                             # Save to MongoDB under 'samr_unconditional' node in the deal record
@@ -964,10 +973,10 @@ Translated Table:
                         if usa_companies:
                             print(
                                 f"   🇺🇸 USA-related companies detected: {usa_companies}")
-                            for usa_company in usa_companies:
-                                send_unmatched_samr_unconditional_email_via_webhook(
-                                    record, usa_company, translated_table
-                                )
+                            # for usa_company in usa_companies:
+                            #     send_unmatched_samr_unconditional_email_via_webhook(
+                            #         record, usa_company, translated_table
+                            #     )
                         else:
                             print("   ℹ️ Not USA-related - no action taken")
                     except Exception as e:
@@ -1060,6 +1069,14 @@ def main(use_existing_html=False, headless=True):
     global all_extracted_records, matched_data, deals
     all_extracted_records = []
     matched_data = []
+
+    # Initialize MongoDB connection (required before loading deals)
+    ok, msg = init_mongodb_connection(ENV_PATH)
+    if not ok:
+        print(f"⚠️ {msg}")
+        print("   Continuing without MongoDB; no deals will be available for matching.")
+    else:
+        print(f"✅ {msg}")
 
     # Load deals from MongoDB when main() is called (connection should be ready by then)
     # Only load deals without 'samr_unconditional' node to avoid re-processing
