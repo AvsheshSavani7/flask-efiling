@@ -22,6 +22,8 @@ from bundeskartellamt_press_release import main as bundeskartellamt_press_releas
 from ec_case_filter import main as ec_case_filter_main
 from accc_acquisitions import main as accc_acquisitions_main
 from accc_case_update_monitor import process_accc_case_updates
+from nz_comcom_case_register import main as nz_comcom_case_register_main
+from nz_comcom_case_update_monitor import process_nz_case_updates
 from mongodb_connection import init_mongodb_connection, close_mongodb_connection, is_connected
 import logging
 import os
@@ -86,6 +88,8 @@ def home():
             "/ec-case-update-monitor": "GET - Monitor EC merger cases for updates and send email notifications",
             "/accc-acquisitions-scraper": "GET - Scrape ACCC acquisitions and match with deals",
             "/accc-case-update-monitor": "GET - Monitor ACCC acquisition cases for updates and send email notifications",
+            "/nz-comcom-case-register": "GET - Scrape NZ ComCom case register and match with deals",
+            "/nz-comcom-case-update-monitor": "GET - Monitor NZ ComCom cases for updates and send email notifications",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -1394,6 +1398,91 @@ def accc_case_update_monitor():
 
     except Exception as e:
         logger.error(f"❌ Error starting ACCC case update monitor: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/nz-comcom-case-register', methods=['GET'])
+def nz_comcom_case_register():
+    """
+    Scrape NZ ComCom case register and match with deals.
+    Fetches cases from the NZ Commerce Commission case register, matches with deals in MongoDB,
+    saves to nz_cases, and sends email notifications. Process runs in background.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        def run_register():
+            try:
+                logger.info("Starting NZ ComCom case register in background")
+                nz_comcom_case_register_main()
+                logger.info("✅ NZ ComCom case register completed successfully")
+            except Exception as e:
+                logger.error(f"❌ Error in NZ ComCom case register: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_register, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "NZ ComCom case register started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Error starting NZ ComCom case register: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/nz-comcom-case-update-monitor', methods=['GET'])
+def nz_comcom_case_update_monitor():
+    """
+    Monitor NZ ComCom cases for updates.
+    Checks existing nz_cases in MongoDB for changes in case details, timeline,
+    documents, and updates_media. Sends email notifications when changes are detected.
+    Process runs in background.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        def run_monitor():
+            try:
+                logger.info("Starting NZ ComCom case update monitor in background")
+                process_nz_case_updates()
+                logger.info("✅ NZ ComCom case update monitor completed successfully")
+            except Exception as e:
+                logger.error(f"❌ Error in NZ ComCom case update monitor: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_monitor, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "NZ ComCom case update monitor started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Error starting NZ ComCom case update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
