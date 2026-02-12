@@ -22,10 +22,10 @@ from llm_verification_service import verify_usa_relation
 # Configuration
 # CUTOFF_DATE: Extract records == this date. Stop when records are < this date.
 # Example: If CUTOFF_DATE = 2025-02-15, extract 2025-02-15 and newer, stop at 2025-02-14
-CUTOFF_DATE = datetime.datetime.now().replace(
-    hour=0, minute=0, second=0, microsecond=0)
-# CUTOFF_DATE = datetime.datetime.strptime(
-#     "2026-01-26", "%Y-%m-%d")
+# CUTOFF_DATE = datetime.datetime.now().replace(
+#     hour=0, minute=0, second=0, microsecond=0)
+CUTOFF_DATE = datetime.datetime.strptime(
+    "2026-02-10", "%Y-%m-%d")
 BASE_URL = "https://www.samr.gov.cn/fldes/ajgs/wtjjz/"
 OUTPUT_JSON = "deals_with_unconditional.json"
 EXTRACTED_RECORDS_JSON = "samr_unconditional_extracted_records.json"
@@ -407,7 +407,7 @@ def send_samr_unconditional_email_via_webhook(samr_data, deal_match):
             webhook_url,
             json=payload,
             headers={'Content-Type': 'application/json'},
-            timeout=30
+            timeout=60
         )
         response.raise_for_status()
 
@@ -541,7 +541,7 @@ def send_unmatched_samr_unconditional_email_via_webhook(record: dict, usa_compan
             webhook_url,
             json=payload,
             headers={"Content-Type": "application/json"},
-            timeout=30,
+            timeout=60,
         )
         response.raise_for_status()
 
@@ -644,11 +644,11 @@ def save_samr_unconditional_data_to_deal(deal_match, matched_result):
             print(f"✅ Saved SAMR unconditional data to deal record in MongoDB")
 
             # Send email notification via n8n webhook
-            # try:
-            #     send_samr_unconditional_email_via_webhook(
-            #         samr_data_serializable, deal_match)
-            # except Exception as e:
-            #     print(f"⚠️ Error sending email notification: {e}")
+            try:
+                send_samr_unconditional_email_via_webhook(
+                    samr_data_serializable, deal_match)
+            except Exception as e:
+                print(f"⚠️ Error sending email notification: {e}")
             # Don't fail the save operation if email fails
 
             return True
@@ -676,9 +676,10 @@ def save_samr_unconditional_data_to_deal(deal_match, matched_result):
 # Extract approval info from detail page
 
 
-def extract_approval_info(page, url):
+def extract_approval_info(page, url, deals_list=None):
     """
     Extract approval information from a detail page.
+    deals_list: list of deals with deal_id, target, acquirer for LLM reference.
     Returns: (matches, translated_table)
     """
     try:
@@ -686,7 +687,7 @@ def extract_approval_info(page, url):
         context = page.context
         new_page = context.new_page()
         new_page.goto(url, wait_until="domcontentloaded")
-        new_page.wait_for_timeout(2000)
+        new_page.wait_for_timeout(5000)
 
         html = new_page.content()
 
@@ -724,6 +725,23 @@ def extract_approval_info(page, url):
 
         print("📄 Translated Table Preview:\n", translated_table[:800])
 
+        # Build deals text with Deal ID, Target, Acquirer, aliases (like conditional)
+        if deals_list:
+            lines = []
+            for d in deals_list:
+                line = f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {d.get('target', 'N/A')} | Acquirer: {d.get('acquirer', 'N/A')}"
+                target_aliases = d.get("target_aliases", []) or []
+                parent_aliases = d.get("parent_aliases", []) or []
+                if target_aliases:
+                    line += f" | Target aliases: {', '.join(str(a) for a in target_aliases)}"
+                if parent_aliases:
+                    line += f" | Parent aliases: {', '.join(str(a) for a in parent_aliases)}"
+                lines.append(line)
+            deals_text = "\n".join(lines)
+            deals_section = f"DEALS TO MATCH:\n{deals_text}\n\n"
+        else:
+            deals_section = f"Known companies:\n{', '.join(all_companies)}\n\n"
+
         prompt = f"""
 You are a professional M&A analyst.
 
@@ -731,23 +749,24 @@ Below is a translated table of unconditional merger approvals issued by SAMR.
 Each row includes the case name, the parties involved, and the approval date.
 
 Your task is:
-- Match any company involved in these cases to the known set below using partial or fuzzy match.
-- Return only matched companies, using their original names from the table, and attach the approval date.
+- Match any company involved in these cases to the deals below using partial or fuzzy match.
+- When matching, also consider target_aliases and parent_aliases - if a company name in the table matches an alias, treat it as a match for that deal.
+- For each match, include the exact "Deal ID" from the DEALS TO MATCH list - this uniquely identifies which deal was matched.
+- Return only matched companies, using their original names from the table (or the canonical Target/Acquirer name if matched via alias), and attach the approval date.
 
-Known companies:
-{', '.join(all_companies)}
-
+{deals_section}
 Translated Table:
 {translated_table}
 
 Return a JSON array of matched companies using fuzzy or partial name matching.
 Each match must include:
+- "deal_id": the Deal ID from the DEALS TO MATCH list (required - use this to identify which deal)
 - "company": full party name from the table
-- "matched_known_name": matched name from known set
+- "matched_known_name": matched name (Target or Acquirer) from the deal
 - "approval_date": approval date in YYYY-MM-DD (from the row)
 Respond strictly as:
 [
-  {{ "company": "...", "matched_known_name": "...", "approval_date": "YYYY-MM-DD" }}
+  {{ "deal_id": "...", "company": "...", "matched_known_name": "...", "approval_date": "YYYY-MM-DD" }}
 ]
 If none, return []
 """
@@ -769,7 +788,6 @@ If none, return []
             )
 
             print("GPT response:", res.choices[0].message.content)
-            breakpoint()
             content = res.choices[0].message.content.strip()
 
             if content.startswith("```"):
@@ -811,7 +829,7 @@ def extract_page_records(page, page_num=1):
     print(f"{'='*60}")
 
     # Wait for items to load
-    page.wait_for_selector("div.page-content ul li", timeout=10000)
+    page.wait_for_selector("div.page-content ul li", timeout=100000)
 
     html_content = page.content()
 
@@ -887,33 +905,77 @@ def match_records_with_deals(records):
                     print("  ⏩ Skipped (no URL)")
                     continue
 
+                # Build deals list with deal_id, target, acquirer, aliases (like conditional)
+                deals_list = []
+                for d in deals:
+                    target = d.get("target") or d.get("target_name", "")
+                    acquirer = d.get("acquirer") or d.get("acquire_name", "")
+                    if target or acquirer:
+                        deal_info = {
+                            "deal_id": d.get("deal_id", "N/A"),
+                            "target": target,
+                            "acquirer": acquirer,
+                        }
+                        target_aliases = d.get("target_aliases") or []
+                        parent_aliases = d.get("parent_aliases") or []
+                        if isinstance(target_aliases, list) and target_aliases:
+                            deal_info["target_aliases"] = target_aliases
+                        if isinstance(parent_aliases, list) and parent_aliases:
+                            deal_info["parent_aliases"] = parent_aliases
+                        deals_list.append(deal_info)
+
                 # Extract approval info from detail page
                 matches, translated_table = extract_approval_info(
-                    page, url)
+                    page, url, deals_list=deals_list)
 
                 if matches:
+                    # Build deal_id -> deal lookup for direct identification
+                    deal_by_id = {str(d.get("deal_id", ""))
+                                      : d for d in deals if d.get("deal_id")}
+
+                    # Track (url, deal_id) to avoid duplicate matches from same record
+                    seen_record_deal = set()
+
                     for m in matches:
-                        company = normalize_company(m["matched_known_name"])
+                        company = m.get("matched_known_name", "")
                         print(f"  🎯 Match found: {company}")
 
-                        # Find the deal
+                        # Find the deal: prefer deal_id from LLM, fallback to company name search
                         deal_match = None
-                        for deal in deals:
-                            acquirer = deal.get("acquirer") or deal.get(
-                                "acquire_name", "")
-                            target = deal.get("target") or deal.get(
-                                "target_name", "")
-
-                            if normalize_company(acquirer) == company or normalize_company(target) == company:
-                                deal_match = deal
-                                print(
-                                    f"  ✅ Found deal: {acquirer} / {target}")
-                                break
+                        llm_deal_id = m.get("deal_id", "")
+                        if llm_deal_id and llm_deal_id in deal_by_id:
+                            deal_match = deal_by_id[llm_deal_id]
+                            print(
+                                f"  ✅ Found deal (by deal_id): {deal_match.get('acquirer') or deal_match.get('acquire_name')} / {deal_match.get('target') or deal_match.get('target_name')}")
+                        else:
+                            # Fallback: match by company name
+                            company_norm = normalize_company(company)
+                            for deal in deals:
+                                acquirer = deal.get("acquirer") or deal.get(
+                                    "acquire_name", "")
+                                target = deal.get("target") or deal.get(
+                                    "target_name", "")
+                                if normalize_company(acquirer) == company_norm or normalize_company(target) == company_norm:
+                                    deal_match = deal
+                                    print(
+                                        f"  ✅ Found deal (by name): {acquirer} / {target}")
+                                    break
 
                         if deal_match:
+                            deal_id = deal_match.get("deal_id", "")
+                            dedup_key = (url, deal_id)
+
+                            # Skip if we already matched this record+deal (deduplication)
+                            if dedup_key in seen_record_deal:
+                                print(
+                                    f"  ⏭️ Duplicate skipped (already matched this record+deal)")
+                                continue
+
+                            seen_record_deal.add(dedup_key)
+
                             # Build the matched result object
                             matched_result = {
-                                "deal_id": deal_match.get("deal_id", ""),
+                                "deal_id": deal_id,
                                 "title_cn": title_cn,
                                 "title_en": title_en,
                                 "url": url,
@@ -927,7 +989,6 @@ def match_records_with_deals(records):
                             }
 
                             matched_data.append(matched_result)
-                            breakpoint()
                             print(f"  ✅ Match added to results!")
 
                             # Save to MongoDB under 'samr_unconditional' node in the deal record
@@ -973,10 +1034,10 @@ Translated Table:
                         if usa_companies:
                             print(
                                 f"   🇺🇸 USA-related companies detected: {usa_companies}")
-                            # for usa_company in usa_companies:
-                            #     send_unmatched_samr_unconditional_email_via_webhook(
-                            #         record, usa_company, translated_table
-                            #     )
+                            for usa_company in usa_companies:
+                                send_unmatched_samr_unconditional_email_via_webhook(
+                                    record, usa_company, translated_table
+                                )
                         else:
                             print("   ℹ️ Not USA-related - no action taken")
                     except Exception as e:
@@ -1106,7 +1167,7 @@ def main(use_existing_html=False, headless=True):
                 print(f"📍 Step 1: Calling BASE_URL")
                 print(f"   URL: {BASE_URL}")
                 page.goto(BASE_URL, wait_until="domcontentloaded")
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(5000)
                 print(f"   ✅ Loaded\n")
 
                 # Start from page 1 and extract records sequentially
@@ -1133,7 +1194,7 @@ def main(use_existing_html=False, headless=True):
 
                         print(f"\n➡️  Navigating to page {page_num + 1}...")
                         next_btn.click()
-                        page.wait_for_timeout(2000)
+                        page.wait_for_timeout(5000)
                         page_num += 1
 
                     except Exception as e:
