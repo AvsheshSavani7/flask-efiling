@@ -254,42 +254,90 @@ def convert_datetime_to_string(obj):
         return obj
 
 
-def match_deal_with_llm(case_companies: List[str], all_companies: set) -> str:
-    """Match case companies with deals using LLM."""
+def match_deal_with_llm(case_companies: List[str], deals: List[Dict[str, Any]]) -> str:
+    """Match case companies with deals using LLM. Returns Match: DEAL_ID|COMPANY_NAME|(target|acquirer) or None."""
     # Join case companies into a single string
     companies_str = " / ".join(case_companies)
 
+    # Build deals list with all relevant information (including aliases)
+    deals_list = []
+    for deal in deals:
+        deal_info = {
+            "deal_id": deal.get("deal_id", ""),
+        }
+        target = deal.get("target") or deal.get("target_name", "")
+        acquirer = deal.get("acquirer") or deal.get("acquire_name", "")
+
+        if target:
+            deal_info["target"] = target
+        if acquirer:
+            deal_info["acquirer"] = acquirer
+
+        target_aliases = deal.get("target_aliases") or []
+        parent_aliases = deal.get("parent_aliases") or []
+        if isinstance(target_aliases, list) and target_aliases:
+            deal_info["target_aliases"] = target_aliases
+        if isinstance(parent_aliases, list) and parent_aliases:
+            deal_info["parent_aliases"] = parent_aliases
+
+        if target or acquirer:
+            deals_list.append(deal_info)
+
+    if not deals_list:
+        return "None"
+
+    # Build structured prompt with deal information (including aliases)
+    lines = []
+    for d in deals_list:
+        line = f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {d.get('target', 'N/A')} | Acquirer: {d.get('acquirer', 'N/A')}"
+        target_aliases = d.get("target_aliases", []) or []
+        parent_aliases = d.get("parent_aliases", []) or []
+        if target_aliases:
+            line += f" | Target aliases: {', '.join(str(a) for a in target_aliases)}"
+        if parent_aliases:
+            line += f" | Parent aliases: {', '.join(str(a) for a in parent_aliases)}"
+        lines.append(line)
+    deals_text = "\n".join(lines)
+
     prompt = f"""
-You are an M&A deal analyst. Given the company names from an EC merger case, determine whether any of these companies match any of the companies listed below.
+You are an M&A deal analyst. Given the company names from an EC merger case, determine whether any of these companies match any of the deals listed below.
 
-- Match only if the company name or a well-known alias appears in the case companies.
-- Ignore similar-sounding names or partial matches.
-- Accept suffix variations (Inc., Ltd., PLC, AG, SA, NV, Corporation, Corp.).
-- The case companies may be separated by "/" or " / ".
+DEALS TO MATCH:
+{deals_text}
 
-Case Companies:
+CASE COMPANIES:
 {companies_str}
 
-Deal Companies:
-{', '.join(sorted(all_companies))}
+INSTRUCTIONS:
+1. Compare the case companies with BOTH Target and Acquirer names in the deals list.
+2. When matching, also consider target_aliases and parent_aliases - if a case company matches an alias, treat it as a match for that deal.
+3. Match only if the company name or a well-known alias appears in the case companies.
+4. Look for EXACT matches, partial matches, or variations of company names.
+5. Accept suffix variations (Inc., Ltd., PLC, AG, SA, NV, Corporation, Corp.).
+6. The case companies may be separated by "/" or " / ".
 
-If there's a match, return in this format:
-Match: COMPANY_NAME (acquirer|target)
+RESPONSE FORMAT:
+- If you find a match, respond EXACTLY in this format:
+  Match: DEAL_ID|COMPANY_NAME|(target|acquirer)
+  Example: Match: 69665014d0bb42af1044aecd|General Motors|acquirer
 
-If not, return:
-None
+- If NO match is found, respond with:
+  None
+
+IMPORTANT: For each match, include the exact Deal ID from the DEALS TO MATCH list.
 """
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are an expert in M&A deal recognition."},
+                {"role": "system", "content": "You are an expert in M&A deal recognition. Return Match: DEAL_ID|COMPANY|target|acquirer or None."},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0,
-            max_tokens=100,
+            temperature=0.1,
+            max_tokens=200,
         )
         result = response.choices[0].message.content.strip()
+        print(f"   🧠 LLM Response: {result}")
         return result
     except Exception as e:
         print(f"⚠️ LLM Error: {e}")
@@ -1121,16 +1169,8 @@ def match_cases_with_deals(filtered_cases: Dict[str, Any], deals: List[Dict[str,
     print(f"🔍 Matching {len(filtered_cases)} cases with deals...")
     print(f"{'='*60}\n")
 
-    # Normalize company names from deals
-    all_companies = set()
-    for deal in deals:
-        # Handle both old format (target/acquirer) and new format (target_name/acquire_name)
-        acquirer = deal.get("acquirer") or deal.get("acquire_name", "")
-        target = deal.get("target") or deal.get("target_name", "")
-        if acquirer:
-            all_companies.add(normalize_company(acquirer))
-        if target:
-            all_companies.add(normalize_company(target))
+    # Build deal_id -> deal lookup for direct identification
+    deal_by_id = {str(d.get("deal_id", "")): d for d in deals if d.get("deal_id")}
 
     matched_count = 0
 
@@ -1150,86 +1190,63 @@ def match_cases_with_deals(filtered_cases: Dict[str, Any], deals: List[Dict[str,
         print(f"   Companies: {companies_str}")
 
         # Match with LLM
-        match_result = match_deal_with_llm(case_companies, all_companies)
+        match_result = match_deal_with_llm(case_companies, deals)
 
-        if match_result and match_result.lower() != "none" and "match:" in match_result.lower():
-            # Extract company name and role from match result
-            try:
-                match_parts = match_result.replace(
-                    "Match:", "").replace("match:", "").strip()
-                if "(" in match_parts:
-                    matched_company = match_parts.split("(")[0].strip().lower()
-                    role_part = match_parts.split(
-                        "(")[1].replace(")", "").strip().lower()
+        # Parse "Match: DEAL_ID|COMPANY_NAME|(target|acquirer)" or "None"
+        deal_match = None
+        matched_company = ""
+        matched_role = ""
+        if match_result and str(match_result).strip().lower() != "none":
+            stripped = str(match_result).strip()
+            if stripped.lower().startswith("match:"):
+                parts = stripped[6:].strip().split("|")  # Remove "Match:"
+                if len(parts) >= 3:
+                    llm_deal_id = parts[0].strip()
+                    matched_company = parts[1].strip()
+                    role_raw = parts[2].strip().lower().replace("(", "").replace(")", "")
+                    matched_role = role_raw if role_raw in ("target", "acquirer") else "acquirer"
+                    if llm_deal_id in deal_by_id:
+                        deal_match = deal_by_id[llm_deal_id]
+
+        if deal_match and matched_company and matched_role:
+            acquirer = deal_match.get("acquirer") or deal_match.get("acquire_name", "")
+            target = deal_match.get("target") or deal_match.get("target_name", "")
+
+            print(f"   🎯 Match found: {matched_company} ({matched_role})")
+
+            # Initialize ec_cases if not exists (for local list)
+            if "ec_cases" not in deal_match:
+                deal_match["ec_cases"] = []
+
+            # Check if case_number already exists in this deal's ec_cases (local check)
+            existing_case_numbers = []
+            for existing_case in deal_match["ec_cases"]:
+                existing_metadata = existing_case.get("metadata", {})
+                existing_case_number = existing_metadata.get("caseNumber", [None])[0]
+                if existing_case_number:
+                    existing_case_numbers.append(existing_case_number)
+
+            if case_number in existing_case_numbers:
+                print(f"   ⏩ Skipped (case {case_number} already exists in deal)")
+            else:
+                # Create a copy of the full case data and add matching metadata (for local list)
+                case_record = json.loads(json.dumps(case_data))  # Deep copy
+                case_record["matched_company"] = matched_company
+                case_record["matched_role"] = matched_role
+
+                deal_match["ec_cases"].append(case_record)
+
+                # Save to MongoDB
+                save_result = save_ec_case_to_deal(
+                    deal_match, case_data, matched_company, matched_role)
+                if save_result:
+                    print(f"   ✅ Added to deal: {acquirer} / {target}")
+                    matched_count += 1
                 else:
-                    matched_company = match_parts.lower()
-                    role_part = ""
-
-                print(f"   🎯 Match found: {matched_company} ({role_part})")
-
-                # Find the deal and add the case
-                for deal in deals:
-                    # Handle both old format (target/acquirer) and new format (target_name/acquire_name)
-                    acquirer = deal.get("acquirer") or deal.get(
-                        "acquire_name", "")
-                    target = deal.get("target") or deal.get("target_name", "")
-
-                    normalized_acquirer = normalize_company(
-                        acquirer) if acquirer else ""
-                    normalized_target = normalize_company(
-                        target) if target else ""
-
-                    if normalized_acquirer == matched_company or normalized_target == matched_company:
-                        # Determine matched role
-                        if normalized_acquirer == matched_company:
-                            matched_role = "acquirer"
-                        else:
-                            matched_role = "target"
-
-                        # Initialize ec_cases if not exists (for local list)
-                        if "ec_cases" not in deal:
-                            deal["ec_cases"] = []
-
-                        # Check if case_number already exists in this deal's ec_cases (local check)
-                        existing_case_numbers = []
-                        for existing_case in deal["ec_cases"]:
-                            existing_metadata = existing_case.get(
-                                "metadata", {})
-                            existing_case_number = existing_metadata.get(
-                                "caseNumber", [None])[0]
-                            if existing_case_number:
-                                existing_case_numbers.append(
-                                    existing_case_number)
-
-                        if case_number in existing_case_numbers:
-                            print(
-                                f"   ⏩ Skipped (case {case_number} already exists in deal)")
-                            break
-
-                        # Create a copy of the full case data and add matching metadata (for local list)
-                        case_record = json.loads(
-                            json.dumps(case_data))  # Deep copy
-                        case_record["matched_company"] = matched_company
-                        case_record["matched_role"] = matched_role
-
-                        deal["ec_cases"].append(case_record)
-
-                        # Save to MongoDB
-                        save_result = save_ec_case_to_deal(
-                            deal, case_data, matched_company, matched_role)
-                        if save_result:
-                            print(
-                                f"   ✅ Added to deal: {acquirer} / {target}")
-                            matched_count += 1
-                        else:
-                            print(
-                                f"   ⚠️ Failed to save to MongoDB, but added to local list")
-                            matched_count += 1
-                        break
-            except Exception as e:
-                print(f"   ⚠️ Error processing match: {e}")
-                import traceback
-                traceback.print_exc()
+                    print(f"   ⚠️ Failed to save to MongoDB, but added to local list")
+                    matched_count += 1
+        elif match_result and str(match_result).strip().lower() != "none" and "match:" in match_result.lower():
+            print(f"   ⚠️ Deal not found for match: {match_result}")
         else:
             print(f"   ➖ No match")
             # Verify if case companies are USA-related

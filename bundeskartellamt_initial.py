@@ -196,40 +196,90 @@ def filter_by_cutoff_date(records, cutoff_date=None):
     return filtered
 
 
-def match_deal_with_llm(pursue_text_en, all_companies):
-    """Match pursue text with deal companies using LLM."""
+def match_deal_with_llm(pursue_text_en, deals):
+    """Match pursue text with deal companies using LLM. Returns Match: DEAL_ID|COMPANY_NAME|(target|acquirer) or None."""
     if not pursue_text_en or pursue_text_en == "[Translation failed]":
         return None
+
+    # Build deals list with all relevant information (including aliases)
+    deals_list = []
+    for deal in deals:
+        deal_info = {
+            "deal_id": deal.get("deal_id", ""),
+        }
+        target = deal.get("target") or deal.get("target_name", "")
+        acquirer = deal.get("acquirer") or deal.get("acquire_name", "")
+
+        if target:
+            deal_info["target"] = target
+        if acquirer:
+            deal_info["acquirer"] = acquirer
+
+        target_aliases = deal.get("target_aliases") or []
+        parent_aliases = deal.get("parent_aliases") or []
+        if isinstance(target_aliases, list) and target_aliases:
+            deal_info["target_aliases"] = target_aliases
+        if isinstance(parent_aliases, list) and parent_aliases:
+            deal_info["parent_aliases"] = parent_aliases
+
+        if target or acquirer:
+            deals_list.append(deal_info)
+
+    if not deals_list:
+        return "None"
+
+    # Build structured prompt with deal information (including aliases)
+    lines = []
+    for d in deals_list:
+        line = f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {d.get('target', 'N/A')} | Acquirer: {d.get('acquirer', 'N/A')}"
+        target_aliases = d.get("target_aliases", []) or []
+        parent_aliases = d.get("parent_aliases", []) or []
+        if target_aliases:
+            line += f" | Target aliases: {', '.join(str(a) for a in target_aliases)}"
+        if parent_aliases:
+            line += f" | Parent aliases: {', '.join(str(a) for a in parent_aliases)}"
+        lines.append(line)
+    deals_text = "\n".join(lines)
+
     prompt = f"""
-You are an M&A deal analyst. Given the translated text about a German merger case (Laufende Verfahren), determine whether it explicitly relates to any of the companies listed below.
+You are an M&A deal analyst. Given the translated text about a German merger case (Laufende Verfahren), determine whether it explicitly relates to any of the deals listed below.
 
-- Match only if the company name or a well-known alias appears in the translated text.
-- Ignore similar-sounding names or partial matches.
-- Accept suffix variations (Inc., Ltd., PLC, GmbH, AG, SE).
+DEALS TO MATCH:
+{deals_text}
 
-Companies:
-{', '.join(sorted(all_companies))}
-
-Translated text:
+TRANSLATED TEXT:
 {pursue_text_en}
 
-If there's a match, return in this format:
-Match: COMPANY_NAME (acquirer|target)
+INSTRUCTIONS:
+1. Compare the translated text with BOTH Target and Acquirer names in the deals list.
+2. When matching, also consider target_aliases and parent_aliases - if the text matches an alias, treat it as a match for that deal.
+3. Match only if the company name or a well-known alias appears in the translated text.
+4. Look for EXACT matches, partial matches, or variations of company names.
+5. Accept suffix variations (Inc., Ltd., PLC, GmbH, AG, SE).
 
-If not, return:
-None
+RESPONSE FORMAT:
+- If you find a match, respond EXACTLY in this format:
+  Match: DEAL_ID|COMPANY_NAME|(target|acquirer)
+  Example: Match: 69665014d0bb42af1044aecd|General Motors|acquirer
+
+- If NO match is found, respond with:
+  None
+
+IMPORTANT: For each match, include the exact Deal ID from the DEALS TO MATCH list.
 """
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are an expert in M&A deal recognition."},
+                {"role": "system", "content": "You are an expert in M&A deal recognition. Return Match: DEAL_ID|COMPANY|target|acquirer or None."},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0,
-            max_tokens=100,
+            temperature=0.1,
+            max_tokens=200,
         )
-        return response.choices[0].message.content.strip()
+        result = response.choices[0].message.content.strip()
+        print(f"   🧠 LLM Response: {result}")
+        return result
     except Exception as e:
         print(f"⚠️ LLM Error: {e}")
         return "None"
@@ -519,17 +569,11 @@ def match_records_with_deals(records):
     if not deals:
         load_deals()
 
-    all_companies = set()
-    for deal in deals:
-        if deal.get("acquirer") or deal.get("acquire_name"):
-            all_companies.add(normalize_company(
-                deal.get("acquirer") or deal.get("acquire_name", "")))
-        if deal.get("target") or deal.get("target_name"):
-            all_companies.add(normalize_company(
-                deal.get("target") or deal.get("target_name", "")))
+    # Build deal_id -> deal lookup for direct identification
+    deal_by_id = {str(d.get("deal_id", ""))
+                      : d for d in deals if d.get("deal_id")}
 
     matched_count = 0
-    updated_count = 0
 
     for idx, record in enumerate(records, 1):
         file_number = record.get("file_number", "")
@@ -541,46 +585,36 @@ def match_records_with_deals(records):
             print("  ⏩ Skipped (translation failed)")
             continue
 
-        match_result = match_deal_with_llm(pursue_en, all_companies)
+        match_result = match_deal_with_llm(pursue_en, deals)
 
-        if match_result and match_result.lower() != "none" and "match:" in match_result.lower():
-            try:
-                match_pattern = r"Match:\s*([^(]+)\s*\((\w+)\)"
-                match_obj = re.search(
-                    match_pattern, match_result, re.IGNORECASE)
-                if match_obj:
-                    matched_company_raw = match_obj.group(1).strip()
-                    matched_role = match_obj.group(2).strip().lower()
-                    matched_company_normalized = normalize_company(
-                        matched_company_raw)
-                    print(f"  🎯 Match: {matched_company_raw} ({matched_role})")
+        # Parse "Match: DEAL_ID|COMPANY_NAME|(target|acquirer)" or "None"
+        deal_match = None
+        matched_company_raw = ""
+        matched_role = ""
+        if match_result and str(match_result).strip().lower() != "none":
+            stripped = str(match_result).strip()
+            if stripped.lower().startswith("match:"):
+                parts = stripped[6:].strip().split("|")  # Remove "Match:"
+                if len(parts) >= 3:
+                    llm_deal_id = parts[0].strip()
+                    matched_company_raw = parts[1].strip()
+                    role_raw = parts[2].strip().lower().replace(
+                        "(", "").replace(")", "")
+                    matched_role = role_raw if role_raw in (
+                        "target", "acquirer") else "acquirer"
+                    if llm_deal_id in deal_by_id:
+                        deal_match = deal_by_id[llm_deal_id]
 
-                    deal_found = None
-                    for deal in deals:
-                        acquirer = deal.get("acquirer") or deal.get(
-                            "acquire_name", "")
-                        target = deal.get("target") or deal.get(
-                            "target_name", "")
-                        if normalize_company(acquirer) == matched_company_normalized or normalize_company(target) == matched_company_normalized:
-                            deal_found = deal
-                            break
+        if deal_match and matched_company_raw and matched_role:
+            print(f"  🎯 Match: {matched_company_raw} ({matched_role})")
+            save_ok = append_or_update_initial_filing_to_deal(
+                deal_match, record, matched_company_raw, matched_role
+            )
+            if save_ok:
+                matched_count += 1
+            else:
+                print("  ⚠️ Failed to save to MongoDB")
 
-                    if deal_found:
-                        save_ok = append_or_update_initial_filing_to_deal(
-                            deal_found, record, matched_company_raw, matched_role
-                        )
-                        if save_ok:
-                            matched_count += 1
-                        else:
-                            print("  ⚠️ Failed to save to MongoDB")
-                    else:
-                        print("  ⚠️ Deal not found in list")
-                else:
-                    print(f"  ⚠️ Could not parse match: {match_result}")
-            except Exception as e:
-                print(f"  ⚠️ Error processing match: {e}")
-                import traceback
-                traceback.print_exc()
         else:
             print("  ➖ No match")
             try:

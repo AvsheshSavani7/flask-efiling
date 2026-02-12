@@ -811,7 +811,7 @@ def match_with_llm(interessados_text, translated):
         print("⚠️ Deals list is empty, reloading from MongoDB (excluding deals with 'brazil' node)...")
         load_deals(include_brazil=False)
 
-    # Build deals list with all relevant information
+    # Build deals list with all relevant information (including aliases)
     deals_list = []
     print("match_with llm starting...")
     print(f"📊 Total deals available: {len(deals)}")
@@ -830,6 +830,13 @@ def match_with_llm(interessados_text, translated):
         if acquirer:
             deal_info["acquirer"] = acquirer
 
+        target_aliases = deal.get("target_aliases") or []
+        parent_aliases = deal.get("parent_aliases") or []
+        if isinstance(target_aliases, list) and target_aliases:
+            deal_info["target_aliases"] = target_aliases
+        if isinstance(parent_aliases, list) and parent_aliases:
+            deal_info["parent_aliases"] = parent_aliases
+
         if target or acquirer:
             deals_list.append(deal_info)
 
@@ -837,11 +844,18 @@ def match_with_llm(interessados_text, translated):
         print("⚠️ No deals with company names found")
         return "None"
 
-    # Build structured prompt with deal information
-    deals_text = "\n".join([
-        f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {d.get('target', 'N/A')} | Acquirer: {d.get('acquirer', 'N/A')}"
-        for d in deals_list
-    ])
+    # Build structured prompt with deal information (including aliases)
+    lines = []
+    for d in deals_list:
+        line = f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {d.get('target', 'N/A')} | Acquirer: {d.get('acquirer', 'N/A')}"
+        target_aliases = d.get("target_aliases", []) or []
+        parent_aliases = d.get("parent_aliases", []) or []
+        if target_aliases:
+            line += f" | Target aliases: {', '.join(str(a) for a in target_aliases)}"
+        if parent_aliases:
+            line += f" | Parent aliases: {', '.join(str(a) for a in parent_aliases)}"
+        lines.append(line)
+    deals_text = "\n".join(lines)
 
     print(f"deals_text: {deals_text}")
 
@@ -859,13 +873,15 @@ ORIGINAL TEXT (Portuguese):
 
 INSTRUCTIONS:
 1. Compare the interessados text with BOTH Target and Acquirer names in the deals list.
-2. Look for EXACT matches, partial matches, or variations of company names.
-3. Consider that the interessados text might be:
+2. When matching, also consider target_aliases and parent_aliases - if the interessados text matches an alias, treat it as a match for that deal.
+3. Look for EXACT matches, partial matches, or variations of company names.
+4. Consider that the interessados text might be:
    - The full company name
    - A department/division name that matches the company
    - A translated version of the company name
-4. If the interessados text appears in ANY form in a deal's Target or Acquirer field, it's a match.
-5. Be thorough - check if the interessados text is contained within or matches any company name.
+   - An alias (target_aliases or parent_aliases)
+5. If the interessados text appears in ANY form in a deal's Target, Acquirer, or aliases, it's a match.
+6. Be thorough - check if the interessados text is contained within or matches any company name.
 
 MATCHING EXAMPLES:
 - "General Coordination of Information Technology" matches "General Coordination of Information Technology" (exact match)
@@ -880,7 +896,7 @@ RESPONSE FORMAT:
 - If NO match is found after thorough checking, respond with:
   None
 
-IMPORTANT: Check carefully - if the interessados text matches or is contained in any Target or Acquirer name, return the match.
+IMPORTANT: Check carefully - if the interessados text matches or is contained in any Target, Acquirer, or alias name, return the match.
 """
     try:
         res = client.chat.completions.create(

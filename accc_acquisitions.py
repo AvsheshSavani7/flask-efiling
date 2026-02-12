@@ -92,11 +92,20 @@ def load_deals(include_accc_cases=False):
 
 def match_with_llm(title):
     """Use LLM to match deal with Deal ID included in response"""
-    # Format deals list with Deal ID, Target, and Acquirer
-    deals_text = "\n".join([
-        f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {d.get('target_name', 'N/A')} | Acquirer: {d.get('acquire_name', 'N/A')}"
-        for d in deals
-    ])
+    # Build deals list with Deal ID, Target, Acquirer, and aliases
+    lines = []
+    for d in deals:
+        target = d.get("target") or d.get("target_name", "N/A")
+        acquirer = d.get("acquirer") or d.get("acquire_name", "N/A")
+        line = f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {target} | Acquirer: {acquirer}"
+        target_aliases = d.get("target_aliases", []) or []
+        parent_aliases = d.get("parent_aliases", []) or []
+        if target_aliases:
+            line += f" | Target aliases: {', '.join(str(a) for a in target_aliases)}"
+        if parent_aliases:
+            line += f" | Parent aliases: {', '.join(str(a) for a in parent_aliases)}"
+        lines.append(line)
+    deals_text = "\n".join(lines)
 
     prompt = f"""You are an expert M&A deal matcher. Your task is to determine if ANY company mentioned in the acquisition title appears in our deals database.
 
@@ -109,9 +118,10 @@ ACQUISITION TITLE TO MATCH:
 MATCHING INSTRUCTIONS:
 1. Extract ALL company names from the acquisition title (both acquirer and target)
 2. Check if ANY of these company names appears as either a Target OR Acquirer in the deals database
-3. Consider variations, abbreviations, and partial matches (e.g., "Warburg Pincus" matches "Warburg Pincus LLC")
-4. Match on a SINGLE company name - you don't need both companies to match
-5. IMPORTANT: Even if the deal structure is different, match if you find the company name
+3. When matching, also consider target_aliases and parent_aliases - if the title matches an alias, treat it as a match for that deal
+4. Consider variations, abbreviations, and partial matches (e.g., "Warburg Pincus" matches "Warburg Pincus LLC")
+5. Match on a SINGLE company name - you don't need both companies to match
+6. IMPORTANT: Even if the deal structure is different, match if you find the company name
 
 RESPONSE FORMAT:
 - If you find ANY match, respond EXACTLY in this format:
@@ -121,7 +131,7 @@ RESPONSE FORMAT:
 - If NO match is found after thorough checking, respond with:
   None
 
-CRITICAL: Match if you see ANY company name from the title in the database, regardless of whether it's the same deal or different target/acquirer combination."""
+CRITICAL: Match if you see ANY company name from the title in the database (including Target, Acquirer, or alias), regardless of whether it's the same deal or different target/acquirer combination."""
 
     try:
         res = client.chat.completions.create(

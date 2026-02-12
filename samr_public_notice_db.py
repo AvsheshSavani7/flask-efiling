@@ -215,7 +215,7 @@ def match_deal_with_llm(title_en, title_cn):
         print("⚠️ Deals list is empty, reloading from MongoDB (excluding deals with 'samr_public' node)...")
         load_deals(include_samr=False)
 
-    # Build deals list with all relevant information
+    # Build deals list with all relevant information (including aliases)
     deals_list = []
     for deal in deals:
         deal_info = {
@@ -231,6 +231,13 @@ def match_deal_with_llm(title_en, title_cn):
         if acquirer:
             deal_info["acquirer"] = acquirer
 
+        target_aliases = deal.get("target_aliases") or []
+        parent_aliases = deal.get("parent_aliases") or []
+        if isinstance(target_aliases, list) and target_aliases:
+            deal_info["target_aliases"] = target_aliases
+        if isinstance(parent_aliases, list) and parent_aliases:
+            deal_info["parent_aliases"] = parent_aliases
+
         if target or acquirer:
             deals_list.append(deal_info)
 
@@ -238,11 +245,18 @@ def match_deal_with_llm(title_en, title_cn):
         print("⚠️ No deals with company names found")
         return "None"
 
-    # Build structured prompt with deal information
-    deals_text = "\n".join([
-        f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {d.get('target', 'N/A')} | Acquirer: {d.get('acquirer', 'N/A')}"
-        for d in deals_list
-    ])
+    # Build structured prompt with deal information (including aliases)
+    lines = []
+    for d in deals_list:
+        line = f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {d.get('target', 'N/A')} | Acquirer: {d.get('acquirer', 'N/A')}"
+        target_aliases = d.get("target_aliases", []) or []
+        parent_aliases = d.get("parent_aliases", []) or []
+        if target_aliases:
+            line += f" | Target aliases: {', '.join(str(a) for a in target_aliases)}"
+        if parent_aliases:
+            line += f" | Parent aliases: {', '.join(str(a) for a in parent_aliases)}"
+        lines.append(line)
+    deals_text = "\n".join(lines)
 
     prompt = f"""
 You are an M&A deal analyst. Given the translated title of a Chinese public notice, determine whether it explicitly relates to any of the companies listed below.
@@ -258,14 +272,16 @@ TITLE (Original Chinese):
 
 INSTRUCTIONS:
 1. Compare the title text with BOTH Target and Acquirer names in the deals list.
-2. Look for EXACT matches, partial matches, or variations of company names.
-3. Consider that the title might be:
+2. When matching, also consider target_aliases and parent_aliases - if the title matches an alias, treat it as a match for that deal.
+3. Look for EXACT matches, partial matches, or variations of company names.
+4. Consider that the title might be:
    - The full company name
    - A department/division name that matches the company
    - A translated version of the company name
-4. If the title text appears in ANY form in a deal's Target or Acquirer field, it's a match.
-5. Be thorough - check if the title is contained within or matches any company name.
-6. Accept suffix variations (Inc., Ltd., PLC).
+   - An alias (target_aliases or parent_aliases)
+5. If the title text appears in ANY form in a deal's Target, Acquirer, or aliases, it's a match.
+6. Be thorough - check if the title is contained within or matches any company name.
+7. Accept suffix variations (Inc., Ltd., PLC).
 
 MATCHING EXAMPLES:
 - "General Motors" matches "General Motors Corporation" (partial match)
@@ -280,7 +296,7 @@ RESPONSE FORMAT:
 - If NO match is found after thorough checking, respond with:
   None
 
-IMPORTANT: Check carefully - if the title matches or is contained in any Target or Acquirer name, return the match.
+IMPORTANT: Check carefully - if the title matches or is contained in any Target, Acquirer, or alias name, return the match.
 """
     try:
         response = client.chat.completions.create(

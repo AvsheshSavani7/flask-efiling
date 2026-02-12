@@ -242,38 +242,86 @@ def filter_records_by_date(records):
 def match_title_with_deals(title):
     """
     Match a case title with deals using LLM.
-    Returns matched deal info or None.
+    Returns "Match: DEAL_ID|COMPANY_NAME|(target|acquirer)" or "None".
     """
+    global deals
+
+    # Reload deals if list is empty
+    if not deals:
+        print("⚠️ Deals list is empty, reloading from MongoDB...")
+        load_deals(include_cma_cases=True)
+
+    # Build deals list with all relevant information (including aliases)
+    deals_list = []
+    for deal in deals:
+        deal_info = {
+            "deal_id": deal.get("deal_id", ""),
+        }
+        target = deal.get("target") or deal.get("target_name", "")
+        acquirer = deal.get("acquirer") or deal.get("acquire_name", "")
+
+        if target:
+            deal_info["target"] = target
+        if acquirer:
+            deal_info["acquirer"] = acquirer
+
+        target_aliases = deal.get("target_aliases") or []
+        parent_aliases = deal.get("parent_aliases") or []
+        if isinstance(target_aliases, list) and target_aliases:
+            deal_info["target_aliases"] = target_aliases
+        if isinstance(parent_aliases, list) and parent_aliases:
+            deal_info["parent_aliases"] = parent_aliases
+
+        if target or acquirer:
+            deals_list.append(deal_info)
+
+    if not deals_list:
+        print("⚠️ No deals with company names found")
+        return "None"
+
+    # Build structured prompt with deal information (including aliases)
+    lines = []
+    for d in deals_list:
+        line = f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {d.get('target', 'N/A')} | Acquirer: {d.get('acquirer', 'N/A')}"
+        target_aliases = d.get("target_aliases", []) or []
+        parent_aliases = d.get("parent_aliases", []) or []
+        if target_aliases:
+            line += f" | Target aliases: {', '.join(str(a) for a in target_aliases)}"
+        if parent_aliases:
+            line += f" | Parent aliases: {', '.join(str(a) for a in parent_aliases)}"
+        lines.append(line)
+    deals_text = "\n".join(lines)
+
     prompt = f"""
 You are a professional M&A analyst specializing in UK merger cases.
 
-Below is a CMA merger case title. Your task is to match it with any of the known companies from our deals database.
+Below is a CMA merger case title. Your task is to match it with any of the deals listed below.
 
-Case Title: {title}
+DEALS TO MATCH:
+{deals_text}
 
-Known companies (acquirers and targets):
-{', '.join(sorted(all_companies))}
+CASE TITLE: {title}
 
-Instructions:
-- Match the case title with companies from the known set using partial or fuzzy name matching
-- Consider variations, abbreviations, and common company name formats
-- Return a JSON object with the match information
+INSTRUCTIONS:
+1. Compare the case title with BOTH Target and Acquirer names in the deals list.
+2. When matching, also consider target_aliases and parent_aliases - if the title matches an alias, treat it as a match for that deal.
+3. Look for EXACT matches, partial matches, or variations of company names.
+4. Consider that the title might be:
+   - The full company name
+   - A department/division name that matches the company
+   - An alias (target_aliases or parent_aliases)
+5. If the title appears in ANY form in a deal's Target, Acquirer, or aliases, it's a match.
+6. Accept suffix variations (Inc., Ltd., PLC).
 
-Return format (JSON only, no markdown):
-{{
-  "matched": true/false,
-  "company_name": "matched company name from known set",
-  "role": "acquirer" or "target",
-  "confidence": "high" or "medium" or "low"
-}}
+RESPONSE FORMAT:
+- If you find a match, respond EXACTLY in this format:
+  Match: DEAL_ID|COMPANY_NAME|(target|acquirer)
+  Example: Match: 69665014d0bb42af1044aecd|Warburg Pincus|acquirer
 
-If no match, return:
-{{
-  "matched": false,
-  "company_name": null,
-  "role": null,
-  "confidence": null
-}}
+- If NO match is found after thorough checking, respond with:
+  None
+
+IMPORTANT: Check carefully - if the title matches or is contained in any Target, Acquirer, or alias name, return the match.
 """
 
     with open(PROMPT_LOG_PATH, "a", encoding="utf-8") as f:
@@ -286,36 +334,19 @@ If no match, return:
             model="gpt-4o",
             messages=[
                 {"role": "system",
-                    "content": "You identify M&A deals from UK CMA merger case titles."},
+                    "content": "You identify M&A deals from UK CMA merger case titles. Return Match: DEAL_ID|COMPANY|target|acquirer or None."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0,
-            max_tokens=300
+            temperature=0.1,
+            max_tokens=200
         )
-        content = res.choices[0].message.content.strip()
-
-        # Remove markdown code blocks if present
-        if content.startswith("```"):
-            content = re.sub(r"^```json|^```|```$", "", content).strip()
-
-        # Extract JSON
-        json_start = content.find("{")
-        json_end = content.rfind("}") + 1
-        if json_start != -1 and json_end > json_start:
-            json_str = content[json_start:json_end]
-            try:
-                parsed = json.loads(json_str)
-                return parsed
-            except json.JSONDecodeError as e:
-                print(f"❌ JSON parsing error: {e}")
-                print(f"   Content: {content}")
-                return {"matched": False}
-        else:
-            return {"matched": False}
+        result = res.choices[0].message.content.strip()
+        print(f"🧠 LLM Response: {result}")
+        return result
 
     except Exception as e:
         print(f"❌ LLM error: {e}")
-        return {"matched": False}
+        return "None"
 
 
 def scrape_case_details(url):
@@ -1119,77 +1150,70 @@ def match_records_with_deals(records):
         # Match title with deals using LLM
         match_result = match_title_with_deals(title)
 
-        if match_result.get("matched"):
-            company_name = match_result.get("company_name", "")
-            role = match_result.get("role", "")
-            confidence = match_result.get("confidence", "low")
+        # Parse "Match: DEAL_ID|COMPANY_NAME|(target|acquirer)" or "None"
+        deal_match = None
+        company_name = ""
+        role = ""
+        if match_result and str(match_result).strip().lower() != "none":
+            stripped = str(match_result).strip()
+            if stripped.lower().startswith("match:"):
+                # Parse: Match: DEAL_ID|COMPANY_NAME|role
+                parts = stripped[6:].strip().split("|")  # Remove "Match:"
+                if len(parts) >= 3:
+                    llm_deal_id = parts[0].strip()
+                    company_name = parts[1].strip()
+                    role = parts[2].strip().lower().replace("(", "").replace(")", "")
+                    if role not in ("target", "acquirer"):
+                        role = "acquirer"  # default
+                    # Direct lookup by deal_id
+                    deal_by_id = {str(d.get("deal_id", "")): d for d in deals if d.get("deal_id")}
+                    if llm_deal_id in deal_by_id:
+                        deal_match = deal_by_id[llm_deal_id]
+
+        if deal_match and company_name and role:
+            acquirer = deal_match.get("acquirer") or deal_match.get("acquire_name", "")
+            target = deal_match.get("target") or deal_match.get("target_name", "")
 
             print(
-                f"  🎯 Match found: {company_name} ({role}, confidence: {confidence})")
+                f"  🎯 Match found: {company_name} ({role})")
+            print(
+                f"  🔍 Deal found: {acquirer or 'N/A'} / {target or 'N/A'}")
 
-            # Find the deal and add the record
-            deal_found = False
-            normalized_company_name = normalize_company(company_name)
+            # Scrape case details from the URL
+            case_url = record.get("url", "")
+            case_details = {}
+            if case_url:
+                case_details = scrape_case_details(case_url)
 
-            for deal in deals:
-                # Handle both old format (target/acquirer) and new format (target_name/acquire_name)
-                acquirer = deal.get("acquirer") or deal.get("acquire_name", "")
-                target = deal.get("target") or deal.get("target_name", "")
+            # Build CMA case information
+            case_info = {
+                "title": title,
+                "updated": updated_date,
+                "url": case_url,
+                "id": record.get("id", ""),
+                "matched_company": company_name,
+                "matched_role": role,
+                "published_date": case_details.get("published_date"),
+                "last_updated": case_details.get("last_updated"),
+                "updates": case_details.get("updates", []),
+            }
 
-                normalized_acquirer = normalize_company(acquirer)
-                normalized_target = normalize_company(target)
-
-                if normalized_company_name == normalized_acquirer or normalized_company_name == normalized_target:
-                    deal_found = True
-                    print(
-                        f"  🔍 Deal found: {acquirer or 'N/A'} / {target or 'N/A'}")
-
-                    # Scrape case details from the URL
-                    case_url = record.get("url", "")
-                    case_details = {}
-                    if case_url:
-                        case_details = scrape_case_details(case_url)
-
-                    # Build CMA case information
-                    case_info = {
-                        "title": title,
-                        "updated": updated_date,
-                        "url": case_url,
-                        "id": record.get("id", ""),
-                        "matched_company": company_name,
-                        "matched_role": role,
-                        "published_date": case_details.get("published_date"),
-                        "last_updated": case_details.get("last_updated"),
-                        "updates": case_details.get("updates", []),
-                    }
-
-                    # Save to MongoDB under 'uk_cma_cases' node
-                    print(f"  💾 Attempting to save to MongoDB...")
-                    save_result = save_cma_case_data_to_deal(deal, case_info)
-                    if save_result:
-                        print(
-                            f"  ✅ Added to deal: {acquirer or 'N/A'} / {target or 'N/A'}"
-                        )
-                        matched_count += 1
-                    else:
-                        print(
-                            f"  ⚠️ Failed to save to MongoDB for deal: {acquirer or 'N/A'} / {target or 'N/A'}"
-                        )
-                    break
-
-            if not deal_found:
+            # Save to MongoDB under 'uk_cma_cases' node
+            print(f"  💾 Attempting to save to MongoDB...")
+            save_result = save_cma_case_data_to_deal(deal_match, case_info)
+            if save_result:
                 print(
-                    f"  ⚠️ Deal not found in deals list for company: {company_name}")
+                    f"  ✅ Added to deal: {acquirer or 'N/A'} / {target or 'N/A'}"
+                )
+                matched_count += 1
+            else:
                 print(
-                    f"     Searching for normalized: '{normalized_company_name}'")
-                print(f"     Total deals loaded: {len(deals)}")
-                # Show first few deals for debugging
-                if deals:
-                    print(f"     Sample deals (first 3):")
-                    for i, d in enumerate(deals[:3]):
-                        a = d.get("acquirer") or d.get("acquire_name", "")
-                        t = d.get("target") or d.get("target_name", "")
-                        print(f"       Deal {i+1}: {a} / {t}")
+                    f"  ⚠️ Failed to save to MongoDB for deal: {acquirer or 'N/A'} / {target or 'N/A'}"
+                )
+        elif deal_match is None and match_result and str(match_result).strip().lower() != "none":
+            # LLM returned a match format but we couldn't find the deal
+            print(
+                f"  ⚠️ Deal not found for match: {match_result}")
         else:
             print(f"  ➖ No match")
             # Verify if case title is USA-related

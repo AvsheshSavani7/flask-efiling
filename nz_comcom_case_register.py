@@ -100,10 +100,19 @@ def load_deals(include_nz_cases: bool = False) -> List[Dict[str, Any]]:
 
 def match_with_llm(title: str) -> Optional[str]:
     """Use LLM to match case title with a deal. Returns match string or None."""
-    deals_text = "\n".join([
-        f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {d.get('target_name', 'N/A')} | Acquirer: {d.get('acquire_name', 'N/A')}"
-        for d in deals
-    ])
+    lines = []
+    for d in deals:
+        target = d.get("target") or d.get("target_name", "N/A")
+        acquirer = d.get("acquirer") or d.get("acquire_name", "N/A")
+        line = f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {target} | Acquirer: {acquirer}"
+        target_aliases = d.get("target_aliases", []) or []
+        parent_aliases = d.get("parent_aliases", []) or []
+        if target_aliases:
+            line += f" | Target aliases: {', '.join(str(a) for a in target_aliases)}"
+        if parent_aliases:
+            line += f" | Parent aliases: {', '.join(str(a) for a in parent_aliases)}"
+        lines.append(line)
+    deals_text = "\n".join(lines)
 
     prompt = f"""You are an expert M&A deal matcher. Determine if ANY company mentioned in the case title appears in our deals database.
 
@@ -116,8 +125,9 @@ CASE TITLE TO MATCH:
 INSTRUCTIONS:
 1. Extract ALL company names from the case title.
 2. Check if ANY of these names appears as either Target OR Acquirer in the deals database.
-3. Consider variations, abbreviations, and partial matches.
-4. Match on a SINGLE company name.
+3. When matching, also consider target_aliases and parent_aliases - if the title matches an alias, treat it as a match for that deal.
+4. Consider variations, abbreviations, and partial matches.
+5. Match on a SINGLE company name.
 
 RESPONSE FORMAT:
 - If you find ANY match, respond EXACTLY:
@@ -125,7 +135,9 @@ RESPONSE FORMAT:
   Example: Match: 69665014d0bb42af1044aecd|Astra Energy|acquirer
 
 - If NO match, respond with:
-  None"""
+  None
+
+IMPORTANT: Match if the title matches or is contained in any Target, Acquirer, or alias name."""
 
     try:
         res = client.chat.completions.create(
