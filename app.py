@@ -24,6 +24,7 @@ from accc_acquisitions import main as accc_acquisitions_main
 from accc_case_update_monitor import process_accc_case_updates
 from ftc_early_termination_scraper import main as ftc_early_termination_main
 from nz_comcom_case_register import main as nz_comcom_case_register_main
+from competition_bureau_canada_mergers import main as competition_bureau_canada_main
 from nz_comcom_case_update_monitor import process_nz_case_updates
 from mongodb_connection import init_mongodb_connection, close_mongodb_connection, is_connected
 import logging
@@ -92,6 +93,7 @@ def home():
             "/ftc-early-termination-scraper": "GET - Scrape FTC early termination notices and match with deals",
             "/nz-comcom-case-register": "GET - Scrape NZ ComCom case register and match with deals",
             "/nz-comcom-case-update-monitor": "GET - Monitor NZ ComCom cases for updates and send email notifications",
+            "/competition-bureau-canada-scraper": "GET - Scrape Canada Competition Bureau merger reviews and match with deals",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -1392,6 +1394,52 @@ def ftc_early_termination_scraper():
 
     except Exception as e:
         logger.error(f"❌ Error starting FTC early termination scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/competition-bureau-canada-scraper', methods=['GET'])
+def competition_bureau_canada_scraper():
+    """
+    Scrape Canada Competition Bureau merger reviews and match with deals.
+    Scrapes the Competition Bureau Canada report of merger reviews table,
+    matches party names with deals via LLM, saves matched cases to MongoDB
+    under 'canada_competition_bureau_cases', sends email notifications for
+    matched and USA-related cases, and writes a JSON backup file.
+
+    Process runs in a background thread – this endpoint returns immediately.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        def run_scraper():
+            try:
+                logger.info("Starting Canada Competition Bureau scraper in background")
+                competition_bureau_canada_main()
+                logger.info("✅ Canada Competition Bureau scraper completed successfully")
+            except Exception as e:
+                logger.error(f"❌ Error in Canada Competition Bureau scraper: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_scraper, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "Canada Competition Bureau scraper started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Error starting Canada Competition Bureau scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
