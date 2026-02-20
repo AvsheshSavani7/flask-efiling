@@ -62,7 +62,14 @@ def get_deals_from_mongodb(include_ftc=False):
 
         query = {}
         if not include_ftc:
-            query = {"ftc_early_termination": {"$exists": False}}
+            query = {
+                "$or": [
+                    {"ftc_early_termination": {"$exists": False}},
+                    {"ftc_early_termination": None},
+                    {"ftc_early_termination": []},
+                    {"ftc_early_termination": {}}
+                ]
+            }
 
         all_deals = list(collection.find(query))
         for deal in all_deals:

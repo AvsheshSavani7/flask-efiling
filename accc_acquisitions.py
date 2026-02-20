@@ -55,7 +55,14 @@ def get_deals_from_mongodb(include_accc_cases=False):
         # Build query - exclude deals with 'accc_cases' node if include_accc_cases is False
         query = {}
         if not include_accc_cases:
-            query = {"accc_cases": {"$exists": False}}
+            # query = {"accc_cases": {"$exists": False}}
+            query = {
+                "$or": [
+                    {"accc_cases": {"$exists": False}},
+                    {"accc_cases": None},
+                    {"accc_cases": []}
+                ]
+            }
 
         # Fetch documents from the deals collection
         all_deals = list(collection.find(query))

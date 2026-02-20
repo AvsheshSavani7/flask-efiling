@@ -72,7 +72,14 @@ def get_deals_from_mongodb(include_brazil=False):
         # Build query - exclude deals with 'brazil' node if include_brazil is False
         query = {}
         if not include_brazil:
-            query = {"brazil": {"$exists": False}}
+            query = {
+                "$or": [
+                    {"brazil": {"$exists": False}},
+                    {"brazil": None},
+                    {"brazil": []},
+                    {"brazil": {}}
+                ]
+            }
 
         # Fetch documents from the deals collection
         all_deals = list(collection.find(query))

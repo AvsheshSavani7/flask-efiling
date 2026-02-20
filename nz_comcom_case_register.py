@@ -72,7 +72,14 @@ def get_deals_from_mongodb(include_nz_cases: bool = False) -> List[Dict[str, Any
 
         query = {}
         if not include_nz_cases:
-            query = {"nz_cases": {"$exists": False}}
+            query = {
+                "$or": [
+                    {"nz_cases": {"$exists": False}},
+                    {"nz_cases": None},
+                    {"nz_cases": []},
+                    {"nz_cases": {}}
+                ]
+            }
 
         all_deals = list(collection.find(query))
         for deal in all_deals:

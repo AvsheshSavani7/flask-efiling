@@ -51,6 +51,15 @@ def get_deals_from_mongodb(include_german_scrap=True):
             print("⚠️ MongoDB connection not available. Deals collection not accessible.")
             return []
         query = {}
+        if not include_german_scrap:
+            query = {
+                "$or": [
+                    {"german_scrap": {"$exists": False}},
+                    {"german_scrap": None},
+                    {"german_scrap": []},
+                    {"german_scrap": {}}
+                ]
+            }
         all_deals = list(collection.find(query))
         for deal in all_deals:
             if "_id" in deal:

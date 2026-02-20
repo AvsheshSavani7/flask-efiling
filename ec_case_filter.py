@@ -198,7 +198,14 @@ def get_deals_from_mongodb(include_ec_cases=False):
         # Build query - exclude deals with 'ec_cases' node if include_ec_cases is False
         query = {}
         if not include_ec_cases:
-            query = {"ec_cases": {"$exists": False}}
+            query = {
+                "$or": [
+                    {"ec_cases": {"$exists": False}},
+                    {"ec_cases": None},
+                    {"ec_cases": []},
+                    {"ec_cases": {}}
+                ]
+            }
 
         # Fetch documents from the deals collection
         all_deals = list(collection.find(query))
@@ -1170,7 +1177,8 @@ def match_cases_with_deals(filtered_cases: Dict[str, Any], deals: List[Dict[str,
     print(f"{'='*60}\n")
 
     # Build deal_id -> deal lookup for direct identification
-    deal_by_id = {str(d.get("deal_id", "")): d for d in deals if d.get("deal_id")}
+    deal_by_id = {str(d.get("deal_id", ""))
+                      : d for d in deals if d.get("deal_id")}
 
     matched_count = 0
 
@@ -1203,14 +1211,18 @@ def match_cases_with_deals(filtered_cases: Dict[str, Any], deals: List[Dict[str,
                 if len(parts) >= 3:
                     llm_deal_id = parts[0].strip()
                     matched_company = parts[1].strip()
-                    role_raw = parts[2].strip().lower().replace("(", "").replace(")", "")
-                    matched_role = role_raw if role_raw in ("target", "acquirer") else "acquirer"
+                    role_raw = parts[2].strip().lower().replace(
+                        "(", "").replace(")", "")
+                    matched_role = role_raw if role_raw in (
+                        "target", "acquirer") else "acquirer"
                     if llm_deal_id in deal_by_id:
                         deal_match = deal_by_id[llm_deal_id]
 
         if deal_match and matched_company and matched_role:
-            acquirer = deal_match.get("acquirer") or deal_match.get("acquire_name", "")
-            target = deal_match.get("target") or deal_match.get("target_name", "")
+            acquirer = deal_match.get(
+                "acquirer") or deal_match.get("acquire_name", "")
+            target = deal_match.get(
+                "target") or deal_match.get("target_name", "")
 
             print(f"   🎯 Match found: {matched_company} ({matched_role})")
 
@@ -1222,12 +1234,14 @@ def match_cases_with_deals(filtered_cases: Dict[str, Any], deals: List[Dict[str,
             existing_case_numbers = []
             for existing_case in deal_match["ec_cases"]:
                 existing_metadata = existing_case.get("metadata", {})
-                existing_case_number = existing_metadata.get("caseNumber", [None])[0]
+                existing_case_number = existing_metadata.get(
+                    "caseNumber", [None])[0]
                 if existing_case_number:
                     existing_case_numbers.append(existing_case_number)
 
             if case_number in existing_case_numbers:
-                print(f"   ⏩ Skipped (case {case_number} already exists in deal)")
+                print(
+                    f"   ⏩ Skipped (case {case_number} already exists in deal)")
             else:
                 # Create a copy of the full case data and add matching metadata (for local list)
                 case_record = json.loads(json.dumps(case_data))  # Deep copy

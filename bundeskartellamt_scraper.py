@@ -44,7 +44,14 @@ def get_deals_from_mongodb(include_german_scrap=False):
         # Build query - exclude deals with 'german_scrap' node if include_german_scrap is False
         query = {}
         if not include_german_scrap:
-            query = {"german_scrap": {"$exists": False}}
+            query = {
+                "$or": [
+                    {"german_scrap": {"$exists": False}},
+                    {"german_scrap": None},
+                    {"german_scrap": []},
+                    {"german_scrap": {}}
+                ]
+            }
 
         # Fetch documents from the deals collection
         all_deals = list(collection.find(query))

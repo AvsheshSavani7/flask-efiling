@@ -69,7 +69,14 @@ def get_deals_from_mongodb(include_conditional=False):
         # Build query - exclude deals with 'samr_conditional' node if include_conditional is False
         query = {}
         if not include_conditional:
-            query = {"samr_conditional": {"$exists": False}}
+            query = {
+                "$or": [
+                    {"samr_conditional": {"$exists": False}},
+                    {"samr_conditional": None},
+                    {"samr_conditional": []},
+                    {"samr_conditional": {}}
+                ]
+            }
 
         # Fetch documents from the deals collection
         all_deals = list(collection.find(query))

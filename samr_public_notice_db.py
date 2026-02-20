@@ -64,7 +64,14 @@ def get_deals_from_mongodb(include_samr=False):
         # Build query - exclude deals with 'samr_public' node if include_samr is False
         query = {}
         if not include_samr:
-            query = {"samr_public": {"$exists": False}}
+            query = {
+                "$or": [
+                    {"samr_public": {"$exists": False}},
+                    {"samr_public": None},
+                    {"samr_public": []},
+                    {"samr_public": {}}
+                ]
+            }
 
         # Fetch documents from the deals collection
         all_deals = list(collection.find(query))
