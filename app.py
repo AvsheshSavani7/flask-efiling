@@ -25,6 +25,7 @@ from accc_case_update_monitor import process_accc_case_updates
 from ftc_early_termination_scraper import main as ftc_early_termination_main
 from nz_comcom_case_register import main as nz_comcom_case_register_main
 from competition_bureau_canada_mergers import main as competition_bureau_canada_main
+from canada_competition_bureau_case_update_monitor import process_canada_case_updates
 from nz_comcom_case_update_monitor import process_nz_case_updates
 from mongodb_connection import init_mongodb_connection, close_mongodb_connection, is_connected
 import logging
@@ -94,6 +95,7 @@ def home():
             "/nz-comcom-case-register": "GET - Scrape NZ ComCom case register and match with deals",
             "/nz-comcom-case-update-monitor": "GET - Monitor NZ ComCom cases for updates and send email notifications",
             "/competition-bureau-canada-scraper": "GET - Scrape Canada Competition Bureau merger reviews and match with deals",
+            "/canada-competition-bureau-case-update-monitor": "GET - Monitor Canada Competition Bureau cases for updates and send email notifications",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -1440,6 +1442,42 @@ def competition_bureau_canada_scraper():
 
     except Exception as e:
         logger.error(f"❌ Error starting Canada Competition Bureau scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/canada-competition-bureau-case-update-monitor', methods=['GET'])
+def canada_competition_bureau_case_update_monitor():
+    """
+    Monitor Canada Competition Bureau cases for updates.
+    Fetches current report HTML, compares with stored canada_competition_bureau_cases
+    on deals; if concluded_date, industry, or outcome changed, sends email and updates DB.
+    Process runs in background - returns immediately.
+    """
+    try:
+        def run_monitor():
+            try:
+                logger.info("Starting Canada Competition Bureau case update monitor in background")
+                process_canada_case_updates()
+                logger.info("✅ Canada Competition Bureau case update monitor completed")
+            except Exception as e:
+                logger.error(f"❌ Error in Canada Competition Bureau case update monitor: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_monitor, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "Canada Competition Bureau case update monitor started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Error starting Canada Competition Bureau case update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
