@@ -22,8 +22,8 @@ ENV_FILE = ".env"
 COMPREHENSIVE_SUMMARY_MODEL = "gpt-5-mini-2025-08-07"
 # Model for Assistants API (must support file_search)
 ASSISTANTS_API_MODEL = "gpt-4o-mini"
-TIER1_MODEL = "claude-3-haiku-20240307"
-TIER2_MODEL = "claude-3-5-haiku-20241022"
+TIER1_MODEL = "claude-haiku-4-5-20251001"
+TIER2_MODEL = "claude-haiku-4-5-20251001"
 TIER3_MODEL = "claude-sonnet-4-20250514"
 
 
@@ -795,13 +795,6 @@ CRITICAL: You must provide numerical scores (0-100) for both risks. Be decisive 
         tier3_input_tokens, tier3_output_tokens, TIER3_MODEL)
 
     content = content_for_tier2
-    # max_content_length = 100000
-    # if len(content) > max_content_length:
-    #     content = (
-    #         content[:80000] +
-    #         f"\n\n[TRUNCATED - {len(content):,} total chars]\n\n" +
-    #         content[-20000:]
-    #     )
 
     tier1_prompt = f"""You are extracting key facts from a legal docket entry. Be concise and factual.
 
