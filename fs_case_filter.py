@@ -437,7 +437,7 @@ def send_fs_case_email_via_webhook(case_data: Dict[str, Any], deal_match: Dict[s
         # webhook_url = os.getenv(
         #     "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6")
         webhook_url = os.getenv(
-            "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/80830c6d-ff5b-45e3-9ef3-a061db1fbf0c")
+            "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6")
         print(f"📤 Sending email via n8n webhook: {webhook_url}")
 
         metadata = case_data.get("metadata", {})
