@@ -20,6 +20,7 @@ from bundeskartellamt_scraper import main as bundeskartellamt_main
 from bundeskartellamt_initial import main as bundeskartellamt_initial_main
 from bundeskartellamt_press_release import main as bundeskartellamt_press_release_main
 from ec_case_filter import main as ec_case_filter_main
+from fs_case_filter import main as fs_case_filter_main
 from accc_acquisitions import main as accc_acquisitions_main
 from accc_case_update_monitor import process_accc_case_updates
 from ftc_early_termination_scraper import main as ftc_early_termination_main
@@ -88,7 +89,9 @@ def home():
             "/bundeskartellamt-initial": "GET - Scrape Bundeskartellamt Laufende Verfahren (initial filing) and match with deals",
             "/bundeskartellamt-press-release": "GET - Scrape Bundeskartellamt press releases and match with deals",
             "/ec-case-filter": "GET - Filter and match EC merger cases with deals",
+            "/fs-case-filter": "GET - Filter and match EC Foreign Subsidies cases with deals",
             "/ec-case-update-monitor": "GET - Monitor EC merger cases for updates and send email notifications",
+            "/fs-case-update-monitor": "GET - Monitor EC Foreign Subsidies cases for updates and send email notifications",
             "/accc-acquisitions-scraper": "GET - Scrape ACCC acquisitions and match with deals",
             "/accc-case-update-monitor": "GET - Monitor ACCC acquisition cases for updates and send email notifications",
             "/ftc-early-termination-scraper": "GET - Scrape FTC early termination notices and match with deals",
@@ -1266,6 +1269,55 @@ def ec_case_filter():
         }), 500
 
 
+@app.route('/fs-case-filter', methods=['GET'])
+def fs_case_filter():
+    """
+    Filter and match EC Foreign Subsidies cases with deals.
+    Downloads FS case data, filters by caseInstrument + empty decisions + cutoff date,
+    matches with MongoDB deals via LLM (company names from caseTitle), saves to fs_ec_cases.
+    Process runs in background - returns immediately.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        def run_filter():
+            try:
+                logger.info("Starting FS (Foreign Subsidies) case filter in background")
+                result = fs_case_filter_main()
+                if result and result.get("success"):
+                    logger.info(
+                        f"FS case filter completed successfully. Filtered {result.get('total_filtered', 0)} cases, "
+                        f"matched {result.get('total_matched', 0)} with deals.")
+                else:
+                    error_msg = result.get('error', 'Unknown error') if result else 'No result returned'
+                    logger.warning(f"FS case filter completed with errors: {error_msg}")
+            except Exception as e:
+                logger.error(f"Error in background FS case filter: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_filter, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "FS (Foreign Subsidies) case filtering process started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting FS case filter: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 @app.route('/ec-case-update-monitor', methods=['GET'])
 def ec_case_update_monitor():
     """
@@ -1307,6 +1359,50 @@ def ec_case_update_monitor():
 
     except Exception as e:
         logger.error(f"❌ Error starting EC case update monitor: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/fs-case-update-monitor', methods=['GET'])
+def fs_case_update_monitor():
+    """
+    Monitor EC Foreign Subsidies cases for updates.
+    Compares latest FS case data with stored fs_ec_cases on deals, sends email notifications for changes.
+    Process runs in background - returns immediately.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        from fs_case_update_monitor import process_case_updates
+
+        def run_monitor():
+            try:
+                logger.info("Starting FS (Foreign Subsidies) case update monitor in background")
+                process_case_updates()
+                logger.info("✅ FS case update monitor completed successfully")
+            except Exception as e:
+                logger.error(f"❌ Error in FS case update monitor: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_monitor, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "FS (Foreign Subsidies) case update monitor started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Error starting FS case update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
