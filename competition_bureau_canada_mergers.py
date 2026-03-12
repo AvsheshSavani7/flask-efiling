@@ -18,6 +18,7 @@ Saves matched cases to MongoDB under 'canada_competition_bureau_cases' array and
 """
 
 import json
+import logging
 import os
 import re
 from datetime import datetime
@@ -58,7 +59,19 @@ CUTOFF_DATE = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
 OUTPUT_PATH = "competition_bureau_canada_matched_deals.json"
 ENV_PATH = ".env"
+LOG_FILE = "competition_bureau_canada_mergers.log"
 
+# Logger: file + console
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+logger = logging.getLogger(__name__)
 
 # Global state
 deals: List[Dict[str, Any]] = []
@@ -113,7 +126,8 @@ def get_deals_from_mongodb() -> List[Dict[str, Any]]:
     try:
         collection = get_deals_collection()
         if collection is None:
-            print("⚠️ MongoDB connection not available. Deals collection not accessible.")
+            logger.warning(
+                "MongoDB connection not available. Deals collection not accessible.")
             return []
 
         all_deals = list(collection.find({}))
@@ -122,13 +136,10 @@ def get_deals_from_mongodb() -> List[Dict[str, Any]]:
                 d["deal_id"] = str(d["_id"])
                 d.pop("_id", None)
 
-        print(f"✅ Fetched {len(all_deals)} deals from MongoDB")
+        logger.info("Fetched %d deals from MongoDB", len(all_deals))
         return all_deals
     except Exception as e:
-        print(f"⚠️ Error fetching deals from MongoDB: {e}")
-        import traceback
-
-        traceback.print_exc()
+        logger.exception("Error fetching deals from MongoDB: %s", e)
         return []
 
 
@@ -137,7 +148,9 @@ def load_deals() -> List[Dict[str, Any]]:
     global deals, normalized_deals_index
 
     deals = get_deals_from_mongodb()
-    print(f"📊 Loaded {len(deals)} deals from MongoDB")
+    logger.info("Loaded %d deals from MongoDB", len(deals))
+    deal_ids = [d.get("deal_id") for d in deals if d.get("deal_id")]
+    logger.info("Deal IDs: %s", deal_ids)
 
     normalized_deals_index = []
     for d in deals:
@@ -167,7 +180,8 @@ def load_deals() -> List[Dict[str, Any]]:
 
         normalized_deals_index.append(entry)
 
-    print(f"📚 Built normalized index for {len(normalized_deals_index)} deals")
+    logger.info("Built normalized index for %d deals",
+                len(normalized_deals_index))
     return deals
 
 
@@ -183,13 +197,13 @@ def fetch_report_html(url: str = REPORT_URL) -> Optional[str]:
         "Accept-Language": "en-US,en;q=0.9",
     }
     try:
-        print(f"🌐 Fetching Competition Bureau report: {url}")
+        logger.info("Fetching Competition Bureau report: %s", url)
         resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
-        print(f"✅ Fetched HTML ({len(resp.text)} bytes)")
+        logger.info("Fetched HTML (%d bytes)", len(resp.text))
         return resp.text
     except requests.RequestException as e:
-        print(f"❌ Error fetching report page: {e}")
+        logger.error("Error fetching report page: %s", e)
         return None
 
 
@@ -235,7 +249,8 @@ def parse_merger_table(html_content: str) -> List[Dict[str, Any]]:
             break
 
     if table is None:
-        print("⚠️ Could not locate merger reviews table (.table-responsive)")
+        logger.warning(
+            "Could not locate merger reviews table (.table-responsive)")
         return []
 
     rows = table.find_all("tr")
@@ -266,10 +281,10 @@ def parse_merger_table(html_content: str) -> List[Dict[str, Any]]:
             }
             data_rows.append(row_data)
         except Exception as e:
-            print(f"⚠️ Error parsing table row: {e}")
+            logger.warning("Error parsing table row: %s", e)
             continue
 
-    print(f"✅ Parsed {len(data_rows)} merger rows from table")
+    logger.info("Parsed %d merger rows from table", len(data_rows))
     return data_rows
 
 
@@ -329,23 +344,23 @@ RESPONSE FORMAT:
 
     try:
         res = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.2",
             messages=[
                 {
                     "role": "system",
                     "content": "You are an expert M&A deal matcher. Respond only with 'Match: DEAL_ID|COMPANY|target|acquirer' or 'None'.",
                 },
                 {"role": "user", "content": prompt},
-            ],
-            temperature=0,
-            max_tokens=150,
+            ]
         )
 
-        print(f"prompt: {prompt}")
-        print(f"response: {res.choices[0].message.content.strip()}")
+        # print(f"prompt: {prompt}")
+        logger.info("LLM prompt: %s", prompt)
+        logger.debug("LLM response: %s",
+                     res.choices[0].message.content.strip())
         content = res.choices[0].message.content.strip()
     except Exception as e:
-        print(f"⚠️ LLM match error: {e}")
+        logger.warning("LLM match error: %s", e)
         return None
 
     if not content or content.strip().lower().startswith("none"):
@@ -368,7 +383,7 @@ RESPONSE FORMAT:
         if d.get("deal_id") == deal_id:
             return d, matched_company, matched_role
 
-    print(f"⚠️ LLM returned unknown deal_id '{deal_id}'")
+    logger.warning("LLM returned unknown deal_id '%s'", deal_id)
     return None
 
 
@@ -479,10 +494,10 @@ def send_canada_case_email_via_webhook(case_info: Dict[str, Any], deal_match: Di
             N8N_WEBHOOK_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=30
         )
         response.raise_for_status()
-        print(f"   ✅ Email sent via webhook ({response.status_code})")
+        logger.info("Email sent via webhook (%s)", response.status_code)
         return True
     except Exception as e:
-        print(f"   ⚠️ Error sending email via webhook: {e}")
+        logger.warning("Error sending email via webhook: %s", e)
         return False
 
 
@@ -514,11 +529,11 @@ def send_unmatched_canada_usa_email_via_webhook(case_info: Dict[str, Any]) -> bo
             N8N_WEBHOOK_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=30
         )
         response.raise_for_status()
-        print(
-            f"   ✅ USA-related email sent via webhook ({response.status_code})")
+        logger.info("USA-related email sent via webhook (%s)",
+                    response.status_code)
         return True
     except Exception as e:
-        print(f"   ⚠️ Error sending USA email via webhook: {e}")
+        logger.warning("Error sending USA email via webhook: %s", e)
         return False
 
 
@@ -526,7 +541,7 @@ def save_canada_case_to_deal(deal_match: Dict[str, Any], case_info: Dict[str, An
     """Save matched Canada Competition Bureau case to deal under 'canada_competition_bureau_cases' array and send email."""
     try:
         if not is_connected():
-            print("   ⚠️ MongoDB not available, skipping save")
+            logger.warning("MongoDB not available, skipping save")
             return False
 
         collection = get_deals_collection()
@@ -555,7 +570,7 @@ def save_canada_case_to_deal(deal_match: Dict[str, Any], case_info: Dict[str, An
                 query = {"$or": or_conditions}
 
         if not query:
-            print("   ⚠️ Cannot identify deal for MongoDB save")
+            logger.warning("Cannot identify deal for MongoDB save")
             return False
 
         # Use parties + opened_date as unique identifier to avoid duplicates
@@ -569,64 +584,61 @@ def save_canada_case_to_deal(deal_match: Dict[str, Any], case_info: Dict[str, An
                 existing_parties = c.get("parties", "")
                 existing_opened = c.get("opened_date", "")
                 if f"{existing_parties}|{existing_opened}" == unique_key:
-                    print("   ⏩ Case already in deal, skipping save")
+                    logger.info("Case already in deal, skipping save")
                     return False
 
         update_result = collection.update_one(
             query, {"$push": {"canada_competition_bureau_cases": case_info}})
 
         if update_result.modified_count > 0:
-            print(
-                "   ✅ Saved Canada Competition Bureau case to deal (canada_competition_bureau_cases)")
+            logger.info(
+                "Saved Canada Competition Bureau case to deal (canada_competition_bureau_cases)")
             try:
-                print("   📧 Sending email notification...")
+                logger.info("Sending email notification...")
                 send_canada_case_email_via_webhook(case_info, deal_match)
             except Exception as e:
-                print(f"   ⚠️ Email error: {e}")
+                logger.warning("Email error: %s", e)
             return True
         if update_result.matched_count > 0:
             return True
-        print("   ⚠️ Deal not found in MongoDB")
+        logger.warning("Deal not found in MongoDB")
         return False
     except Exception as e:
-        print(f"   ❌ Error saving to MongoDB: {e}")
-        import traceback
-
-        traceback.print_exc()
+        logger.exception("Error saving to MongoDB: %s", e)
         return False
 
 
 def main() -> None:
-    print("=" * 80)
-    print("Competition Bureau Canada – Merger Reviews Scraper")
-    print("=" * 80)
+    logger.info("=" * 80)
+    logger.info("Competition Bureau Canada – Merger Reviews Scraper")
+    logger.info("=" * 80)
 
     # Initialize MongoDB (read-only usage)
     ok, msg = init_mongodb_connection(ENV_PATH)
     if ok:
-        print(f"✅ {msg}")
+        logger.info("%s", msg)
         load_deals()
     else:
-        print(f"⚠️ {msg}")
-        print(
-            "⚠️ Proceeding without MongoDB deal matching (USA-related check still works).")
+        logger.warning("%s", msg)
+        logger.warning(
+            "Proceeding without MongoDB deal matching (USA-related check still works).")
 
     html = fetch_report_html(REPORT_URL)
     if not html:
-        print("❌ No HTML fetched. Exiting.")
+        logger.error("No HTML fetched. Exiting.")
         return
 
     all_rows = parse_merger_table(html)
     if not all_rows:
-        print("⚠️ No merger rows parsed from table. Exiting.")
+        logger.warning("No merger rows parsed from table. Exiting.")
         return
 
     # Filter by CUTOFF_DATE (Opened Date) and build output entries
     output_entries: List[Dict[str, Any]] = []
     cutoff_date_only = CUTOFF_DATE.date() if hasattr(
         CUTOFF_DATE, "date") else CUTOFF_DATE
-    print(
-        f"\n📅 Applying cutoff on Opened Date = {cutoff_date_only.isoformat()}")
+    logger.info("Applying cutoff on Opened Date = %s",
+                cutoff_date_only.isoformat())
 
     for idx, row in enumerate(all_rows, start=1):
         opened_dt = row.get("opened_date_parsed")
@@ -653,10 +665,9 @@ def main() -> None:
             # On any error interpreting the date, drop the record
             continue
 
-        print(f"\n🔍 Row #{idx}")
-        print(f"   Parties: {row['parties']}")
-        print(
-            f"   Opened:  {row['opened_date']} | Concluded: {row['concluded_date']}")
+        logger.info("Row #%d - Parties: %s", idx, row["parties"])
+        logger.info("   Opened: %s | Concluded: %s",
+                    row["opened_date"], row["concluded_date"])
 
         matched_deal: Optional[Dict[str, Any]] = None
         matched_company = ""
@@ -670,9 +681,9 @@ def main() -> None:
                     "acquire_name", "N/A")
                 tgt = matched_deal.get("target") or matched_deal.get(
                     "target_name", "N/A")
-                print(
-                    f"   🎯 Matched deal: {acq} / {tgt} "
-                    f"(company='{matched_company}', role={matched_role})"
+                logger.info(
+                    "Matched deal: %s / %s (company='%s', role=%s)",
+                    acq, tgt, matched_company, matched_role,
                 )
 
         if matched_deal:
@@ -686,6 +697,7 @@ def main() -> None:
                 "matched_company": matched_company,
                 "matched_role": matched_role,
             }
+
             # Save to MongoDB and send email
             if save_canada_case_to_deal(matched_deal, case_info):
                 entry: Dict[str, Any] = {
@@ -709,7 +721,7 @@ def main() -> None:
                 }
                 output_entries.append(entry)
         else:
-            print("   ⏭️ No deal match found. Checking if USA-related...")
+            logger.info("No deal match found. Checking if USA-related...")
             try:
                 # Reuse generic USA relation checker with a Canada‑specific case_type
                 details_for_llm = (
@@ -724,12 +736,12 @@ def main() -> None:
                     case_type="CANADA",
                 )
             except Exception as e:
-                print(f"   ⚠️ USA relation check error: {e}")
+                logger.warning("USA relation check error: %s", e)
                 is_usa = False
 
             if is_usa:
-                print(
-                    "   🇺🇸 USA-related case detected (no deal match). Sending email and adding to JSON.")
+                logger.info(
+                    "USA-related case detected (no deal match). Sending email and adding to JSON.")
                 case_info_usa = {
                     "parties": row["parties"],
                     "opened_date": row["opened_date"],
@@ -752,10 +764,10 @@ def main() -> None:
                 }
                 output_entries.append(entry)
             else:
-                print("   ℹ️ Not USA-related – skipping row.")
+                logger.info("Not USA-related – skipping row.")
 
     if not output_entries:
-        print("\n✅ No rows to save after cutoff/match/USA filters. Done.")
+        logger.info("No rows to save after cutoff/match/USA filters. Done.")
         return
 
     # Sort by opened_date_parsed descending (newest first)
@@ -769,18 +781,19 @@ def main() -> None:
         if isinstance(e.get("opened_date_parsed"), datetime):
             e["opened_date_parsed"] = e["opened_date_parsed"].isoformat()
 
-    print(f"\n💾 Saving {len(output_entries)} entries to {OUTPUT_PATH}")
+    logger.info("Saving %d entries to %s", len(output_entries), OUTPUT_PATH)
     try:
         with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
             json.dump(output_entries, f, indent=2, ensure_ascii=False)
-        print("✅ JSON saved successfully.")
+        logger.info("JSON saved successfully.")
     except Exception as e:
-        print(f"⚠️ Error saving JSON: {e}")
+        logger.warning("Error saving JSON: %s", e)
 
-    print("\n🎉 Done!")
+    logger.info("Done!")
     if is_connected():
-        print("   💾 Matched cases saved to MongoDB deals (canada_competition_bureau_cases)")
-    print(f"   📁 JSON backup → {OUTPUT_PATH}")
+        logger.info(
+            "Matched cases saved to MongoDB deals (canada_competition_bureau_cases)")
+    logger.info("JSON backup → %s", OUTPUT_PATH)
 
 
 if __name__ == "__main__":
