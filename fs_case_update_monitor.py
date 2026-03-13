@@ -65,14 +65,28 @@ def normalize_fs_data(data: Any) -> Dict[str, Any]:
 
 
 def get_deals_with_fs_ec_cases() -> List[Dict[str, Any]]:
-    """Fetch deals from MongoDB that have non-empty 'fs_ec_cases' array."""
+    """Fetch deals from MongoDB that have non-empty 'fs_ec_cases' array, limited to active/open deals."""
     try:
         collection = get_deals_collection()
         if collection is None:
             print("⚠️ MongoDB connection not available.")
             return []
 
-        query = {"fs_ec_cases": {"$exists": True, "$ne": [], "$type": "array"}}
+        # Only include deals whose deal_status is Open, Unknown, null, or not set
+        status_filter = {
+            "$or": [
+                {"deal_status": {"$in": ["Open", "Unknown"]}},
+                {"deal_status": None},
+                {"deal_status": {"$exists": False}},
+            ]
+        }
+
+        query = {
+            "$and": [
+                status_filter,
+                {"fs_ec_cases": {"$exists": True, "$ne": [], "$type": "array"}},
+            ]
+        }
         all_deals = list(collection.find(query))
 
         for deal in all_deals:

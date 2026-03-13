@@ -41,13 +41,23 @@ deals = []
 
 
 def get_deals_from_mongodb():
-    """Fetch all deals from MongoDB."""
+    """Fetch all deals from MongoDB, restricted to active/open statuses."""
     try:
         collection = get_deals_collection()
         if collection is None:
             print("⚠️ MongoDB connection not available. Deals collection not accessible.")
             return []
-        all_deals = list(collection.find({}))
+
+        # Only fetch deals where deal_status is Open, Unknown, null, or not set
+        status_filter = {
+            "$or": [
+                {"deal_status": {"$in": ["Open", "Unknown"]}},
+                {"deal_status": None},
+                {"deal_status": {"$exists": False}},
+            ]
+        }
+
+        all_deals = list(collection.find(status_filter))
         for deal in all_deals:
             if "_id" in deal:
                 deal["deal_id"] = str(deal["_id"])

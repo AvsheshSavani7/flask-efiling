@@ -35,8 +35,22 @@ def get_deals_with_brazil_node():
             print("⚠️ MongoDB connection not available. Deals collection not accessible.")
             return []
 
-        # Query for deals that have 'brazil' node
-        query = {"brazil": {"$exists": True}}
+        # Only include deals whose deal_status is Open, Unknown, null, or not set
+        status_filter = {
+            "$or": [
+                {"deal_status": {"$in": ["Open", "Unknown"]}},
+                {"deal_status": None},
+                {"deal_status": {"$exists": False}},
+            ]
+        }
+
+        # Query for deals that have 'brazil' node and are active/open
+        query = {
+            "$and": [
+                status_filter,
+                {"brazil": {"$exists": True}},
+            ]
+        }
 
         # Fetch documents from the deals collection
         all_deals = list(collection.find(query))

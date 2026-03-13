@@ -50,16 +50,30 @@ def get_deals_from_mongodb(include_german_scrap=True):
         if collection is None:
             print("⚠️ MongoDB connection not available. Deals collection not accessible.")
             return []
-        query = {}
+
+        # Base filter: only include deals with deal_status Open/Unknown/null/missing
+        status_filter = {
+            "$or": [
+                {"deal_status": {"$in": ["Open", "Unknown"]}},
+                {"deal_status": None},
+                {"deal_status": {"$exists": False}},
+            ]
+        }
+
+        # Optional filter: exclude deals that already have german_scrap
         if not include_german_scrap:
-            query = {
+            german_filter = {
                 "$or": [
                     {"german_scrap": {"$exists": False}},
                     {"german_scrap": None},
                     {"german_scrap": []},
-                    {"german_scrap": {}}
+                    {"german_scrap": {}},
                 ]
             }
+            query = {"$and": [status_filter, german_filter]}
+        else:
+            query = status_filter
+
         all_deals = list(collection.find(query))
         for deal in all_deals:
             if "_id" in deal:

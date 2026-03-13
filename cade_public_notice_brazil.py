@@ -69,17 +69,28 @@ def get_deals_from_mongodb(include_brazil=False):
             print("⚠️ MongoDB connection not available. Deals collection not accessible.")
             return []
 
-        # Build query - exclude deals with 'brazil' node if include_brazil is False
-        query = {}
+        # Base status filter - only include Open/Unknown/null/missing deals
+        status_filter = {
+            "$or": [
+                {"deal_status": {"$in": ["Open", "Unknown"]}},
+                {"deal_status": None},
+                {"deal_status": {"$exists": False}},
+            ]
+        }
+
+        # Optionally also exclude deals with existing 'brazil' node
         if not include_brazil:
-            query = {
+            brazil_filter = {
                 "$or": [
                     {"brazil": {"$exists": False}},
                     {"brazil": None},
                     {"brazil": []},
-                    {"brazil": {}}
+                    {"brazil": {}},
                 ]
             }
+            query = {"$and": [status_filter, brazil_filter]}
+        else:
+            query = status_filter
 
         # Fetch documents from the deals collection
         all_deals = list(collection.find(query))

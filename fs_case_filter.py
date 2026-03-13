@@ -168,15 +168,27 @@ def get_deals_from_mongodb(include_fs_ec_cases: bool = False) -> List[Dict[str, 
             print("⚠️ MongoDB connection not available. Deals collection not accessible.")
             return []
 
-        query = {}
+        # Base status filter - only include Open/Unknown/null/missing deals
+        status_filter = {
+            "$or": [
+                {"deal_status": {"$in": ["Open", "Unknown"]}},
+                {"deal_status": None},
+                {"deal_status": {"$exists": False}},
+            ]
+        }
+
+        # Optionally also exclude deals with existing 'fs_ec_cases'
         if not include_fs_ec_cases:
-            query = {
+            fs_filter = {
                 "$or": [
                     {"fs_ec_cases": {"$exists": False}},
                     {"fs_ec_cases": None},
                     {"fs_ec_cases": []},
                 ]
             }
+            query = {"$and": [status_filter, fs_filter]}
+        else:
+            query = status_filter
 
         all_deals = list(collection.find(query))
         for deal in all_deals:

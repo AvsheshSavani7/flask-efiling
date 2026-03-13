@@ -31,14 +31,28 @@ HTML_OUTPUT_DIR = "nz_comcom_case_updates"
 
 
 def get_deals_with_nz_cases() -> List[Dict[str, Any]]:
-    """Fetch deals from MongoDB that have 'nz_cases' node (non-empty array)."""
+    """Fetch deals from MongoDB that have 'nz_cases' node (non-empty array), limited to active/open deals."""
     try:
         collection = get_deals_collection()
         if collection is None:
             print("⚠️ MongoDB connection not available.")
             return []
 
-        query = {"nz_cases": {"$exists": True, "$ne": [], "$type": "array"}}
+        # Only include deals whose deal_status is Open, Unknown, null, or not set
+        status_filter = {
+            "$or": [
+                {"deal_status": {"$in": ["Open", "Unknown"]}},
+                {"deal_status": None},
+                {"deal_status": {"$exists": False}},
+            ]
+        }
+
+        query = {
+            "$and": [
+                status_filter,
+                {"nz_cases": {"$exists": True, "$ne": [], "$type": "array"}},
+            ]
+        }
         all_deals = list(collection.find(query))
 
         for deal in all_deals:

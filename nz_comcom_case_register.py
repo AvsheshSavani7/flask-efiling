@@ -70,16 +70,28 @@ def get_deals_from_mongodb(include_nz_cases: bool = False) -> List[Dict[str, Any
             print("⚠️ MongoDB connection not available. Deals collection not accessible.")
             return []
 
-        query = {}
+        # Base status filter - only include Open/Unknown/null/missing deals
+        status_filter = {
+            "$or": [
+                {"deal_status": {"$in": ["Open", "Unknown"]}},
+                {"deal_status": None},
+                {"deal_status": {"$exists": False}},
+            ]
+        }
+
+        # Optionally also exclude deals that already have nz_cases
         if not include_nz_cases:
-            query = {
+            nz_filter = {
                 "$or": [
                     {"nz_cases": {"$exists": False}},
                     {"nz_cases": None},
                     {"nz_cases": []},
-                    {"nz_cases": {}}
+                    {"nz_cases": {}},
                 ]
             }
+            query = {"$and": [status_filter, nz_filter]}
+        else:
+            query = status_filter
 
         all_deals = list(collection.find(query))
         for deal in all_deals:

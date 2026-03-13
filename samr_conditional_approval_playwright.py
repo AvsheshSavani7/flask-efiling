@@ -66,17 +66,28 @@ def get_deals_from_mongodb(include_conditional=False):
             print("⚠️ MongoDB connection not available. Deals collection not accessible.")
             return []
 
-        # Build query - exclude deals with 'samr_conditional' node if include_conditional is False
-        query = {}
+        # Base status filter - only include Open/Unknown/null/missing deals
+        status_filter = {
+            "$or": [
+                {"deal_status": {"$in": ["Open", "Unknown"]}},
+                {"deal_status": None},
+                {"deal_status": {"$exists": False}},
+            ]
+        }
+
+        # Optionally also exclude deals with existing 'samr_conditional' node
         if not include_conditional:
-            query = {
+            samr_filter = {
                 "$or": [
                     {"samr_conditional": {"$exists": False}},
                     {"samr_conditional": None},
                     {"samr_conditional": []},
-                    {"samr_conditional": {}}
+                    {"samr_conditional": {}},
                 ]
             }
+            query = {"$and": [status_filter, samr_filter]}
+        else:
+            query = status_filter
 
         # Fetch documents from the deals collection
         all_deals = list(collection.find(query))

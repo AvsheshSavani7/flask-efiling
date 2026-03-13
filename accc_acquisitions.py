@@ -52,17 +52,27 @@ def get_deals_from_mongodb(include_accc_cases=False):
             print("⚠️ MongoDB connection not available. Deals collection not accessible.")
             return []
 
-        # Build query - exclude deals with 'accc_cases' node if include_accc_cases is False
-        query = {}
+        # Build base status filter - only include Open/Unknown/null/missing deals
+        status_filter = {
+            "$or": [
+                {"deal_status": {"$in": ["Open", "Unknown"]}},
+                {"deal_status": None},
+                {"deal_status": {"$exists": False}},
+            ]
+        }
+
+        # Build query - optionally also exclude deals with 'accc_cases'
         if not include_accc_cases:
-            # query = {"accc_cases": {"$exists": False}}
-            query = {
+            accc_filter = {
                 "$or": [
                     {"accc_cases": {"$exists": False}},
                     {"accc_cases": None},
-                    {"accc_cases": []}
+                    {"accc_cases": []},
                 ]
             }
+            query = {"$and": [status_filter, accc_filter]}
+        else:
+            query = status_filter
 
         # Fetch documents from the deals collection
         all_deals = list(collection.find(query))

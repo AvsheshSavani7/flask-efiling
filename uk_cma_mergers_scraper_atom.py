@@ -60,10 +60,28 @@ def get_deals_from_mongodb(include_cma_cases=False):
             print("⚠️ MongoDB connection not available. Deals collection not accessible.")
             return []
 
-        # Build query - exclude deals with 'uk_cma_cases' node if include_cma_cases is False
-        query = {}
+        # Base status filter - only include Open/Unknown/null/missing deals
+        status_filter = {
+            "$or": [
+                {"deal_status": {"$in": ["Open", "Unknown"]}},
+                {"deal_status": None},
+                {"deal_status": {"$exists": False}},
+            ]
+        }
+
+        # Optionally also exclude deals with existing 'uk_cma_cases' node
         if not include_cma_cases:
-            query = {"uk_cma_cases": {"$exists": False}}
+            cma_filter = {
+                "$or": [
+                    {"uk_cma_cases": {"$exists": False}},
+                    {"uk_cma_cases": None},
+                    {"uk_cma_cases": []},
+                    {"uk_cma_cases": {}},
+                ]
+            }
+            query = {"$and": [status_filter, cma_filter]}
+        else:
+            query = status_filter
 
         # Fetch documents from the deals collection
         all_deals = list(collection.find(query))
@@ -1162,17 +1180,21 @@ def match_records_with_deals(records):
                 if len(parts) >= 3:
                     llm_deal_id = parts[0].strip()
                     company_name = parts[1].strip()
-                    role = parts[2].strip().lower().replace("(", "").replace(")", "")
+                    role = parts[2].strip().lower().replace(
+                        "(", "").replace(")", "")
                     if role not in ("target", "acquirer"):
                         role = "acquirer"  # default
                     # Direct lookup by deal_id
-                    deal_by_id = {str(d.get("deal_id", "")): d for d in deals if d.get("deal_id")}
+                    deal_by_id = {str(d.get("deal_id", ""))
+                                      : d for d in deals if d.get("deal_id")}
                     if llm_deal_id in deal_by_id:
                         deal_match = deal_by_id[llm_deal_id]
 
         if deal_match and company_name and role:
-            acquirer = deal_match.get("acquirer") or deal_match.get("acquire_name", "")
-            target = deal_match.get("target") or deal_match.get("target_name", "")
+            acquirer = deal_match.get(
+                "acquirer") or deal_match.get("acquire_name", "")
+            target = deal_match.get(
+                "target") or deal_match.get("target_name", "")
 
             print(
                 f"  🎯 Match found: {company_name} ({role})")

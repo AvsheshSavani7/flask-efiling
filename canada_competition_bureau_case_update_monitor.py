@@ -40,19 +40,33 @@ HTML_OUTPUT_DIR = "canada_competition_bureau_updates"
 
 
 def get_deals_with_canada_cases() -> List[Dict[str, Any]]:
-    """Fetch deals from MongoDB that have 'canada_competition_bureau_cases' node."""
+    """Fetch deals from MongoDB that have 'canada_competition_bureau_cases' node, limited to active/open deals."""
     try:
         collection = get_deals_collection()
         if collection is None:
             print("⚠️ MongoDB connection not available.")
             return []
 
+        # Only include deals whose deal_status is Open, Unknown, null, or not set
+        status_filter = {
+            "$or": [
+                {"deal_status": {"$in": ["Open", "Unknown"]}},
+                {"deal_status": None},
+                {"deal_status": {"$exists": False}},
+            ]
+        }
+
         query = {
-            "canada_competition_bureau_cases": {
-                "$exists": True,
-                "$ne": [],
-                "$type": "array",
-            }
+            "$and": [
+                status_filter,
+                {
+                    "canada_competition_bureau_cases": {
+                        "$exists": True,
+                        "$ne": [],
+                        "$type": "array",
+                    }
+                },
+            ]
         }
         all_deals = list(collection.find(query))
 

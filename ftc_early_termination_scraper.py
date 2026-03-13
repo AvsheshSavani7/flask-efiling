@@ -60,16 +60,28 @@ def get_deals_from_mongodb(include_ftc=False):
             print("⚠️ MongoDB connection not available. Deals collection not accessible.")
             return []
 
-        query = {}
+        # Base status filter - only include Open/Unknown/null/missing deals
+        status_filter = {
+            "$or": [
+                {"deal_status": {"$in": ["Open", "Unknown"]}},
+                {"deal_status": None},
+                {"deal_status": {"$exists": False}},
+            ]
+        }
+
+        # Optionally also exclude deals that already have ftc_early_termination
         if not include_ftc:
-            query = {
+            ftc_filter = {
                 "$or": [
                     {"ftc_early_termination": {"$exists": False}},
                     {"ftc_early_termination": None},
                     {"ftc_early_termination": []},
-                    {"ftc_early_termination": {}}
+                    {"ftc_early_termination": {}},
                 ]
             }
+            query = {"$and": [status_filter, ftc_filter]}
+        else:
+            query = status_filter
 
         all_deals = list(collection.find(query))
         for deal in all_deals:
