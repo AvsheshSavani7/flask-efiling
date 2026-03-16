@@ -27,6 +27,9 @@ load_dotenv(".env")
 LOGGER_NAME = "accc_cases_update_monitor"
 LOG_FILE = "accc_cases_update_monitor.log"
 
+# Create module logger
+logger = logging.getLogger(LOGGER_NAME)
+logger.setLevel(logging.INFO)
 
 # Avoid adding handlers multiple times if module is reloaded
 if not logger.handlers:
