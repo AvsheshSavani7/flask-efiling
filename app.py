@@ -23,6 +23,8 @@ from ec_case_filter import main as ec_case_filter_main
 from fs_case_filter import main as fs_case_filter_main
 from accc_acquisitions import main as accc_acquisitions_main
 from accc_case_update_monitor import process_accc_case_updates
+from accc_cases_register import run_accc_cases_register
+from accc_cases_update_monitor import process_accc_cases_updates
 from ftc_early_termination_scraper import main as ftc_early_termination_main
 from nz_comcom_case_register import main as nz_comcom_case_register_main
 from competition_bureau_canada_mergers import main as competition_bureau_canada_main
@@ -92,8 +94,8 @@ def home():
             "/fs-case-filter": "GET - Filter and match EC Foreign Subsidies cases with deals",
             "/ec-case-update-monitor": "GET - Monitor EC merger cases for updates and send email notifications",
             "/fs-case-update-monitor": "GET - Monitor EC Foreign Subsidies cases for updates and send email notifications",
-            "/accc-acquisitions-scraper": "GET - Scrape ACCC acquisitions and match with deals",
-            "/accc-case-update-monitor": "GET - Monitor ACCC acquisition cases for updates and send email notifications",
+            "/new-accc-cases-register": "GET - Scrape ACCC acquisitions and match with deals",
+            "/new-accc-cases-update-monitor": "GET - Monitor ACCC acquisition cases for updates and send email notifications",
             "/ftc-early-termination-scraper": "GET - Scrape FTC early termination notices and match with deals",
             "/nz-comcom-case-register": "GET - Scrape NZ ComCom case register and match with deals",
             "/nz-comcom-case-update-monitor": "GET - Monitor NZ ComCom cases for updates and send email notifications",
@@ -1287,15 +1289,18 @@ def fs_case_filter():
     try:
         def run_filter():
             try:
-                logger.info("Starting FS (Foreign Subsidies) case filter in background")
+                logger.info(
+                    "Starting FS (Foreign Subsidies) case filter in background")
                 result = fs_case_filter_main()
                 if result and result.get("success"):
                     logger.info(
                         f"FS case filter completed successfully. Filtered {result.get('total_filtered', 0)} cases, "
                         f"matched {result.get('total_matched', 0)} with deals.")
                 else:
-                    error_msg = result.get('error', 'Unknown error') if result else 'No result returned'
-                    logger.warning(f"FS case filter completed with errors: {error_msg}")
+                    error_msg = result.get(
+                        'error', 'Unknown error') if result else 'No result returned'
+                    logger.warning(
+                        f"FS case filter completed with errors: {error_msg}")
             except Exception as e:
                 logger.error(f"Error in background FS case filter: {str(e)}")
                 import traceback
@@ -1384,7 +1389,8 @@ def fs_case_update_monitor():
 
         def run_monitor():
             try:
-                logger.info("Starting FS (Foreign Subsidies) case update monitor in background")
+                logger.info(
+                    "Starting FS (Foreign Subsidies) case update monitor in background")
                 process_case_updates()
                 logger.info("✅ FS case update monitor completed successfully")
             except Exception as e:
@@ -1473,11 +1479,14 @@ def ftc_early_termination_scraper():
     try:
         def run_scraper():
             try:
-                logger.info("Starting FTC early termination scraper in background")
+                logger.info(
+                    "Starting FTC early termination scraper in background")
                 ftc_early_termination_main()
-                logger.info("✅ FTC early termination scraper completed successfully")
+                logger.info(
+                    "✅ FTC early termination scraper completed successfully")
             except Exception as e:
-                logger.error(f"❌ Error in FTC early termination scraper: {str(e)}")
+                logger.error(
+                    f"❌ Error in FTC early termination scraper: {str(e)}")
                 import traceback
                 traceback.print_exc()
 
@@ -1491,7 +1500,8 @@ def ftc_early_termination_scraper():
         }), 200
 
     except Exception as e:
-        logger.error(f"❌ Error starting FTC early termination scraper: {str(e)}")
+        logger.error(
+            f"❌ Error starting FTC early termination scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -1519,11 +1529,14 @@ def competition_bureau_canada_scraper():
     try:
         def run_scraper():
             try:
-                logger.info("Starting Canada Competition Bureau scraper in background")
+                logger.info(
+                    "Starting Canada Competition Bureau scraper in background")
                 competition_bureau_canada_main()
-                logger.info("✅ Canada Competition Bureau scraper completed successfully")
+                logger.info(
+                    "✅ Canada Competition Bureau scraper completed successfully")
             except Exception as e:
-                logger.error(f"❌ Error in Canada Competition Bureau scraper: {str(e)}")
+                logger.error(
+                    f"❌ Error in Canada Competition Bureau scraper: {str(e)}")
                 import traceback
                 traceback.print_exc()
 
@@ -1537,7 +1550,8 @@ def competition_bureau_canada_scraper():
         }), 200
 
     except Exception as e:
-        logger.error(f"❌ Error starting Canada Competition Bureau scraper: {str(e)}")
+        logger.error(
+            f"❌ Error starting Canada Competition Bureau scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -1555,11 +1569,14 @@ def canada_competition_bureau_case_update_monitor():
     try:
         def run_monitor():
             try:
-                logger.info("Starting Canada Competition Bureau case update monitor in background")
+                logger.info(
+                    "Starting Canada Competition Bureau case update monitor in background")
                 process_canada_case_updates()
-                logger.info("✅ Canada Competition Bureau case update monitor completed")
+                logger.info(
+                    "✅ Canada Competition Bureau case update monitor completed")
             except Exception as e:
-                logger.error(f"❌ Error in Canada Competition Bureau case update monitor: {str(e)}")
+                logger.error(
+                    f"❌ Error in Canada Competition Bureau case update monitor: {str(e)}")
                 import traceback
                 traceback.print_exc()
 
@@ -1573,7 +1590,8 @@ def canada_competition_bureau_case_update_monitor():
         }), 200
 
     except Exception as e:
-        logger.error(f"❌ Error starting Canada Competition Bureau case update monitor: {str(e)}")
+        logger.error(
+            f"❌ Error starting Canada Competition Bureau case update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -1625,6 +1643,99 @@ def accc_case_update_monitor():
 
     except Exception as e:
         logger.error(f"❌ Error starting ACCC case update monitor: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/new-accc-cases-register', methods=['GET'])
+def accc_cases_register_endpoint():
+    """
+    Scrape ACCC Acquisitions Register (Under assessment) and store cases in
+    the 'accc_cases' collection (no deal matching).
+    Process runs in background - returns immediately.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        def run_register():
+            try:
+                logger.info(
+                    "Starting ACCC cases register scraper in background")
+                run_accc_cases_register(test_mode=False)
+                logger.info(
+                    "✅ ACCC cases register scraper completed successfully")
+            except Exception as e:
+                logger.error(
+                    f"❌ Error in ACCC cases register scraper: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_register, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "ACCC cases register scraper started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Error starting ACCC cases register scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/new-accc-cases-update-monitor', methods=['GET'])
+def accc_cases_update_monitor_endpoint():
+    """
+    Monitor ACCC cases stored in 'accc_cases' for updates.
+    Compares acquisition_status, type, effective_notification_date, status,
+    about_the_acquisition, and decisions_and_key_events against the live
+    ACCC detail pages; sends diff emails and updates MongoDB.
+    Process runs in background - returns immediately.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        def run_monitor():
+            try:
+                logger.info(
+                    "Starting ACCC cases update monitor in background")
+                process_accc_cases_updates()
+                logger.info(
+                    "✅ ACCC cases update monitor completed successfully")
+            except Exception as e:
+                logger.error(
+                    f"❌ Error in ACCC cases update monitor: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_monitor, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "ACCC cases update monitor started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(
+            f"❌ Error starting ACCC cases update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -1691,11 +1802,14 @@ def nz_comcom_case_update_monitor():
     try:
         def run_monitor():
             try:
-                logger.info("Starting NZ ComCom case update monitor in background")
+                logger.info(
+                    "Starting NZ ComCom case update monitor in background")
                 process_nz_case_updates()
-                logger.info("✅ NZ ComCom case update monitor completed successfully")
+                logger.info(
+                    "✅ NZ ComCom case update monitor completed successfully")
             except Exception as e:
-                logger.error(f"❌ Error in NZ ComCom case update monitor: {str(e)}")
+                logger.error(
+                    f"❌ Error in NZ ComCom case update monitor: {str(e)}")
                 import traceback
                 traceback.print_exc()
 
@@ -1709,7 +1823,8 @@ def nz_comcom_case_update_monitor():
         }), 200
 
     except Exception as e:
-        logger.error(f"❌ Error starting NZ ComCom case update monitor: {str(e)}")
+        logger.error(
+            f"❌ Error starting NZ ComCom case update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
