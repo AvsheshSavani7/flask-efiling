@@ -7,7 +7,7 @@ collection. Skips records whose case number already exists in nz_cases.
 """
 
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
 
@@ -73,8 +73,8 @@ def extract_list_items_from_html(html_content: str) -> List[Dict[str, Any]]:
                 continue
 
             title = (link.get_text(strip=True) or "").strip()
-            if not title or title.lower() == "withheld":
-                continue
+            # if not title or title.lower() == "withheld":
+            #     continue
 
             href = link.get("href", "")
             if href and not href.startswith("http"):
@@ -267,7 +267,7 @@ def build_case_document(list_item: Dict[str, Any], detail: Dict[str, Any]) -> Di
         "documents": detail.get("documents", []),
         "updates_media": detail.get("updates_media", []),
         "case_number": case_number,
-        "scraped_at": datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z"),
+        "scraped_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     # List-level fields from list page
     doc["status"] = list_item.get("status", "")
