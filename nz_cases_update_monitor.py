@@ -38,7 +38,8 @@ logger = logging.getLogger("nz_cases_update_monitor")
 logger.setLevel(LOG_LEVEL)
 if not logger.handlers:
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(message)s"))
     logger.addHandler(handler)
 logger.propagate = False
 
@@ -117,7 +118,8 @@ def parse_timeline(soup: BeautifulSoup) -> List[Dict[str, Any]]:
         status_el = block.select_one(".timeline-block__content-status")
         link_el = block.select_one(".timeline-block__content-link")
         # Use a separator so multiple spans don't concatenate (e.g. "05MAR2026").
-        date_str = " ".join(date_el.get_text(" ", strip=True).split()) if date_el else ""
+        date_str = " ".join(date_el.get_text(
+            " ", strip=True).split()) if date_el else ""
         entries.append({
             "date": date_str,
             "title": " ".join(title_el.get_text(" ", strip=True).split()) if title_el else "",
@@ -245,21 +247,26 @@ def _document_key(entry: Dict[str, Any]) -> str:
 def _media_key(entry: Dict[str, Any]) -> str:
     return f"{entry.get('date', '')}|{entry.get('title', '')}|{entry.get('url', '')}"
 
+
 def _doc_url(entry: Dict[str, Any]) -> str:
     u = _normalize_value(entry.get("url", "")) or ""
     return " ".join(str(u).split())
+
 
 def _doc_title(entry: Dict[str, Any]) -> str:
     t = _normalize_value(entry.get("title", "")) or ""
     return " ".join(str(t).split())
 
+
 def _media_url(entry: Dict[str, Any]) -> str:
     u = _normalize_value(entry.get("url", "")) or ""
     return " ".join(str(u).split())
 
+
 def _media_date(entry: Dict[str, Any]) -> str:
     d = _normalize_value(entry.get("date", "")) or ""
     return " ".join(str(d).split())
+
 
 def _timeline_date(entry: Dict[str, Any]) -> str:
     d = _normalize_value(entry.get("date", "")) or ""
@@ -297,7 +304,8 @@ def detect_changes(
         elif old_val is not None and new_val is None:
             changes.append((f"Case details: {key}", old_val, None, "removed"))
         elif old_val != new_val:
-            changes.append((f"Case details: {key}", old_val, new_val, "updated"))
+            changes.append(
+                (f"Case details: {key}", old_val, new_val, "updated"))
 
     # Timeline: treat title tweaks on same date as updates, not new rows
     old_timeline = old_case.get("timeline") or []
@@ -322,7 +330,8 @@ def detect_changes(
     if new_entries:
         changes.append(("Timeline (new)", None, new_entries, "new"))
     if updated_entries:
-        changes.append(("Timeline (updated)", None, updated_entries, "updated"))
+        changes.append(("Timeline (updated)", None,
+                       updated_entries, "updated"))
 
     # Documents: treat title tweaks on same URL as updates, not new rows
     old_docs = old_case.get("documents") or []
@@ -347,7 +356,8 @@ def detect_changes(
     if new_doc_entries:
         changes.append(("Documents (new)", None, new_doc_entries, "new"))
     if updated_doc_entries:
-        changes.append(("Documents (updated)", None, updated_doc_entries, "updated"))
+        changes.append(("Documents (updated)", None,
+                       updated_doc_entries, "updated"))
 
     # Updates/Media: treat title tweaks on same URL (or same date if no URL) as updates
     old_media = old_case.get("updates_media") or []
@@ -372,7 +382,8 @@ def detect_changes(
     if new_media_entries:
         changes.append(("Updates/Media (new)", None, new_media_entries, "new"))
     if updated_media_entries:
-        changes.append(("Updates/Media (updated)", None, updated_media_entries, "updated"))
+        changes.append(("Updates/Media (updated)", None,
+                       updated_media_entries, "updated"))
 
     return changes
 
@@ -473,7 +484,8 @@ def generate_nz_update_email_html(
 ) -> str:
     """Generate HTML email for NZ ComCom case update (matched deal)."""
     target = deal_match.get("target") or deal_match.get("target_name", "N/A")
-    acquirer = deal_match.get("acquirer") or deal_match.get("acquire_name", "N/A")
+    acquirer = deal_match.get(
+        "acquirer") or deal_match.get("acquire_name", "N/A")
     deal_id = deal_match.get("deal_id", "N/A")
     title = case_info.get("title", "N/A")
     detail_url = case_info.get("detail_url", "")
@@ -527,8 +539,10 @@ def generate_nz_update_email_html(
 
     # Timeline
     timeline = case_info.get("timeline") or []
-    new_timeline_list = (changed_fields.get("Timeline (new)") or (None, None))[1] or []
-    updated_timeline_list = (changed_fields.get("Timeline (updated)") or (None, None))[1] or []
+    new_timeline_list = (changed_fields.get(
+        "Timeline (new)") or (None, None))[1] or []
+    updated_timeline_list = (changed_fields.get(
+        "Timeline (updated)") or (None, None))[1] or []
     new_timeline_keys = {_timeline_key(e) for e in new_timeline_list}
     updated_timeline_keys = {_timeline_key(e) for e in updated_timeline_list}
     if timeline:
@@ -560,8 +574,10 @@ def generate_nz_update_email_html(
 
     # Documents
     documents = case_info.get("documents") or []
-    new_doc_list = (changed_fields.get("Documents (new)") or (None, None))[1] or []
-    updated_doc_list = (changed_fields.get("Documents (updated)") or (None, None))[1] or []
+    new_doc_list = (changed_fields.get("Documents (new)")
+                    or (None, None))[1] or []
+    updated_doc_list = (changed_fields.get(
+        "Documents (updated)") or (None, None))[1] or []
     new_doc_keys = {_document_key(d) for d in new_doc_list}
     updated_doc_keys = {_document_key(d) for d in updated_doc_list}
     if documents:
@@ -593,8 +609,10 @@ def generate_nz_update_email_html(
 
     # Updates / Media releases
     updates_media = case_info.get("updates_media") or []
-    new_media_list = (changed_fields.get("Updates/Media (new)") or (None, None))[1] or []
-    updated_media_list = (changed_fields.get("Updates/Media (updated)") or (None, None))[1] or []
+    new_media_list = (changed_fields.get(
+        "Updates/Media (new)") or (None, None))[1] or []
+    updated_media_list = (changed_fields.get(
+        "Updates/Media (updated)") or (None, None))[1] or []
     new_media_keys = {_media_key(m) for m in new_media_list}
     updated_media_keys = {_media_key(m) for m in updated_media_list}
     if updates_media:
@@ -723,7 +741,8 @@ def send_unmatched_nz_usa_email_via_webhook(case_info: Dict[str, Any]) -> bool:
         response = requests.post(webhook_url, json=payload, headers={
                                  "Content-Type": "application/json"}, timeout=30)
         response.raise_for_status()
-        logger.info("USA-related email sent via webhook (%s)", response.status_code)
+        logger.info("USA-related email sent via webhook (%s)",
+                    response.status_code)
         return True
     except Exception as e:
         logger.warning("Error sending USA email via webhook: %s", e)
@@ -810,7 +829,8 @@ def run():
             case_number = (case_doc.get("case_details")
                            or {}).get("Case number", "")
             if not detail_url:
-                logger.info("[%s/%s] No detail_url, skipping: %s", idx, len(cases), title)
+                logger.info("[%s/%s] No detail_url, skipping: %s",
+                            idx, len(cases), title)
                 continue
 
             total_checked += 1
@@ -847,25 +867,34 @@ def run():
                     logger.info("%s (%s)", field_name, change_type)
                 elif field_name.startswith("Timeline") and isinstance(new_val, list):
                     if field_name == "Timeline (new)":
-                        logger.info("Timeline: %s new entry(ies)", len(new_val))
+                        logger.info(
+                            "Timeline: %s new entry(ies)", len(new_val))
                     elif field_name == "Timeline (updated)":
-                        logger.info("Timeline: %s updated entry(ies)", len(new_val))
+                        logger.info(
+                            "Timeline: %s updated entry(ies)", len(new_val))
                     else:
-                        logger.info("%s: %s entry(ies)", field_name, len(new_val))
+                        logger.info("%s: %s entry(ies)",
+                                    field_name, len(new_val))
                 elif field_name.startswith("Documents") and isinstance(new_val, list):
                     if field_name == "Documents (new)":
-                        logger.info("Documents: %s new document(s)", len(new_val))
+                        logger.info(
+                            "Documents: %s new document(s)", len(new_val))
                     elif field_name == "Documents (updated)":
-                        logger.info("Documents: %s updated document(s)", len(new_val))
+                        logger.info(
+                            "Documents: %s updated document(s)", len(new_val))
                     else:
-                        logger.info("%s: %s document(s)", field_name, len(new_val))
+                        logger.info("%s: %s document(s)",
+                                    field_name, len(new_val))
                 elif field_name.startswith("Updates/Media") and isinstance(new_val, list):
                     if field_name == "Updates/Media (new)":
-                        logger.info("Updates/Media: %s new entry(ies)", len(new_val))
+                        logger.info(
+                            "Updates/Media: %s new entry(ies)", len(new_val))
                     elif field_name == "Updates/Media (updated)":
-                        logger.info("Updates/Media: %s updated entry(ies)", len(new_val))
+                        logger.info(
+                            "Updates/Media: %s updated entry(ies)", len(new_val))
                     else:
-                        logger.info("%s: %s entry(ies)", field_name, len(new_val))
+                        logger.info("%s: %s entry(ies)",
+                                    field_name, len(new_val))
                 else:
                     logger.info("%s: %s", field_name, change_type)
 
@@ -882,8 +911,11 @@ def run():
             updated_case["documents"] = current_info.get("documents", [])
             updated_case["updates_media"] = current_info.get(
                 "updates_media", [])
-            updated_case["status"] = current_info.get(
-                "status", updated_case.get("status"))
+            # Status: keep list-level in sync with case_details.Status (detail page is source of truth)
+            detail_status = (updated_case.get("case_details")
+                             or {}).get("Status", "")
+            updated_case["status"] = (detail_status.strip() or current_info.get(
+                "status") or updated_case.get("status", ""))
             updated_case["tag"] = current_info.get(
                 "tag", updated_case.get("tag"))
             updated_case["outcome"] = current_info.get(

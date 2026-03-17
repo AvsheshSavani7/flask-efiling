@@ -246,15 +246,15 @@ def fetch_case_detail_page(page, url: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def case_number_exists(collection, case_number: str) -> bool:
-    """Check if a document with this case number already exists in nz_cases."""
-    if collection is None or not case_number or not case_number.strip():
+def detail_url_exists(collection, detail_url: str) -> bool:
+    """Check if a document with this detail_url already exists in nz_cases."""
+    if collection is None or not detail_url or not detail_url.strip():
         return False
-    return collection.find_one({"case_number": case_number.strip()}) is not None
+    return collection.find_one({"detail_url": detail_url.strip()}) is not None
 
 
 def build_case_document(list_item: Dict[str, Any], detail: Dict[str, Any]) -> Dict[str, Any]:
-    """Build the document to insert into nz_cases (with case_number for dedup)."""
+    """Build the document to insert into nz_cases."""
     case_details = detail.get("case_details") or {}
     case_number = case_details.get("Case number", "").strip()
 
@@ -277,7 +277,7 @@ def build_case_document(list_item: Dict[str, Any], detail: Dict[str, Any]) -> Di
 
 
 def run():
-    """Main: build list URL, scrape list, for each item fetch detail, check nz_cases by case_number, insert if new."""
+    """Main: build list URL, scrape list, for each item fetch detail, check nz_cases by detail_url, insert if new."""
     success, message = init_mongodb_connection(ENV_PATH)
     if not success:
         print(f"⚠️ {message}")
@@ -317,30 +317,24 @@ def run():
 
             print(f"   [{i}/{len(items)}] {title}")
 
+            # Check nz_cases by detail_url (dedupe key)
+            if detail_url_exists(collection, detail_url):
+                print(f"      ⏭️ detail_url already in nz_cases, skip")
+                skipped += 1
+                continue
+
             # Step 2: fetch detail page
             detail = fetch_case_detail_page(page, detail_url)
             if not detail:
                 print(f"      ⚠️ Could not fetch detail, skipping")
                 continue
 
-            case_details = detail.get("case_details") or {}
-            case_number = case_details.get("Case number", "").strip()
-            if not case_number:
-                print(f"      ⚠️ No Case number in details, skipping")
-                continue
-
-            # Check nz_cases by case_number
-            if case_number_exists(collection, case_number):
-                print(
-                    f"      ⏭️ Case number '{case_number}' already in nz_cases, skip")
-                skipped += 1
-                continue
-
             doc = build_case_document(list_item, detail)
             try:
                 collection.insert_one(doc)
-                print(
-                    f"      ✅ Inserted into nz_cases (case_number={case_number})")
+                case_number = (doc.get("case_number") or "").strip()
+                extra = f" case_number={case_number}" if case_number else ""
+                print(f"      ✅ Inserted into nz_cases (detail_url){extra}")
                 inserted += 1
             except Exception as e:
                 print(f"      ⚠️ Insert failed: {e}")
