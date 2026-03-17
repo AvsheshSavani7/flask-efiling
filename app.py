@@ -27,9 +27,11 @@ from accc_cases_register import run_accc_cases_register
 from accc_cases_update_monitor import process_accc_cases_updates
 from ftc_early_termination_scraper import main as ftc_early_termination_main
 from nz_comcom_case_register import main as nz_comcom_case_register_main
+from nz_comcom_case_register_to_db import run as nz_comcom_case_register_to_db_run
 from competition_bureau_canada_mergers import main as competition_bureau_canada_main
 from canada_competition_bureau_case_update_monitor import process_canada_case_updates
 from nz_comcom_case_update_monitor import process_nz_case_updates
+from nz_cases_update_monitor import run as nz_cases_update_monitor_run
 from mongodb_connection import init_mongodb_connection, close_mongodb_connection, is_connected
 import logging
 import os
@@ -99,6 +101,8 @@ def home():
             "/ftc-early-termination-scraper": "GET - Scrape FTC early termination notices and match with deals",
             "/nz-comcom-case-register": "GET - Scrape NZ ComCom case register and match with deals",
             "/nz-comcom-case-update-monitor": "GET - Monitor NZ ComCom cases for updates and send email notifications",
+            "/nz-comcom-case-register-to-db": "GET - Scrape NZ ComCom case register and save new records to nz_cases collection",
+            "/nz-cases-update-monitor": "GET - Monitor nz_cases collection for updates, match to deals, and send emails",
             "/competition-bureau-canada-scraper": "GET - Scrape Canada Competition Bureau merger reviews and match with deals",
             "/canada-competition-bureau-case-update-monitor": "GET - Monitor Canada Competition Bureau cases for updates and send email notifications",
             "/system-check": "GET - Check system dependencies for document extraction",
@@ -1825,6 +1829,81 @@ def nz_comcom_case_update_monitor():
     except Exception as e:
         logger.error(
             f"❌ Error starting NZ ComCom case update monitor: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/new-nz-comcom-case-register-to-db', methods=['GET'])
+def new_nz_comcom_case_register_to_db_endpoint():
+    """
+    Scrape NZ ComCom case register (Open, open_date=last week) and save new records
+    into the 'nz_cases' MongoDB collection (dedupe by case_number).
+    Process runs in background.
+    """
+    try:
+        def run_register():
+            try:
+                logger.info(
+                    "Starting NZ ComCom case register → nz_cases in background")
+                nz_comcom_case_register_to_db_run()
+                logger.info(
+                    "✅ NZ ComCom case register → nz_cases completed successfully")
+            except Exception as e:
+                logger.error(
+                    f"❌ Error in NZ ComCom case register → nz_cases: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_register, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "NZ ComCom case register → nz_cases started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(
+            f"❌ Error starting NZ ComCom case register → nz_cases: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/new-nz-cases-update-monitor', methods=['GET'])
+def new_nz_cases_update_monitor_endpoint():
+    """
+    Monitor cases stored in the 'nz_cases' collection for updates.
+    Fetches each case detail_url, detects changes (case_details, timeline, documents, updates_media, etc.),
+    optionally matches to deals via LLM, sends email notifications, and updates the nz_cases record.
+    Process runs in background.
+    """
+    try:
+        def run_monitor():
+            try:
+                logger.info("Starting nz_cases update monitor in background")
+                nz_cases_update_monitor_run()
+                logger.info("✅ nz_cases update monitor completed successfully")
+            except Exception as e:
+                logger.error(f"❌ Error in nz_cases update monitor: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_monitor, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "nz_cases update monitor started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Error starting nz_cases update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
