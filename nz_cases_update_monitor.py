@@ -696,7 +696,7 @@ def send_nz_update_email_via_webhook(
                        or {}).get("Case number", "N/A")
         subject = f"NZ ComCom Case Update – {case_number}: {target} / {acquirer}"
         webhook_url = os.getenv(
-            "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/80830c6d-ff5b-45e3-9ef3-a061db1fbf0c")
+            "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/b3007d21-6845-47b5-aece-7b26583758bc")
         payload = {
             "subject": subject,
             "html": html_content,
@@ -724,7 +724,7 @@ def send_unmatched_nz_usa_email_via_webhook(case_info: Dict[str, Any]) -> bool:
     try:
         subject, html_email = generate_unmatched_nz_usa_email_html(case_info)
         webhook_url = os.getenv(
-            "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/80830c6d-ff5b-45e3-9ef3-a061db1fbf0c")
+            "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/b3007d21-6845-47b5-aece-7b26583758bc")
         payload = {
             "subject": subject,
             "html": html_email,
