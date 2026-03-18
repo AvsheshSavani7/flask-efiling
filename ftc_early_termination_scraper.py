@@ -159,13 +159,12 @@ RESPONSE FORMAT:
 
     try:
         res = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.2",
             messages=[
                 {"role": "system", "content": "You are an expert M&A deal matcher. Respond only with Match: DEAL_ID|COMPANY|target|acquirer or None."},
                 {"role": "user", "content": prompt},
-            ],
-            temperature=0,
-            max_tokens=150,
+            ]
+
         )
         return res.choices[0].message.content.strip()
     except Exception as e:
