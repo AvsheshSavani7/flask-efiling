@@ -11,7 +11,8 @@ For unmatched records, checks if USA-related and sends email if true.
 import json
 import os
 import re
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta
 from html import escape as escape_html
 
 import requests
@@ -30,16 +31,20 @@ from mongodb_connection import (
 load_dotenv(".env")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+logger = logging.getLogger(__name__)
+
 # URLs to scrape
 FTC_URLS = [
     "https://www.ftc.gov/legal-library/browse/early-termination-notices?page=0",
     "https://www.ftc.gov/legal-library/browse/early-termination-notices?page=1",
 ]
 
-# Filter: only process records with date >= CUTOFF_DATE (today)
-CUTOFF_DATE = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+# Filter: process records dated == CUTOFF_DATE (yesterday)
+CUTOFF_DATE = (datetime.now() - timedelta(days=1)).replace(
+    hour=0, minute=0, second=0, microsecond=0
+)
 # CUTOFF_DATE = datetime.strptime(
-#     "2026-02-09", "%Y-%m-%d")
+#     "2026-03-13", "%Y-%m-%d")
 
 OUTPUT_PATH = "ftc_early_termination_matched_deals.json"
 ENV_PATH = ".env"
@@ -50,6 +55,22 @@ matched_data = []
 matched_count = 0
 
 
+def deal_has_ftc_case_id(deal, case_id):
+    """Return True if deal already has ftc_early_termination with same case_id."""
+    if not case_id or case_id == "N/A":
+        return False
+    ftc_node = deal.get("ftc_early_termination")
+    if not ftc_node:
+        return False
+    if isinstance(ftc_node, dict):
+        return str(ftc_node.get("case_id", "")).strip() == str(case_id).strip()
+    if isinstance(ftc_node, list):
+        for item in ftc_node:
+            if isinstance(item, dict) and str(item.get("case_id", "")).strip() == str(case_id).strip():
+                return True
+    return False
+
+
 def get_deals_from_mongodb(include_ftc=False):
     """
     Fetch deals from MongoDB. Optionally exclude deals that already have ftc_early_termination.
@@ -57,7 +78,8 @@ def get_deals_from_mongodb(include_ftc=False):
     try:
         collection = get_deals_collection()
         if collection is None:
-            print("⚠️ MongoDB connection not available. Deals collection not accessible.")
+            logger.warning(
+                "MongoDB connection not available. Deals collection not accessible.")
             return []
 
         # Base status filter - only include Open/Unknown/null/missing deals
@@ -90,12 +112,11 @@ def get_deals_from_mongodb(include_ftc=False):
                 deal.pop("_id", None)
 
         filter_msg = "without 'ftc_early_termination' node" if not include_ftc else "all"
-        print(f"✅ Fetched {len(all_deals)} deals from MongoDB ({filter_msg})")
+        logger.info("Fetched %s deals from MongoDB (%s)",
+                    len(all_deals), filter_msg)
         return all_deals
     except Exception as e:
-        print(f"⚠️ Error fetching deals from MongoDB: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception("Error fetching deals from MongoDB: %s", e)
         return []
 
 
@@ -103,7 +124,7 @@ def load_deals(include_ftc=False):
     """Load deals from MongoDB."""
     global deals
     deals = get_deals_from_mongodb(include_ftc=include_ftc)
-    print(f"📊 Loaded {len(deals)} deals from MongoDB")
+    logger.info("Loaded %s deals from MongoDB", len(deals))
     return deals
 
 
@@ -148,7 +169,7 @@ RESPONSE FORMAT:
         )
         return res.choices[0].message.content.strip()
     except Exception as e:
-        print(f"⚠️ LLM Error: {e}")
+        logger.exception("LLM error: %s", e)
         return f"LLM Error: {e}"
 
 
@@ -189,7 +210,7 @@ def extract_records_from_html(html_content, base_url="https://www.ftc.gov"):
             if item.get("title"):
                 match = re.match(r"^(\d+):\s*(.+)", item["title"])
                 if match:
-                    print(f"🔍 Case ID: {match.group(1)}")
+                    logger.debug("Extracted case_id=%s", match.group(1))
                     item["case_id"] = match.group(1)
                     item["parties_text"] = match.group(2).strip()
 
@@ -241,7 +262,7 @@ def extract_records_from_html(html_content, base_url="https://www.ftc.gov"):
             records.append(item)
 
         except Exception as e:
-            print(f"⚠️ Error extracting record: {e}")
+            logger.exception("Error extracting record: %s", e)
             continue
 
     return records
@@ -259,22 +280,22 @@ def fetch_ftc_page(url):
         resp.raise_for_status()
         return resp.text
     except requests.RequestException as e:
-        print(f"⚠️ Error fetching {url}: {e}")
+        logger.warning("Error fetching %s: %s", url, e)
         return None
 
 
 def save_ftc_data_to_deal(deal_match, ftc_data):
     """Save matched FTC early termination data to deal under 'ftc_early_termination' node."""
     try:
-        print("💾 Saving FTC early termination data to deal...")
+        logger.info("Saving FTC early termination data to deal...")
 
         if not is_connected():
-            print("⚠️ MongoDB connection not available, skipping save")
+            logger.warning("MongoDB connection not available, skipping save")
             return False
 
         collection = get_deals_collection()
         if collection is None:
-            print("⚠️ Deals collection not available")
+            logger.warning("Deals collection not available")
             return False
 
         # Remove matched_deal from data to avoid circular ref
@@ -285,7 +306,7 @@ def save_ftc_data_to_deal(deal_match, ftc_data):
             try:
                 query["_id"] = ObjectId(deal_match["deal_id"])
             except Exception as e:
-                print(f"⚠️ Invalid deal_id: {e}")
+                logger.warning("Invalid deal_id: %s", e)
 
         if not query:
             acquirer = deal_match.get(
@@ -301,7 +322,7 @@ def save_ftc_data_to_deal(deal_match, ftc_data):
                 query = {"$or": or_conds}
 
         if not query:
-            print("⚠️ Cannot identify deal")
+            logger.warning("Cannot identify deal for FTC save")
             return False
 
         result = collection.update_one(
@@ -310,19 +331,17 @@ def save_ftc_data_to_deal(deal_match, ftc_data):
         )
 
         if result.modified_count > 0:
-            print("✅ Saved FTC early termination data to deal")
+            logger.info("Saved FTC early termination data to deal")
             return True
         elif result.matched_count > 0:
-            print("ℹ️ Deal found but no changes made")
+            logger.info("Deal found but no changes made")
             return True
         else:
-            print("⚠️ Deal not found in MongoDB")
+            logger.warning("Deal not found in MongoDB")
             return False
 
     except Exception as e:
-        print(f"❌ Error saving to MongoDB: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception("Error saving to MongoDB: %s", e)
         return False
 
 
@@ -442,11 +461,11 @@ def send_ftc_match_email_via_webhook(ftc_data, deal_match):
     try:
         subject, html_email = generate_ftc_match_email_html(
             ftc_data, deal_match)
-        print(f"📝 Generated email subject: {subject}")
+        logger.info("Generated email subject: %s", subject)
 
         webhook_url = os.getenv(
             "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6")
-        print(f"📤 Sending email via n8n webhook: {webhook_url}")
+        logger.info("Sending email via n8n webhook: %s", webhook_url)
 
         target = deal_match.get("target") or deal_match.get(
             "target_name", "N/A")
@@ -468,42 +487,41 @@ def send_ftc_match_email_via_webhook(ftc_data, deal_match):
         response = requests.post(webhook_url, json=payload, headers={
                                  "Content-Type": "application/json"}, timeout=30)
         response.raise_for_status()
-        print(f"✅ Email sent successfully! Status: {response.status_code}")
+        logger.info("Email sent successfully. Status: %s",
+                    response.status_code)
         return True
     except requests.exceptions.RequestException as e:
-        print(f"⚠️ Error sending email: {e}")
+        logger.warning("Error sending email: %s", e)
         return False
     except Exception as e:
-        print(f"⚠️ Error generating/sending email: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception("Error generating/sending email: %s", e)
         return False
 
 
 def main():
     global deals, matched_data, matched_count
 
-    print("=" * 60)
-    print("FTC Early Termination Notices Scraper")
-    print("=" * 60)
+    logger.info("%s", "=" * 60)
+    logger.info("FTC Early Termination Notices Scraper")
+    logger.info("%s", "=" * 60)
 
     # Initialize MongoDB
     ok, msg = init_mongodb_connection(ENV_PATH)
     if not ok:
-        print(f"⚠️ {msg}")
+        logger.warning("%s", msg)
     else:
-        print(f"✅ {msg}")
+        logger.info("%s", msg)
 
     load_deals(include_ftc=True)
 
     all_records = []
     for url in FTC_URLS:
-        print(f"\n📄 Fetching: {url}")
+        logger.info("Fetching: %s", url)
         html = fetch_ftc_page(url)
         if html:
             records = extract_records_from_html(html)
             all_records.extend(records)
-            print(f"   Found {len(records)} records")
+            logger.info("Found %s records", len(records))
 
     # Deduplicate by case_id
     seen_ids = set()
@@ -514,7 +532,7 @@ def main():
             seen_ids.add(cid)
             unique_records.append(r)
 
-    # Filter by current date (only process records dated today or newer)
+    # Filter by cutoff date window (process records dated >= CUTOFF_DATE)
     today_records = []
     for r in unique_records:
         date_parsed = r.get("date_parsed")
@@ -524,16 +542,19 @@ def main():
             try:
                 d = date_parsed.date() if hasattr(date_parsed, "date") else date_parsed
                 cutoff = CUTOFF_DATE.date() if hasattr(CUTOFF_DATE, "date") else CUTOFF_DATE
-                if d == cutoff:
+                if d >= cutoff:
                     today_records.append(r)
             except (AttributeError, TypeError):
                 today_records.append(r)
 
-    print(
-        f"\n📅 Records with date == {CUTOFF_DATE.strftime('%Y-%m-%d')}: {len(today_records)}")
+    logger.info(
+        "Records with date >= %s: %s",
+        CUTOFF_DATE.strftime("%Y-%m-%d"),
+        len(today_records),
+    )
 
     if not today_records:
-        print("✅ No records for current date. Done.")
+        logger.info("No records for current date. Done.")
         return
 
     for idx, record in enumerate(today_records):
@@ -542,15 +563,15 @@ def main():
             case_id = record.get("case_id", "N/A")
             date_str = record.get("date", "N/A")
 
-            print(f"\n🔍 [{idx + 1}] {case_id}: {title}")
-            print(f"   📅 {date_str}")
+            logger.info("[%s] %s: %s", idx + 1, case_id, title)
+            logger.info("Date: %s", date_str)
 
             deal_match = None
             matched_company = None
             matched_role = None
 
             result = match_with_llm(title)
-            print(f"   🧠 LLM Result: {result}")
+            logger.info("LLM Result: %s", result)
 
             if result and result.lower().startswith("match"):
                 try:
@@ -568,18 +589,26 @@ def main():
                                     "acquirer") or deal_match.get("acquire_name", "N/A")
                                 target = deal_match.get("target") or deal_match.get(
                                     "target_name", "N/A")
-                                print(
-                                    f"   🎯 Match: {acquirer} / {target} (on {matched_role})")
+                                logger.info(
+                                    "Match: %s / %s (on %s)", acquirer, target, matched_role
+                                )
                                 break
 
                         if not deal_match:
-                            print(
-                                f"   ⚠️ Deal ID {deal_id} not found in deals list")
+                            logger.warning(
+                                "Deal ID %s not found in deals list", deal_id)
                 except Exception as e:
-                    print(f"   ⚠️ Error parsing LLM result: {e}")
+                    logger.warning("Error parsing LLM result: %s", e)
 
             if deal_match:
-                print("   ✅ Matched! Saving to deal and sending email...")
+                if deal_has_ftc_case_id(deal_match, case_id):
+                    logger.info(
+                        "Already saved (case_id=%s) in ftc_early_termination; skipping email",
+                        case_id,
+                    )
+                    continue
+
+                logger.info("Matched. Saving to deal and sending email...")
                 ftc_data = {
                     "case_id": case_id,
                     "date": date_str,
@@ -597,29 +626,32 @@ def main():
                     matched_data.append(
                         {"record": record, "deal_match": deal_match, "ftc_data": ftc_data})
             else:
-                print("   ⏭️ No match ")
+                logger.info("No match")
 
         except Exception as e:
-            print(f"❌ Error processing record: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("Error processing record: %s", e)
             continue
 
     # Save JSON backup
-    print(f"\n💾 Saving matched data to: {OUTPUT_PATH}")
+    logger.info("Saving matched data to: %s", OUTPUT_PATH)
     try:
         with open(OUTPUT_PATH, "w") as f:
             json.dump(matched_data, f, indent=2, default=str)
-        print(f"✅ Saved {len(matched_data)} matches")
+        logger.info("Saved %s matches", len(matched_data))
     except Exception as e:
-        print(f"⚠️ Error saving JSON: {e}")
+        logger.warning("Error saving JSON: %s", e)
 
-    print("\n🎉 Done!")
+    logger.info("Done.")
     if is_connected():
-        print("   💾 Matched records saved to MongoDB deals (ftc_early_termination)")
-    print(f"   📁 JSON backup → {OUTPUT_PATH}")
-    print(f"   🎯 Total matches: {matched_count}")
+        logger.info(
+            "Matched records saved to MongoDB deals (ftc_early_termination)")
+    logger.info("JSON backup -> %s", OUTPUT_PATH)
+    logger.info("Total matches: %s", matched_count)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     main()
