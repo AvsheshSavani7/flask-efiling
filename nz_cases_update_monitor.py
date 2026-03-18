@@ -955,38 +955,57 @@ def run():
             updated_case["case_number"] = (updated_case.get(
                 "case_details") or {}).get("Case number", "").strip()
 
-            # LLM match: title, Parties, description + deals → deal_id?
             parties = (updated_case.get("case_details")
                        or {}).get("Parties", "")
             description = updated_case.get("description", "")
-            deal_id = match_case_to_deal(
-                title or "", parties, description or "", deals)
 
-            if deal_id:
-                deal = get_deal_by_id(deal_id)
+            # If already linked to a deal, skip LLM matching and email as matched.
+            existing_deal_id = case_doc.get("deal_id")
+            if existing_deal_id:
+                deal = get_deal_by_id(str(existing_deal_id))
                 if deal:
-                    updated_case["deal_id"] = deal_id
+                    updated_case["deal_id"] = str(existing_deal_id)
                     html_content = generate_nz_update_email_html(
                         updated_case, deal, changes)
                     send_nz_update_email_via_webhook(
                         updated_case, deal, html_content, changes)
                 else:
-                    updated_case["deal_id"] = deal_id  # still store deal_id
-            else:
-                # No match: check USA-related
-                nz_details = {
-                    "title": title,
-                    "parties": parties,
-                    "description": description,
-                    "case_details": updated_case.get("case_details"),
-                }
-                is_usa = verify_usa_relation(
-                    company_details=nz_details, case_type="NZ")
-                if is_usa:
-                    logger.info("USA-related – sending email and updating")
-                    send_unmatched_nz_usa_email_via_webhook(updated_case)
+                    logger.warning(
+                        "Stored deal_id could not be resolved; falling back to LLM matching"
+                    )
+                    existing_deal_id = None
+
+            # LLM match only when not already linked to a resolvable deal
+            if not existing_deal_id:
+                deal_id = match_case_to_deal(
+                    title or "", parties, description or "", deals)
+
+                if deal_id:
+                    deal = get_deal_by_id(deal_id)
+                    if deal:
+                        updated_case["deal_id"] = deal_id
+                        html_content = generate_nz_update_email_html(
+                            updated_case, deal, changes)
+                        send_nz_update_email_via_webhook(
+                            updated_case, deal, html_content, changes)
+                    else:
+                        # still store deal_id
+                        updated_case["deal_id"] = deal_id
                 else:
-                    logger.info("Not USA-related – updating only")
+                    # No match: check USA-related
+                    nz_details = {
+                        "title": title,
+                        "parties": parties,
+                        "description": description,
+                        "case_details": updated_case.get("case_details"),
+                    }
+                    is_usa = verify_usa_relation(
+                        company_details=nz_details, case_type="NZ")
+                    if is_usa:
+                        logger.info("USA-related – sending email and updating")
+                        send_unmatched_nz_usa_email_via_webhook(updated_case)
+                    else:
+                        logger.info("Not USA-related – updating only")
 
             if update_nz_case_document(nz_collection, case_doc["_id"], updated_case):
                 total_updated += 1
