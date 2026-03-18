@@ -365,6 +365,11 @@ def normalize_value(value: Any) -> Any:
     return value
 
 
+def utc_now_iso() -> str:
+    """UTC timestamp in ISO-8601 with Z suffix."""
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
 def detect_changes(
     old_case: Dict[str, Any], new_case: Dict[str, Any]
 ) -> List[Tuple[str, Any, Any, str]]:
@@ -1036,6 +1041,11 @@ def update_case_document(
         for key in ("deal_id", "usa_related"):
             if key in case_doc and key not in updated:
                 updated[key] = case_doc[key]
+
+        # Preserve created_at; always bump updated_at
+        if "created_at" in case_doc and "created_at" not in updated:
+            updated["created_at"] = case_doc["created_at"]
+        updated["updated_at"] = utc_now_iso()
 
         result = collection.update_one({"_id": _id}, {"$set": updated})
         if result.modified_count > 0:

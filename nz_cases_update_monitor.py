@@ -12,6 +12,7 @@ Reference: newzeeland_monitor.md, accc_cases_update_monitor.py, nz_comcom_case_u
 import os
 import logging
 import sys
+import builtins
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
@@ -43,10 +44,36 @@ if not logger.handlers:
     logger.addHandler(handler)
 logger.propagate = False
 
+
+def _logged_print(*args, level: str = "info", **kwargs):
+    """
+    Replacement for print that also logs via the module logger.
+    """
+    msg = " ".join(str(a) for a in args)
+    if level == "error":
+        logger.error(msg)
+    elif level == "warning":
+        logger.warning(msg)
+    else:
+        logger.info(msg)
+    # Still echo to original stdout for local runs
+    builtins.print(*args, **kwargs)
+
+
+# Monkey-patch print in this module so any print() calls are logged.
+print = _logged_print  # type: ignore
+
 # Constants
 BASE_URL = "https://www.comcom.govt.nz"
 ENV_PATH = ".env"
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
+def utc_now_iso() -> str:
+    """UTC timestamp in ISO-8601 with Z suffix."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
 
 
 def make_absolute_url(href: str, base: str = BASE_URL) -> str:
@@ -482,7 +509,7 @@ def generate_nz_update_email_html(
     deal_match: Dict[str, Any],
     changes: List[Tuple[str, Any, Any, str]],
 ) -> str:
-    """Generate HTML email for NZ ComCom case update (matched deal)."""
+    """Generate HTML email for NZ case update (matched deal)."""
     target = deal_match.get("target") or deal_match.get("target_name", "N/A")
     acquirer = deal_match.get(
         "acquirer") or deal_match.get("acquire_name", "N/A")
@@ -506,18 +533,18 @@ def generate_nz_update_email_html(
     html = f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>NZ ComCom Case Update - {case_number}</title></head>
+<title>NZ Case Update - {case_number}</title></head>
 <body style="margin:0;padding:0;background:#fff;color:#0f172a;font-family:system-ui,-apple-system,sans-serif;">
 <div style="max-width:700px;margin:0 auto;padding:28px 26px 40px 26px;">
 <div style="background:#fef2f2;border-radius:6px;padding:16px 22px;margin-bottom:20px;border-left:4px solid #ef4444;">
-<div style="font-size:16px;font-weight:800;color:#dc2626;">⚠️ NZ ComCom Case Updated</div>
+<div style="font-size:16px;font-weight:800;color:#dc2626;">⚠️ NZ Case Updated</div>
 <div style="font-size:14px;color:#991b1b;">Changed: {', '.join(change_summary)}</div>
 </div>
 <div style="background:#e0f2fe;border-radius:6px;padding:16px 22px;margin-bottom:20px;border-left:4px solid #0284c7;">
 <div style="font-size:15px;font-weight:800;color:#0369a1;">Matched Deal</div>
 <div style="font-size:14px;color:#0c4a6e;">Deal ID: {deal_id}</div>
 <div style="font-size:14px;color:#0c4a6e;">Acquirer: {acquirer} | Target: {target}</div>
-<a href="{detail_url}" target="_blank" style="color:#0284c7;font-weight:700;font-size:14px;">View NZ ComCom case →</a>
+<a href="{detail_url}" target="_blank" style="color:#0284c7;font-weight:700;font-size:14px;">View NZ case →</a>
 </div>
 <h2 style="font-size:18px;margin:0 0 12px 0;">{title}</h2>
 <p style="margin:0 0 20px 0;line-height:1.5;">{description or '—'}</p>
@@ -660,15 +687,15 @@ def generate_unmatched_nz_usa_email_html(case_info: Dict[str, Any]) -> tuple:
     category = details.get("Category", "N/A")
     status = details.get("Status", "N/A")
     date_opened = details.get("Date opened", "N/A")
-    subject = f"🇺🇸 USA-Related NZ ComCom Case – {case_number}"
+    subject = f"🇺🇸 USA-Related NZ Case – {case_number}"
     html = f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>USA-Related NZ ComCom Case</title></head>
+<title>USA-Related NZ Case</title></head>
 <body style="margin:0;padding:0;background:#fff;color:#0f172a;font-family:system-ui,sans-serif;">
 <div style="max-width:600px;margin:0 auto;padding:24px;">
 <div style="background:#dbeafe;border-radius:8px;padding:16px;margin-bottom:20px;border-left:4px solid #3b82f6;">
-<div style="font-size:16px;font-weight:700;color:#1e40af;">🇺🇸 USA-Related NZ ComCom Case</div>
+<div style="font-size:16px;font-weight:700;color:#1e40af;">🇺🇸 USA-Related NZ Case</div>
 <div style="font-size:14px;color:#1e3a8a;">This case appears to involve USA-related companies.</div>
 </div>
 <div style="font-size:18px;font-weight:700;margin-bottom:8px;">{title}</div>
@@ -685,7 +712,7 @@ def send_nz_update_email_via_webhook(
     html_content: str,
     changes: List[Tuple[str, Any, Any, str]],
 ) -> bool:
-    """Send NZ ComCom update email (matched deal) via n8n webhook."""
+    """Send NZ update email (matched deal) via n8n webhook."""
     try:
         target = deal_match.get("target") or deal_match.get(
             "target_name", "N/A")
@@ -694,7 +721,7 @@ def send_nz_update_email_via_webhook(
         deal_id = deal_match.get("deal_id", "N/A")
         case_number = (case_info.get("case_details")
                        or {}).get("Case number", "N/A")
-        subject = f"NZ ComCom Case Update – {case_number}: {target} / {acquirer}"
+        subject = f"NZ Case Update – {case_number}: {target} / {acquirer}"
         webhook_url = os.getenv(
             "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/b3007d21-6845-47b5-aece-7b26583758bc")
         payload = {
@@ -761,9 +788,14 @@ def update_nz_case_document(collection, doc_id: Any, updated_doc: Dict[str, Any]
         # Preserve deal_id if new doc doesn't have it
         if existing.get("deal_id") and "deal_id" not in updated_doc:
             updated_doc["deal_id"] = existing["deal_id"]
+
+        # Preserve created_at; always bump updated_at
+        if existing.get("created_at") and "created_at" not in updated_doc:
+            updated_doc["created_at"] = existing["created_at"]
+        updated_doc["updated_at"] = utc_now_iso()
+
         updated_doc["_id"] = doc_id
-        updated_doc["scraped_at"] = datetime.now(
-            timezone.utc).isoformat().replace("+00:00", "Z")
+        updated_doc["scraped_at"] = utc_now_iso()
         result = collection.replace_one({"_id": doc_id}, updated_doc)
         if result.modified_count > 0:
             logger.info("Updated nz_cases record")

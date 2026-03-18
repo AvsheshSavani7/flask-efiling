@@ -1,18 +1,64 @@
 import os
 import json
+import sys
+import logging
+import builtins
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from openai import OpenAI
 from playwright.sync_api import sync_playwright
 
-from mongodb_connection import init_mongodb_connection, get_database, is_connected
+from llm_verification_service import verify_usa_relation
+from mongodb_connection import (
+    get_database,
+    get_deals_collection,
+    init_mongodb_connection,
+    is_connected,
+)
 
 
 # Load environment variables
 load_dotenv(".env")
+
+# -----------------------------------------------------------------------------
+# Logging setup (stdout)
+# -----------------------------------------------------------------------------
+LOG_LEVEL = (os.getenv("LOG_LEVEL") or "INFO").upper()
+logger = logging.getLogger("accc_cases_register")
+logger.setLevel(LOG_LEVEL)
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    )
+    logger.addHandler(handler)
+logger.propagate = False
+
+
+def _logged_print(*args, level: str = "info", **kwargs):
+    """
+    Replacement for print that also logs via the module logger.
+    """
+    msg = " ".join(str(a) for a in args)
+    if level == "error":
+        logger.error(msg)
+    elif level == "warning":
+        logger.warning(msg)
+    else:
+        logger.info(msg)
+    # Still echo to original stdout for local runs
+    builtins.print(*args, **kwargs)
+
+
+# Monkey-patch print in this module so existing print() calls are logged.
+print = _logged_print  # type: ignore
+
+# OpenAI client for deal matching
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Constants
 ENV_PATH = ".env"
@@ -22,6 +68,15 @@ LIST_URL = (
     "?f[0]=acccgov_merger_matter_status:under_assessment&items_per_page=50"
 )
 BACKUP_JSON = "accc_cases_register_backup.json"
+N8N_WEBHOOK_URL = os.getenv(
+    "N8N_WEBHOOK_URL",
+    "https://n8n-xwx1.onrender.com/webhook/b3007d21-6845-47b5-aece-7b26583758bc",
+)
+
+
+def utc_now_iso() -> str:
+    """UTC timestamp in ISO-8601 with Z suffix."""
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 
 def get_accc_cases_collection():
@@ -110,6 +165,232 @@ def extract_text(element) -> str:
         return element.inner_text().strip()
     except Exception:
         return ""
+
+
+def prepare_case_payload_for_llm(case_info: Dict[str, Any]) -> str:
+    """
+    Prepare a compact, readable case summary string for LLM calls.
+    Mirrors the style used in accc_cases_update_monitor.py's USA verification step.
+    """
+    case_number = case_info.get("case_number", "")
+    title = case_info.get("title", "")
+    status = case_info.get("acquisition_status", "")
+    case_type = case_info.get("type", "")
+    url = case_info.get("url", "")
+
+    about = case_info.get("about_the_acquisition", {}) or {}
+    acquirers = about.get("acquirers", []) or []
+    targets = about.get("targets", []) or []
+    others = about.get("other_parties", []) or []
+    description = about.get("description", "")
+
+    def _names(items: Any) -> str:
+        if not isinstance(items, list):
+            return ""
+        names = []
+        for it in items:
+            if isinstance(it, dict):
+                n = (it.get("name") or "").strip()
+                if n:
+                    names.append(n)
+            elif isinstance(it, str):
+                s = it.strip()
+                if s:
+                    names.append(s)
+        return ", ".join(names)
+
+    parties = []
+    acq = _names(acquirers)
+    tgt = _names(targets)
+    oth = _names(others)
+    if acq:
+        parties.append(f"Acquirer(s): {acq}")
+    if tgt:
+        parties.append(f"Target(s): {tgt}")
+    if oth:
+        parties.append(f"Other party(ies): {oth}")
+
+    parts_str = "\n".join(parties)
+    desc_snippet = description.strip()
+    if len(desc_snippet) > 1500:
+        desc_snippet = desc_snippet[:1500] + "…"
+
+    return f"""
+Case number: {case_number}
+Title: {title}
+Acquisition status: {status}
+Type: {case_type}
+URL: {url}
+{parts_str}
+Description: {desc_snippet}
+""".strip()
+
+
+def match_case_to_deal(title: str) -> Optional[str]:
+    """
+    Use LLM to match the ACCC case to an existing deal.
+
+    Returns deal_id string or None.
+    Reference: accc_cases_update_monitor.py
+    """
+    try:
+        deals_collection = get_deals_collection()
+        if deals_collection is None:
+            return None
+
+        status_filter = {
+            "$or": [
+                {"deal_status": {"$in": ["Open", "Unknown"]}},
+                {"deal_status": None},
+                {"deal_status": {"$exists": False}},
+            ]
+        }
+        deals = list(deals_collection.find(status_filter))
+        if not deals:
+            return None
+
+        lines = []
+        for d in deals:
+            deal_id = str(d.get("_id"))
+            target = d.get("target") or d.get("target_name", "N/A")
+            acquirer = d.get("acquirer") or d.get("acquire_name", "N/A")
+            line = f"Deal ID: {deal_id} | Target: {target} | Acquirer: {acquirer}"
+            target_aliases = d.get("target_aliases") or []
+            parent_aliases = d.get("parent_aliases") or []
+            if target_aliases:
+                line += f" | Target aliases: {', '.join(str(a) for a in target_aliases)}"
+            if parent_aliases:
+                line += f" | Parent aliases: {', '.join(str(a) for a in parent_aliases)}"
+            lines.append(line)
+
+        deals_text = "\n".join(lines)
+
+        prompt = f"""You are an expert M&A deal matcher. Your task is to determine if ANY company mentioned in the ACCC case title appears in our deals database.
+
+DEALS DATABASE:
+{deals_text}
+
+ACCC CASE TITLE TO MATCH:
+{title}
+
+MATCHING INSTRUCTIONS:
+1. Extract ALL company names from the ACCC title (both acquirer and target / vendors).
+2. Check if ANY of these company names appears as either a Target OR Acquirer in the deals database.
+3. When matching, also consider target_aliases and parent_aliases - if the title matches an alias, treat it as a match for that deal.
+4. Consider variations, abbreviations, and partial matches.
+5. Match on a SINGLE company name - you don't need both sides to match.
+
+RESPONSE FORMAT:
+- If you find ANY match, respond EXACTLY in this format (no extra text):
+  Match: DEAL_ID
+
+- If NO match is found after thorough checking, respond with exactly:
+  None
+"""
+
+        res = client.chat.completions.create(
+            model="gpt-5.2",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert M&A deal identifier and matcher.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+        )
+
+        content = (res.choices[0].message.content or "").strip()
+        if not content.lower().startswith("match"):
+            return None
+
+        try:
+            _prefix, deal_id_raw = content.split(":", 1)
+            deal_id = deal_id_raw.strip()
+            return deal_id or None
+        except Exception:
+            return None
+    except Exception as e:
+        print(f"⚠️ LLM match error: {e}")
+        return None
+
+
+def _post_email_payload(payload: Dict[str, Any]) -> bool:
+    try:
+        resp = requests.post(
+            N8N_WEBHOOK_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"⚠️ Error sending email via webhook: {e}")
+        return False
+
+
+def send_new_case_email(case_info: Dict[str, Any], deal_id: Optional[str]) -> bool:
+    case_number = case_info.get("case_number", "N/A")
+    title = case_info.get("title", "N/A")
+    subject = f"ACCC New Case – {case_number}: {title}"
+    url = case_info.get("url", "")
+    notification_date = case_info.get("effective_notification_date", "")
+    acquisition_status = case_info.get("acquisition_status", "")
+    case_type = case_info.get("type", "")
+
+    html = f"""
+<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;">
+  <h2 style="margin:0 0 10px 0;">ACCC New Case</h2>
+  <div style="font-weight:800;margin-bottom:8px;">{title}</div>
+  <div style="margin-bottom:12px;">
+    <div><b>Case number:</b> {case_number}</div>
+    <div><b>Status:</b> {acquisition_status}</div>
+    <div><b>Type:</b> {case_type}</div>
+    <div><b>Effective notification date:</b> {notification_date}</div>
+    <div><b>Deal ID:</b> {deal_id or "N/A"}</div>
+  </div>
+  {'<div><a href="'+url+'" target="_blank">View ACCC Case →</a></div>' if url else ''}
+</div>
+""".strip()
+
+    payload = {
+        "subject": subject,
+        "html": html,
+        "case_number": case_number,
+        "title": title,
+        "case_url": url,
+        "deal_id": deal_id,
+        "is_new_case": True,
+    }
+    return _post_email_payload(payload)
+
+
+def send_unmatched_usa_related_email(case_info: Dict[str, Any]) -> bool:
+    case_number = case_info.get("case_number", "N/A")
+    title = case_info.get("title", "N/A")
+    subject = f"🇺🇸 USA-Related ACCC Case (Unmatched) – {case_number}"
+    url = case_info.get("url", "")
+
+    html = f"""
+<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;">
+  <h2 style="margin:0 0 10px 0;">USA-Related ACCC Case (Unmatched)</h2>
+  <div style="font-weight:800;margin-bottom:8px;">{title}</div>
+  {'<div><a href="'+url+'" target="_blank">View ACCC Case →</a></div>' if url else ''}
+</div>
+""".strip()
+
+    payload = {
+        "subject": subject,
+        "html": html,
+        "case_number": case_number,
+        "title": title,
+        "case_url": url,
+        "deal_id": None,
+        "usa_related": True,
+        "is_unmatched": True,
+        "is_new_case": True,
+    }
+    return _post_email_payload(payload)
 
 
 def extract_detail_page_case(
@@ -415,6 +696,47 @@ def insert_case(collection, case_info: Dict[str, Any]) -> Optional[str]:
         return None
 
 
+def upsert_case_by_case_number(
+    collection, case_info: Dict[str, Any]
+) -> str:
+    """
+    Upsert (update or insert) a case document keyed by case_number.
+    Preserves existing created_at / linkage fields when present.
+
+    Returns: "inserted" or "updated"
+    """
+    case_number = case_info.get("case_number")
+    if not case_number:
+        raise ValueError("case_info missing case_number for upsert")
+
+    existing = collection.find_one({"case_number": case_number})
+    now_iso = utc_now_iso()
+
+    doc = dict(case_info)
+
+    if existing:
+        # Preserve created_at + linkage flags when this mode isn't setting them
+        if existing.get("created_at") and not doc.get("created_at"):
+            doc["created_at"] = existing["created_at"]
+        for key in ("deal_id", "usa_related"):
+            if key in existing and key not in doc:
+                doc[key] = existing[key]
+        doc["updated_at"] = now_iso
+
+        result = collection.update_one(
+            {"case_number": case_number}, {"$set": doc}, upsert=False
+        )
+        _ = result  # result can be inspected if needed
+        return "updated"
+
+    # Insert path
+    doc.setdefault("created_at", now_iso)
+    doc["updated_at"] = now_iso
+    collection.update_one({"case_number": case_number},
+                          {"$set": doc}, upsert=True)
+    return "inserted"
+
+
 def run_accc_cases_register(test_mode: bool = False):
     """
     Main entrypoint for scraping the ACCC acquisitions register (under assessment)
@@ -497,22 +819,85 @@ def run_accc_cases_register(test_mode: bool = False):
                     if key not in case_info and key in item:
                         case_info[key] = item[key]
 
+                # Timestamps for new-case insert
+                now_iso = utc_now_iso()
+                case_info.setdefault("created_at", now_iso)
+                case_info["updated_at"] = now_iso
+
+                # -----------------------------------------------------------------
+                # New-case workflow (no change comparison in this script)
+                # Reference logic: accc_cases_update_monitor.py
+                # -----------------------------------------------------------------
                 if test_mode:
+                    # One-time backfill mode:
+                    # - do NOT skip existing records
+                    # - upsert all cases
+                    # - do NOT send emails
+                    # - do NOT run USA-related verification
+                    try:
+                        matched_deal_id = match_case_to_deal(
+                            case_info.get("title", "") or title
+                        )
+                    except Exception as e:
+                        print(f"  ⚠️ Error during deal matching: {e}")
+                        matched_deal_id = None
+
+                    if matched_deal_id:
+                        case_info["deal_id"] = matched_deal_id
+                        print(
+                            f"  🎯 Deal match found (deal_id={matched_deal_id})"
+                        )
+
+                    action = upsert_case_by_case_number(collection, case_info)
                     print(
-                        "  🧪 [TEST MODE] Would insert new case into accc_cases"
+                        f"  🧪 [TEST MODE] Upserted case into accc_cases ({action})"
                     )
-                    # Store a copy without any MongoDB _id for JSON backup
+
                     backup_case = dict(case_info)
                     backup_case.pop("_id", None)
                     new_cases.append(backup_case)
                 else:
+                    try:
+                        matched_deal_id = match_case_to_deal(
+                            case_info.get("title", "") or title
+                        )
+                    except Exception as e:
+                        print(f"  ⚠️ Error during deal matching: {e}")
+                        matched_deal_id = None
+
+                    if matched_deal_id:
+                        case_info["deal_id"] = matched_deal_id
+                        print(
+                            f"  🎯 Deal match found (deal_id={matched_deal_id}); sending email"
+                        )
+                        send_new_case_email(case_info, matched_deal_id)
+                    else:
+                        # No deal match → verify USA relation
+                        try:
+                            case_details_str = prepare_case_payload_for_llm(
+                                case_info)
+                            is_usa = bool(
+                                verify_usa_relation(
+                                    company_details=case_details_str,
+                                    case_type="ACCC",
+                                )
+                            )
+                        except Exception as e:
+                            print(f"  ⚠️ Error verifying USA relation: {e}")
+                            is_usa = False
+
+                        if is_usa:
+                            case_info["usa_related"] = True
+                            print(
+                                "  🇺🇸 Case appears USA-related (unmatched); sending email"
+                            )
+                            send_unmatched_usa_related_email(case_info)
+
                     inserted_id = insert_case(collection, case_info)
                     if inserted_id:
                         print(
                             f"  ✅ Inserted new case into accc_cases (id={inserted_id})"
                         )
-                        # PyMongo may inject an _id field into case_info; strip it
-                        # before adding to the JSON backup list.
                         backup_case = dict(case_info)
                         backup_case.pop("_id", None)
                         new_cases.append(backup_case)

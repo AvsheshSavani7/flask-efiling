@@ -7,23 +7,79 @@ collection. Skips records whose case number already exists in nz_cases.
 """
 
 import os
+import sys
+import logging
+import builtins
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
 
+import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from openai import OpenAI
 from playwright.sync_api import sync_playwright
 
-from mongodb_connection import get_database, init_mongodb_connection, is_connected
+from llm_verification_service import verify_usa_relation
+from mongodb_connection import (
+    get_database,
+    get_deals_collection,
+    init_mongodb_connection,
+    is_connected,
+)
 
 load_dotenv(".env")
+
+# -----------------------------------------------------------------------------
+# Logging setup (stdout)
+# -----------------------------------------------------------------------------
+LOG_LEVEL = (os.getenv("LOG_LEVEL") or "INFO").upper()
+logger = logging.getLogger("nz_comcom_case_register_to_db")
+logger.setLevel(LOG_LEVEL)
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    )
+    logger.addHandler(handler)
+logger.propagate = False
+
+
+def _logged_print(*args, level: str = "info", **kwargs):
+    """
+    Replacement for print that also logs via the module logger.
+    """
+    msg = " ".join(str(a) for a in args)
+    if level == "error":
+        logger.error(msg)
+    elif level == "warning":
+        logger.warning(msg)
+    else:
+        logger.info(msg)
+    # Still echo to original stdout for local runs
+    builtins.print(*args, **kwargs)
+
+
+# Monkey-patch print in this module so existing print() calls are logged.
+print = _logged_print  # type: ignore
 
 # Constants
 BASE_URL = "https://www.comcom.govt.nz"
 ENV_PATH = ".env"
+N8N_WEBHOOK_URL = os.getenv(
+    "N8N_WEBHOOK_URL",
+    "https://n8n-xwx1.onrender.com/webhook/b3007d21-6845-47b5-aece-7b26583758bc",
+)
+
+# OpenAI client for LLM matching
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # List URL: status=Open, open_date = one week ago from today
+# LIST_URL_TEMPLATE = (
+#     "https://www.comcom.govt.nz/case-register/"
+#     "?q=&size=200&filters%5Bstatus%5D=Open"
+# )
+
 LIST_URL_TEMPLATE = (
     "https://www.comcom.govt.nz/case-register/"
     "?q=&size=50&filters%5Bstatus%5D=Open&filters%5Bopen_date%5D={open_date}"
@@ -58,8 +114,205 @@ def get_nz_cases_collection():
     return db["nz_cases"]
 
 
+def utc_now_iso() -> str:
+    """UTC timestamp in ISO-8601 with Z suffix."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+
+def get_open_deals_for_matching() -> List[Dict[str, Any]]:
+    """Fetch deals with deal_status in Open/Unknown/None for LLM matching."""
+    try:
+        collection = get_deals_collection()
+        if collection is None:
+            return []
+        status_filter = {
+            "$or": [
+                {"deal_status": {"$in": ["Open", "Unknown"]}},
+                {"deal_status": None},
+                {"deal_status": {"$exists": False}},
+            ]
+        }
+        deals = list(collection.find(status_filter))
+        for d in deals:
+            if "_id" in d:
+                d["deal_id"] = str(d["_id"])
+                d.pop("_id", None)
+        return deals
+    except Exception as e:
+        print(f"   ⚠️ Error fetching deals: {e}")
+        return []
+
+
+def match_case_to_deal(
+    title: str, parties: str, description: str, deals: List[Dict[str, Any]]
+) -> Optional[str]:
+    """
+    Ask LLM if this NZ case matches any deal. Returns deal_id or None.
+    Reference: nz_cases_update_monitor.py
+    """
+    if not deals:
+        return None
+
+    lines = []
+    for d in deals:
+        target = d.get("target") or d.get("target_name", "N/A")
+        acquirer = d.get("acquirer") or d.get("acquire_name", "N/A")
+        line = f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {target} | Acquirer: {acquirer}"
+        for alias_key in ("target_aliases", "parent_aliases"):
+            aliases = d.get(alias_key) or []
+            if aliases:
+                line += f" | {alias_key}: {', '.join(str(a) for a in aliases)}"
+        lines.append(line)
+    deals_text = "\n".join(lines)
+
+    prompt = f"""You are an expert M&A deal matcher. Determine if ANY company mentioned in this NZ Commerce Commission case appears in our deals database.
+
+DEALS DATABASE:
+{deals_text}
+
+NZ CASE:
+- Title: {title}
+- Parties: {parties}
+- Description: {description}
+
+INSTRUCTIONS:
+1. Extract ALL company names from the case (title, parties, description).
+2. Check if ANY of these names appears as Target OR Acquirer (or aliases) in the deals database.
+3. Consider variations, abbreviations, and partial matches.
+4. Match on a SINGLE company name.
+
+RESPONSE FORMAT:
+- If you find ANY match, respond EXACTLY: Match: DEAL_ID
+- If NO match, respond with exactly: None"""
+
+    try:
+        res = client.chat.completions.create(
+            model="gpt-5.2",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert M&A deal matcher. Respond only with Match: DEAL_ID or None.",
+                },
+                {"role": "user", "content": prompt},
+            ]
+        )
+        print(f"   ✅ LLM prompt: {prompt[:100]}...")
+        print(f"   ✅ LLM response: {res.choices[0].message.content[:100]}...")
+        content = (res.choices[0].message.content or "").strip()
+        if not content.lower().startswith("match"):
+            return None
+        try:
+            _prefix, deal_id_raw = content.split(":", 1)
+            return deal_id_raw.strip() or None
+        except Exception:
+            return None
+    except Exception as e:
+        print(f"   ⚠️ LLM match error: {e}")
+        return None
+
+
+def _post_webhook(payload: Dict[str, Any]) -> bool:
+    try:
+        resp = requests.post(
+            N8N_WEBHOOK_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"   ⚠️ Error sending email via webhook: {e}")
+        return False
+
+
+def send_nz_new_case_matched_email(case_info: Dict[str, Any], deal_id: str) -> bool:
+    """Send matched NZ case email via webhook (new case)."""
+    details = case_info.get("case_details") or {}
+    case_number = details.get("Case number", "N/A")
+    title = case_info.get("title", "N/A")
+    parties = details.get("Parties", "")
+    detail_url = case_info.get("detail_url", "")
+
+    subject = f"NZ New Case (Matched) – {case_number}: {title}"
+    html = f"""<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>NZ New Case</title></head>
+<body style="margin:0;padding:0;background:#fff;color:#0f172a;font-family:system-ui,-apple-system,sans-serif;">
+<div style="max-width:700px;margin:0 auto;padding:24px;">
+  <div style="background:#e0f2fe;border-radius:8px;padding:16px;margin-bottom:16px;border-left:4px solid #0284c7;">
+    <div style="font-size:16px;font-weight:800;color:#0369a1;">Matched deal</div>
+    <div style="font-size:14px;color:#0c4a6e;margin-top:6px;"><b>Deal ID:</b> {deal_id}</div>
+  </div>
+  <div style="font-size:18px;font-weight:800;margin-bottom:6px;">{title}</div>
+  <div style="font-size:14px;color:#64748b;margin-bottom:14px;">Case number: {case_number}</div>
+  <div style="font-size:14px;line-height:1.5;margin-bottom:14px;"><b>Parties:</b> {parties or '—'}</div>
+  <a href="{detail_url}" target="_blank" style="display:inline-block;padding:12px 18px;background:#2563eb;color:#fff;text-decoration:none;border-radius:6px;font-weight:800;">View case details →</a>
+</div></body></html>"""
+
+    payload = {
+        "subject": subject,
+        "html": html,
+        "deal_id": deal_id,
+        "case_number": case_number,
+        "case_title": title,
+        "case_url": detail_url,
+        "source": "nz_comcom_case_register_to_db",
+        "is_new_case": True,
+    }
+    return _post_webhook(payload)
+
+
+def send_unmatched_nz_usa_email_via_webhook(case_info: Dict[str, Any]) -> bool:
+    """Send USA-related unmatched NZ case email via webhook."""
+    details = case_info.get("case_details") or {}
+    case_number = details.get("Case number", "N/A")
+    category = details.get("Category", "N/A")
+    status = details.get("Status", "N/A")
+    date_opened = details.get("Date opened", "N/A")
+    title = case_info.get("title", "N/A")
+    detail_url = case_info.get("detail_url", "")
+
+    subject = f"🇺🇸 USA-Related NZ Case – {case_number}"
+    html = f"""<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>USA-Related NZ Case</title></head>
+<body style="margin:0;padding:0;background:#fff;color:#0f172a;font-family:system-ui,-apple-system,sans-serif;">
+<div style="max-width:600px;margin:0 auto;padding:24px;">
+  <div style="background:#dbeafe;border-radius:8px;padding:16px;margin-bottom:20px;border-left:4px solid #3b82f6;">
+    <div style="font-size:16px;font-weight:800;color:#1e40af;">🇺🇸 USA-Related NZ Case</div>
+    <div style="font-size:14px;color:#1e3a8a;margin-top:6px;">This case appears to involve USA-related companies.</div>
+  </div>
+  <div style="font-size:18px;font-weight:800;margin-bottom:8px;">{title}</div>
+  <div style="font-size:14px;color:#64748b;">Case number: {case_number} | Category: {category} | Status: {status} | Opened: {date_opened}</div>
+  <div style="margin-top:20px;">
+    <a href="{detail_url}" target="_blank" style="display:inline-block;padding:12px 20px;background:#2563eb;color:#fff;text-decoration:none;border-radius:6px;font-weight:800;">View case details →</a>
+  </div>
+</div></body></html>"""
+
+    payload = {
+        "subject": subject,
+        "html": html,
+        "deal_id": "N/A",
+        "target": "N/A",
+        "acquirer": "N/A",
+        "case_number": case_number,
+        "case_title": title,
+        "detail_url": detail_url,
+        "usa_related": True,
+        "is_unmatched": True,
+        "source": "nz_comcom_case_register_to_db",
+        "is_new_case": True,
+    }
+    return _post_webhook(payload)
+
+
 def extract_list_items_from_html(html_content: str) -> List[Dict[str, Any]]:
-    """Extract case cards from the ComCom case register list HTML (ol.filter__results-list). Skip 'Withheld'."""
+    """Extract case cards from the case register list HTML (ol.filter__results-list). Skip 'Withheld'."""
     soup = BeautifulSoup(html_content, "html.parser")
     list_el = soup.select_one("ol.filter__results-list")
     if not list_el:
@@ -253,6 +506,43 @@ def detail_url_exists(collection, detail_url: str) -> bool:
     return collection.find_one({"detail_url": detail_url.strip()}) is not None
 
 
+def upsert_nz_case_by_detail_url(collection, detail_url: str, doc: Dict[str, Any]) -> str:
+    """
+    Upsert a nz_cases record keyed by detail_url.
+    Preserves existing created_at if present.
+
+    Returns: "inserted" or "updated"
+    """
+    if collection is None:
+        raise ValueError("collection is None")
+    detail_url = (detail_url or "").strip()
+    if not detail_url:
+        raise ValueError("detail_url is empty")
+
+    existing = collection.find_one({"detail_url": detail_url})
+    now_iso = utc_now_iso()
+
+    out = dict(doc)
+    if existing:
+        if existing.get("created_at") and not out.get("created_at"):
+            out["created_at"] = existing["created_at"]
+        for key in ("deal_id", "usa_related"):
+            if key in existing and key not in out:
+                out[key] = existing[key]
+        out["updated_at"] = now_iso
+        out["scraped_at"] = now_iso
+        collection.update_one({"detail_url": detail_url}, {
+                              "$set": out}, upsert=False)
+        return "updated"
+
+    out.setdefault("created_at", now_iso)
+    out["updated_at"] = now_iso
+    out["scraped_at"] = now_iso
+    collection.update_one({"detail_url": detail_url},
+                          {"$set": out}, upsert=True)
+    return "inserted"
+
+
 def build_case_document(list_item: Dict[str, Any], detail: Dict[str, Any]) -> Dict[str, Any]:
     """Build the document to insert into nz_cases."""
     case_details = detail.get("case_details") or {}
@@ -278,6 +568,11 @@ def build_case_document(list_item: Dict[str, Any], detail: Dict[str, Any]) -> Di
 
 def run():
     """Main: build list URL, scrape list, for each item fetch detail, check nz_cases by detail_url, insert if new."""
+    env_flag = os.getenv("NZ_CASES_TEST_MODE", "").lower()
+    test_mode = env_flag in ("1", "true", "yes", "y")
+    mode_label = "TEST MODE" if test_mode else "LIVE MODE"
+    print(f"🚀 NZ Case Register → DB ({mode_label})\n")
+
     success, message = init_mongodb_connection(ENV_PATH)
     if not success:
         print(f"⚠️ {message}")
@@ -289,12 +584,16 @@ def run():
         print("⚠️ nz_cases collection not available.")
         return
 
+    deals = get_open_deals_for_matching()
+    print(f"📊 Loaded {len(deals)} deals for matching\n")
+
     open_date = get_open_date_one_week_ago()
     list_url = LIST_URL_TEMPLATE.format(open_date=open_date)
     print(f"📋 List URL (open_date={open_date}): {list_url}\n")
 
     inserted = 0
     skipped = 0
+    updated = 0
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -318,7 +617,7 @@ def run():
             print(f"   [{i}/{len(items)}] {title}")
 
             # Check nz_cases by detail_url (dedupe key)
-            if detail_url_exists(collection, detail_url):
+            if not test_mode and detail_url_exists(collection, detail_url):
                 print(f"      ⏭️ detail_url already in nz_cases, skip")
                 skipped += 1
                 continue
@@ -330,19 +629,71 @@ def run():
                 continue
 
             doc = build_case_document(list_item, detail)
+
+            # Add/refresh timestamps
+            now_iso = utc_now_iso()
+            doc.setdefault("created_at", now_iso)
+            doc["updated_at"] = now_iso
+
+            # 2-step LLM flow (reference: nz_cases_update_monitor.py)
+            parties = (doc.get("case_details") or {}).get("Parties", "")
+            description = doc.get("description", "")
+            deal_id = match_case_to_deal(
+                title or "", parties, description or "", deals)
+
+            if deal_id:
+                doc["deal_id"] = deal_id
+                print(f"      🎯 Deal match found (deal_id={deal_id})")
+                if not test_mode:
+                    send_nz_new_case_matched_email(doc, deal_id)
+            else:
+                try:
+                    nz_details = {
+                        "title": title,
+                        "parties": parties,
+                        "description": description,
+                        "case_details": doc.get("case_details"),
+                        "detail_url": detail_url,
+                        "tag": doc.get("tag", ""),
+                        "status": doc.get("status", ""),
+                    }
+                    is_usa = bool(
+                        verify_usa_relation(
+                            company_details=nz_details, case_type="NZ")
+                    )
+                except Exception as e:
+                    print(f"      ⚠️ USA verification error: {e}")
+                    is_usa = False
+
+                if is_usa:
+                    doc["usa_related"] = True
+                    print("      🇺🇸 USA-related (unmatched)")
+                    if not test_mode:
+                        send_unmatched_nz_usa_email_via_webhook(doc)
+
             try:
-                collection.insert_one(doc)
-                case_number = (doc.get("case_number") or "").strip()
-                extra = f" case_number={case_number}" if case_number else ""
-                print(f"      ✅ Inserted into nz_cases (detail_url){extra}")
-                inserted += 1
+                if test_mode:
+                    action = upsert_nz_case_by_detail_url(
+                        collection, detail_url, doc)
+                    if action == "inserted":
+                        inserted += 1
+                    else:
+                        updated += 1
+                    print(f"      🧪 Upserted into nz_cases ({action})")
+                else:
+                    collection.insert_one(doc)
+                    case_number = (doc.get("case_number") or "").strip()
+                    extra = f" case_number={case_number}" if case_number else ""
+                    print(
+                        f"      ✅ Inserted into nz_cases (detail_url){extra}")
+                    inserted += 1
             except Exception as e:
                 print(f"      ⚠️ Insert failed: {e}")
 
         browser.close()
 
     print(
-        f"\n📊 Done. Inserted: {inserted}, Skipped (already in DB): {skipped}")
+        f"\n📊 Done. Inserted: {inserted}, Updated: {updated}, Skipped (already in DB): {skipped}")
 
 
 if __name__ == "__main__":
