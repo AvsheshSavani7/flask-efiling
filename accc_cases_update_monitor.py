@@ -1117,6 +1117,34 @@ def process_accc_cases_updates():
             print(f"  🔄 Case doc: {case_doc}")
             print(f"  🔄 Current case: {current_case}")
 
+            # Scrapers can occasionally omit fields due to transient DOM issues
+            # or selector drift. Treat "missing from scrape" as "unknown",
+            # and preserve the previously stored value so we don't generate
+            # fake "removed" diffs and wipe/overwrite data.
+            allowed_keys = {
+                "acquisition_status",
+                "type",
+                "effective_notification_date",
+                "status",
+                "about_the_acquisition",
+                "decisions_and_key_events",
+            }
+            for k in allowed_keys:
+                if k not in current_case and k in case_doc:
+                    current_case[k] = case_doc.get(k)
+            # Extra safety: if decisions_and_key_events is present but empty,
+            # prefer the stored value (events are append-only in practice).
+            if (
+                "decisions_and_key_events" in current_case
+                and isinstance(current_case.get("decisions_and_key_events"), list)
+                and not current_case.get("decisions_and_key_events")
+                and case_doc.get("decisions_and_key_events")
+            ):
+                print("  ℹ️ decisions_and_key_events missing/empty; preserving existing")
+                current_case["decisions_and_key_events"] = case_doc.get(
+                    "decisions_and_key_events"
+                )
+
             changes = detect_changes(case_doc, current_case)
             if not changes:
                 print("  ✅ No changes detected")
