@@ -12,7 +12,7 @@ from openai import OpenAI
 import base64
 from pymongo import MongoClient
 from bson import ObjectId
-from mongodb_connection import get_deals_collection, get_mongo_client, is_connected
+from mongodb_connection import get_deals_collection, get_mongo_client, is_connected, init_mongodb_connection
 from html import escape as escape_html
 from llm_verification_service import verify_usa_relation
 
@@ -927,7 +927,6 @@ IMPORTANT: Check carefully - if the interessados text matches or is contained in
             max_tokens=200
         )
 
-        print(f"prompt: {prompt}")
         result = res.choices[0].message.content.strip()
         print(f"🧠 LLM Response: {result}")
         return result
@@ -1798,6 +1797,13 @@ def main(start_date=None, end_date=None, headless=True):
     # Reset matched_data for each run
     global matched_data, deals
     matched_data = []
+
+    # Initialize MongoDB connection for this script run
+    mongodb_ok, mongodb_msg = init_mongodb_connection(ENV_PATH)
+    if mongodb_ok:
+        print(f"✅ {mongodb_msg}")
+    else:
+        print(f"⚠️ {mongodb_msg}")
 
     # Load deals from MongoDB when main() is called (connection should be ready by then)
     # Only load deals without 'brazil' node to avoid re-processing
