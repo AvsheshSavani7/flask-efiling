@@ -359,7 +359,7 @@ def generate_ftc_match_email_html(ftc_data, deal_match):
     entities_str = ", ".join(entities) if entities else "N/A"
     detail_url = ftc_data.get("detail_url", "")
 
-    subject = f"FRMD: FTC Early Termination (New) – {target} / {acquirer}"
+    subject = f"RFTCMD: FTC Early Termination (New) – {target} / {acquirer}"
 
     html = f"""
 <!DOCTYPE html>
@@ -411,7 +411,7 @@ def generate_ftc_unmatched_email_html(ftc_data):
     detail_url = ftc_data.get("detail_url", "")
     title = ftc_data.get("title", "N/A")
 
-    subject = f"FRUD: FTC Early Termination (USA-Related) – {case_id}"
+    subject = f"RFTCUD: FTC Early Termination (USA-Related) – {case_id}"
 
     html = f"""
 <!DOCTYPE html>
