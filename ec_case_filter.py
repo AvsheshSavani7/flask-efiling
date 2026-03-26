@@ -444,7 +444,7 @@ def generate_ec_case_email_html(case_data: Dict[str, Any], deal_match: Dict[str,
     case_attachments = case_data.get("caseAttachments", [])
 
     # Build subject
-    subject = f"EC Merger Case Match – {target} / {acquirer}"
+    subject = f"FRMD: EC Merger Case (New) – {target} / {acquirer}"
 
     # Build HTML with inline styles (same as ec_case_update_monitor.py)
     html = f'''<!doctype html>
@@ -766,7 +766,7 @@ def generate_unmatched_ec_case_email_html(case_data: Dict[str, Any]) -> tuple:
 
     # Build subject
     companies_str = " / ".join(case_companies) if case_companies else "N/A"
-    subject = f"EC Merger Case (USA-Related) – {case_num}: {companies_str}"
+    subject = f"FRUD: EC Merger Case (USA-Related) – {case_num}: {companies_str}"
 
     # Build HTML with inline styles (same style as matched cases)
     html = f'''<!doctype html>

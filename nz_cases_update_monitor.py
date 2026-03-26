@@ -687,7 +687,7 @@ def generate_unmatched_nz_usa_email_html(case_info: Dict[str, Any]) -> tuple:
     category = details.get("Category", "N/A")
     status = details.get("Status", "N/A")
     date_opened = details.get("Date opened", "N/A")
-    subject = f"🇺🇸 USA-Related NZ Case – {case_number}"
+    subject = f"FRUD: NZ Case (USA-Related) – {case_number}"
     html = f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -721,7 +721,7 @@ def send_nz_update_email_via_webhook(
         deal_id = deal_match.get("deal_id", "N/A")
         case_number = (case_info.get("case_details")
                        or {}).get("Case number", "N/A")
-        subject = f"NZ Case Update – {case_number}: {target} / {acquirer}"
+        subject = f"FRMD: NZ Case (Updated) – {case_number}: {target} / {acquirer}"
         webhook_url = os.getenv(
             "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/b3007d21-6845-47b5-aece-7b26583758bc")
         payload = {

@@ -423,7 +423,7 @@ def generate_brazil_email_html(brazil_data, deal_match):
         table_records_html = "<p><em>No table records found.</em></p>"
 
     title_text = f"CADE Brazil – {target} / {acquirer}" if target != "N/A" and acquirer != "N/A" else f"CADE Brazil Match – Process {process}"
-    subject = f"CADE Brazil Regulatory Notice – {target} / {acquirer}"
+    subject = f"FRMD: CADE Brazil Regulatory (New) – {target} / {acquirer}"
 
     html_email = f"""
 <!DOCTYPE html>
@@ -584,7 +584,7 @@ def generate_unmatched_brazil_email_html(brazil_data: dict) -> tuple:
     translated = brazil_data.get("interessados_en", "")
     detail_url = brazil_data.get("detail_url", "")
 
-    subject = f"CADE Brazil (USA-Related) – {process}"
+    subject = f"FRUD: CADE Brazil (USA-Related) – {process}"
 
     html_email = f"""
 <!DOCTYPE html>

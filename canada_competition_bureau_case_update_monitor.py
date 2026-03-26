@@ -75,7 +75,8 @@ def get_deals_with_canada_cases() -> List[Dict[str, Any]]:
                 deal["deal_id"] = str(deal["_id"])
                 deal.pop("_id", None)
 
-        print(f"✅ Fetched {len(all_deals)} deals with canada_competition_bureau_cases from MongoDB")
+        print(
+            f"✅ Fetched {len(all_deals)} deals with canada_competition_bureau_cases from MongoDB")
         return all_deals
     except Exception as e:
         print(f"⚠️ Error fetching deals from MongoDB: {e}")
@@ -111,13 +112,17 @@ def compare_case(old_case: Dict[str, Any], new_row: Dict[str, Any]) -> List[Tupl
     Ignores matched_company, matched_role, opened_date_parsed.
     """
     differences: List[Tuple[str, Any, Any]] = []
-    fields_to_compare = ["parties", "opened_date", "concluded_date", "industry", "outcome"]
+    fields_to_compare = ["parties", "opened_date",
+                         "concluded_date", "industry", "outcome"]
 
     for field in fields_to_compare:
-        old_val = (old_case.get(field) or "").strip() if old_case.get(field) is not None else ""
-        new_val = (new_row.get(field) or "").strip() if new_row.get(field) is not None else ""
+        old_val = (old_case.get(field) or "").strip(
+        ) if old_case.get(field) is not None else ""
+        new_val = (new_row.get(field) or "").strip(
+        ) if new_row.get(field) is not None else ""
         if old_val != new_val:
-            differences.append((field, old_case.get(field), new_row.get(field)))
+            differences.append(
+                (field, old_case.get(field), new_row.get(field)))
 
     return differences
 
@@ -156,7 +161,8 @@ def generate_update_html(
   <td style="padding:8px 12px;font-weight:600;color:#0f172a;">{_val(new_val)}</td>
 </tr>"""
 
-    changed_names = ", ".join(field_labels.get(f, f) for f, _, _ in differences)
+    changed_names = ", ".join(field_labels.get(f, f)
+                              for f, _, _ in differences)
 
     html = f"""<!doctype html>
 <html lang="en">
@@ -240,7 +246,8 @@ def send_update_email_via_webhook(
 def save_html_file(parties_snippet: str, html_content: str) -> str:
     """Save HTML to a file for reference."""
     os.makedirs(HTML_OUTPUT_DIR, exist_ok=True)
-    safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in parties_snippet[:50])
+    safe = "".join(c if c.isalnum()
+                   or c in " -_" else "_" for c in parties_snippet[:50])
     filename = f"canada_update_{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
     filepath = os.path.join(HTML_OUTPUT_DIR, filename)
     try:
@@ -264,7 +271,8 @@ def update_case_in_db(deal_id: str, old_case: Dict[str, Any], new_case_data: Dic
         if collection is None:
             return False
 
-        key_old = _case_key(old_case.get("parties", ""), old_case.get("opened_date", ""))
+        key_old = _case_key(old_case.get("parties", ""),
+                            old_case.get("opened_date", ""))
 
         deal_id_obj = ObjectId(deal_id)
         deal = collection.find_one({"_id": deal_id_obj})
@@ -296,7 +304,8 @@ def update_case_in_db(deal_id: str, old_case: Dict[str, Any], new_case_data: Dic
 
         result = collection.update_one(
             {"_id": deal_id_obj},
-            {"$set": {"canada_competition_bureau_cases": deal["canada_competition_bureau_cases"]}},
+            {"$set": {
+                "canada_competition_bureau_cases": deal["canada_competition_bureau_cases"]}},
         )
         if result.modified_count > 0:
             print("   ✅ Updated case in database")
@@ -347,7 +356,8 @@ def process_canada_case_updates() -> None:
         target = deal.get("target") or deal.get("target_name", "N/A")
         acquirer = deal.get("acquirer") or deal.get("acquire_name", "N/A")
 
-        print(f"[{deal_idx}/{len(deals)}] Deal {deal_id} ({acquirer} / {target}) – {len(cases)} case(s)")
+        print(
+            f"[{deal_idx}/{len(deals)}] Deal {deal_id} ({acquirer} / {target}) – {len(cases)} case(s)")
 
         for case_idx, old_case in enumerate(cases, 1):
             total_checked += 1
@@ -356,7 +366,8 @@ def process_canada_case_updates() -> None:
             key = _case_key(parties, opened_date)
 
             if key not in fresh_lookup:
-                print(f"   [{case_idx}] Parties/opened not in current report – skipping")
+                print(
+                    f"   [{case_idx}] Parties/opened not in current report – skipping")
                 continue
 
             new_row = fresh_lookup[key]
@@ -370,10 +381,11 @@ def process_canada_case_updates() -> None:
             changed_fields = [f for f, _, _ in differences]
             print(f"   [{case_idx}] 🔄 Changes: {', '.join(changed_fields)}")
 
-            html_content = generate_update_html(deal, old_case, new_row, differences)
+            html_content = generate_update_html(
+                deal, old_case, new_row, differences)
             save_html_file(parties[:50], html_content)
 
-            subject = f"Canada Competition Bureau Update – {target} / {acquirer}"
+            subject = f"FRMD: Canada Competition Bureau (Updated) – {target} / {acquirer}"
             send_update_email_via_webhook(
                 subject,
                 html_content,

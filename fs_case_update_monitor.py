@@ -94,7 +94,8 @@ def get_deals_with_fs_ec_cases() -> List[Dict[str, Any]]:
                 deal["deal_id"] = str(deal["_id"])
                 deal.pop("_id", None)
 
-        print(f"✅ Fetched {len(all_deals)} deals with fs_ec_cases from MongoDB")
+        print(
+            f"✅ Fetched {len(all_deals)} deals with fs_ec_cases from MongoDB")
         return all_deals
     except Exception as e:
         print(f"⚠️ Error fetching deals from MongoDB: {e}")
@@ -148,11 +149,14 @@ def deep_compare(old_data: Any, new_data: Any, path: str = "") -> List[Tuple[str
         for key in all_keys:
             new_path = f"{path}.{key}" if path else key
             if key not in old_normalized:
-                differences.append((new_path, None, new_data.get(key) if isinstance(new_data, dict) else None))
+                differences.append((new_path, None, new_data.get(
+                    key) if isinstance(new_data, dict) else None))
             elif key not in new_normalized:
-                differences.append((new_path, old_data.get(key) if isinstance(old_data, dict) else None, None))
+                differences.append((new_path, old_data.get(
+                    key) if isinstance(old_data, dict) else None, None))
             else:
-                differences.extend(deep_compare(old_normalized[key], new_normalized[key], new_path))
+                differences.extend(deep_compare(
+                    old_normalized[key], new_normalized[key], new_path))
     elif isinstance(old_normalized, list):
         if len(old_normalized) != len(new_normalized):
             differences.append((path, old_data, new_data))
@@ -162,11 +166,13 @@ def deep_compare(old_data: Any, new_data: Any, path: str = "") -> List[Tuple[str
             try:
                 for i, (old_item, new_item) in enumerate(zip(old_normalized, new_normalized)):
                     new_path = f"{path}[{i}]" if path else f"[{i}]"
-                    differences.extend(deep_compare(old_item, new_item, new_path))
+                    differences.extend(deep_compare(
+                        old_item, new_item, new_path))
             except (TypeError, ValueError):
                 for i, (old_item, new_item) in enumerate(zip(old_normalized, new_normalized)):
                     new_path = f"{path}[{i}]" if path else f"[{i}]"
-                    differences.extend(deep_compare(old_item, new_item, new_path))
+                    differences.extend(deep_compare(
+                        old_item, new_item, new_path))
     else:
         if old_normalized != new_normalized:
             differences.append((path, old_data, new_data))
@@ -224,7 +230,8 @@ def get_oj_prior_publication(decisions: List[Dict[str, Any]]) -> Optional[Dict[s
             oj_pubs = metadata.get("decisionOfficialJournalPublications", [])
             if oj_pubs and len(oj_pubs) > 0:
                 try:
-                    pub_data = json.loads(oj_pubs[0]) if isinstance(oj_pubs[0], str) else oj_pubs[0]
+                    pub_data = json.loads(oj_pubs[0]) if isinstance(
+                        oj_pubs[0], str) else oj_pubs[0]
                     items = pub_data.get("items", [])
                     if items:
                         return {
@@ -234,7 +241,8 @@ def get_oj_prior_publication(decisions: List[Dict[str, Any]]) -> Optional[Dict[s
                         }
                 except Exception:
                     pass
-            pub_dates = metadata.get("decisionOfficialJournalPublicationsPublishedDates", [])
+            pub_dates = metadata.get(
+                "decisionOfficialJournalPublicationsPublishedDates", [])
             if pub_dates and len(pub_dates) > 0:
                 return {"reference": "", "publishedDate": pub_dates[0], "priorPublication": "true"}
     return None
@@ -270,15 +278,22 @@ def generate_html_for_changes(
 
     case_num = new_metadata.get("caseNumber", [case_number])[0]
     case_title = new_metadata.get("caseTitle", ["N/A"])[0]
-    case_instrument = (new_metadata.get("caseInstrument") or ["Foreign Subsidies"])[0]
+    case_instrument = (new_metadata.get("caseInstrument")
+                       or ["Foreign Subsidies"])[0]
 
     # FS: use caseTitle for "Companies (case title)" change detection
-    case_title_changed = get_field_changed_status("metadata.caseTitle", differences)
-    last_decision_changed = get_field_changed_status("metadata.caseLastDecisionDate", differences)
-    regulation_changed = get_field_changed_status("metadata.caseRegulation", differences)
-    notification_changed = get_field_changed_status("metadata.caseNotificationDate", differences)
-    deadline_changed = get_field_changed_status("metadata.caseDeadlineDate", differences)
-    sectors_changed = get_field_changed_status("metadata.caseSectors", differences)
+    case_title_changed = get_field_changed_status(
+        "metadata.caseTitle", differences)
+    last_decision_changed = get_field_changed_status(
+        "metadata.caseLastDecisionDate", differences)
+    regulation_changed = get_field_changed_status(
+        "metadata.caseRegulation", differences)
+    notification_changed = get_field_changed_status(
+        "metadata.caseNotificationDate", differences)
+    deadline_changed = get_field_changed_status(
+        "metadata.caseDeadlineDate", differences)
+    sectors_changed = get_field_changed_status(
+        "metadata.caseSectors", differences)
 
     changed_fields = []
     if case_title_changed != 'unchanged':
@@ -358,7 +373,8 @@ def generate_html_for_changes(
     html += f'<span style="color:#6b7280;">Regulation{get_label_suffix(regulation_changed)}:</span> '
     if case_regulation:
         reg_data = parse_json_field(case_regulation[0])
-        reg_label = reg_data.get("label", case_regulation[0]) if reg_data else case_regulation[0]
+        reg_label = reg_data.get(
+            "label", case_regulation[0]) if reg_data else case_regulation[0]
         html += escape_html(reg_label) + '</div>'
     else:
         html += 'N/A</div>'
@@ -367,13 +383,15 @@ def generate_html_for_changes(
     notification_date = new_metadata.get("caseNotificationDate", [])
     html += f'<div style="font-size:14px;color:#111827;margin-bottom:8px;{get_highlight_style(notification_changed)}">'
     html += f'<span style="color:#6b7280;">Notification date{get_label_suffix(notification_changed)}:</span> '
-    html += (format_date(notification_date[0]) if notification_date else 'N/A') + '</div>'
+    html += (format_date(notification_date[0])
+             if notification_date else 'N/A') + '</div>'
 
     # 5. Provisional deadline
     deadline_date = new_metadata.get("caseDeadlineDate", [])
     html += f'<div style="font-size:14px;color:#111827;margin-bottom:8px;{get_highlight_style(deadline_changed)}">'
     html += f'<span style="color:#6b7280;">Provisional deadline{get_label_suffix(deadline_changed)}:</span> '
-    html += (format_date(deadline_date[0]) if deadline_date else 'N/A') + '</div>'
+    html += (format_date(deadline_date[0])
+             if deadline_date else 'N/A') + '</div>'
 
     # 6. Economic activities (FS sector codes: NaceSectors + NaceV2Sector_)
     case_sectors = new_metadata.get("caseSectors", [])
@@ -386,7 +404,8 @@ def generate_html_for_changes(
                 code = sector_data.get("code", "")
                 label = sector_data.get("label", "")
                 if code and label:
-                    sector_code = code.replace("NaceV2Sector_", "*").replace("NaceSectors", "*")
+                    sector_code = code.replace(
+                        "NaceV2Sector_", "*").replace("NaceSectors", "*")
                     html += f'<a href="https://competition-cases.ec.europa.eu/search?caseInstrument=FS&caseSectors={sector_code}&sortField=caseLastDecisionDate&sortOrder=DESC" style="color:#2563eb;text-decoration:none;font-weight:700;">{escape_html(label)}</a> '
     else:
         html += 'N/A'
@@ -398,7 +417,8 @@ def generate_html_for_changes(
     oj_info = get_oj_prior_publication(new_decisions)
     old_oj_info = get_oj_prior_publication(old_decisions)
     if oj_info:
-        oj_changed = not old_oj_info or (old_oj_info.get("reference") != oj_info.get("reference") or old_oj_info.get("publishedDate") != oj_info.get("publishedDate"))
+        oj_changed = not old_oj_info or (old_oj_info.get("reference") != oj_info.get(
+            "reference") or old_oj_info.get("publishedDate") != oj_info.get("publishedDate"))
         html += f'<div style="font-size:14px;color:#111827;margin-bottom:8px;{get_highlight_style("updated" if oj_changed else "unchanged")}">'
         html += f'<span style="color:#6b7280;">Prior publication in OJ{get_label_suffix("updated" if oj_changed else "unchanged")}:</span> '
         if oj_info.get("reference"):
@@ -445,8 +465,10 @@ def generate_html_for_changes(
                         for att in decision_attachments:
                             ameta = att.get("metadata", {})
                             att_link = ameta.get("attachmentLink", [""])[0]
-                            att_lang = ameta.get("attachmentLanguage", ["EN"])[0]
-                            att_pub = ameta.get("attachmentPublicationBusinessDate", [""])[0]
+                            att_lang = ameta.get(
+                                "attachmentLanguage", ["EN"])[0]
+                            att_pub = ameta.get(
+                                "attachmentPublicationBusinessDate", [""])[0]
                             if att_link:
                                 html += f'<span style="display:inline-flex;align-items:center;gap:6px;margin-right:12px;">'
                                 html += '<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:1px solid #ef4444;border-radius:3px;color:#ef4444;font-size:9px;font-weight:900;">PDF</span>'
@@ -458,7 +480,8 @@ def generate_html_for_changes(
                     if press_releases:
                         html += '<div style="font-size:14px;color:#111827;"><span style="color:#6b7280;">Press communication:</span> '
                         try:
-                            pr_data = json.loads(press_releases[0]) if isinstance(press_releases[0], str) else press_releases[0]
+                            pr_data = json.loads(press_releases[0]) if isinstance(
+                                press_releases[0], str) else press_releases[0]
                             for idx, item in enumerate(pr_data.get("items", [])):
                                 ref = item.get("reference", "")
                                 if idx > 0:
@@ -525,7 +548,7 @@ def send_fs_case_email_via_webhook(
 ) -> bool:
     """Send email via n8n webhook for FS case updates."""
     try:
-        subject = f"EC Foreign Subsidies Case Update – {case_number}: {case_title}"
+        subject = f"FRMD: EC Foreign Subsidies Case(Updated) – {case_number}: {case_title}"
         print(f"   📝 Generated email subject: {subject}")
         webhook_url = os.getenv(
             "N8N_WEBHOOK_URL",
@@ -542,7 +565,8 @@ def send_fs_case_email_via_webhook(
             'case_url': f"{CASE_BASE_URL}/{case_number}",
             'case_instrument': 'FS',
         }
-        response = requests.post(webhook_url, json=payload, headers={'Content-Type': 'application/json'}, timeout=30)
+        response = requests.post(webhook_url, json=payload, headers={
+                                 'Content-Type': 'application/json'}, timeout=30)
         response.raise_for_status()
         print(f"   ✅ Email sent successfully! Status: {response.status_code}")
         return True
@@ -575,7 +599,8 @@ def update_case_in_db(deal_id: str, case_number: str, new_case_data: Dict[str, A
         updated = False
         for i, existing_case in enumerate(deal["fs_ec_cases"]):
             existing_metadata = existing_case.get("metadata", {})
-            existing_case_number = existing_metadata.get("caseNumber", [None])[0]
+            existing_case_number = existing_metadata.get(
+                "caseNumber", [None])[0]
             if existing_case_number == case_number:
                 if "matched_company" in existing_case:
                     new_case_data["matched_company"] = existing_case["matched_company"]
@@ -632,7 +657,8 @@ def process_case_updates() -> None:
     for deal_idx, deal in enumerate(deals, 1):
         deal_id = deal.get("deal_id", "")
         fs_cases = deal.get("fs_ec_cases", [])
-        print(f"[{deal_idx}/{len(deals)}] Processing deal {deal_id} ({len(fs_cases)} FS cases)")
+        print(
+            f"[{deal_idx}/{len(deals)}] Processing deal {deal_id} ({len(fs_cases)} FS cases)")
 
         for case_idx, existing_case in enumerate(fs_cases, 1):
             total_cases_checked += 1
@@ -640,40 +666,47 @@ def process_case_updates() -> None:
             case_number = case_metadata.get("caseNumber", [None])[0]
 
             if not case_number:
-                print(f"   [{case_idx}/{len(fs_cases)}] ⚠️ No caseNumber, skipping")
+                print(
+                    f"   [{case_idx}/{len(fs_cases)}] ⚠️ No caseNumber, skipping")
                 continue
 
             if case_number not in latest_data:
-                print(f"   [{case_idx}/{len(fs_cases)}] {case_number}: ⚠️ Not found in latest data")
+                print(
+                    f"   [{case_idx}/{len(fs_cases)}] {case_number}: ⚠️ Not found in latest data")
                 continue
 
             new_case = latest_data[case_number]
             differences = deep_compare(existing_case, new_case)
 
             if not has_meaningful_changes(differences):
-                print(f"   [{case_idx}/{len(fs_cases)}] {case_number}: ✅ No meaningful changes")
+                print(
+                    f"   [{case_idx}/{len(fs_cases)}] {case_number}: ✅ No meaningful changes")
                 update_case_in_db(deal_id, case_number, new_case)
                 continue
 
             meaningful_diffs = [d for d in differences if not any(
                 ignored in d[0] for ignored in ["matched_company", "matched_role"])]
-            print(f"   [{case_idx}/{len(fs_cases)}] {case_number}: 🔄 Changes detected ({len(meaningful_diffs)} differences)")
+            print(
+                f"   [{case_idx}/{len(fs_cases)}] {case_number}: 🔄 Changes detected ({len(meaningful_diffs)} differences)")
 
             changed_fields = set()
             for path, old_val, new_val in meaningful_diffs:
                 field_name = path.split('.')[-1] if '.' in path else path
                 changed_fields.add(field_name)
             if changed_fields:
-                print(f"      Changed fields: {', '.join(sorted(changed_fields))}")
+                print(
+                    f"      Changed fields: {', '.join(sorted(changed_fields))}")
 
-            html_content = generate_html_for_changes(case_number, existing_case, new_case, meaningful_diffs)
+            html_content = generate_html_for_changes(
+                case_number, existing_case, new_case, meaningful_diffs)
             save_html_file(case_number, html_content)
 
             new_metadata = new_case.get("metadata", {})
             case_title = new_metadata.get("caseTitle", ["N/A"])[0]
             field_names = []
             for diff_path, _, _ in meaningful_diffs:
-                field_name = diff_path.split('.')[-1] if '.' in diff_path else diff_path
+                field_name = diff_path.split(
+                    '.')[-1] if '.' in diff_path else diff_path
                 if field_name not in field_names:
                     field_names.append(field_name)
 

@@ -21,8 +21,8 @@ def escape_html(s: Any) -> str:
 
 # Constants
 DATA_URL = "https://compcases-open-data-portal-files-prod.s3.eu-west-1.amazonaws.com/case-data-FS.json"
-# CUTOFF_DATE = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-CUTOFF_DATE = datetime.strptime("2026-01-01", "%Y-%m-%d")
+CUTOFF_DATE = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+# CUTOFF_DATE = datetime.strptime("2026-01-01", "%Y-%m-%d")
 OUTPUT_PATH = "fs_filtered_cases.json"
 MATCHED_DEALS_OUTPUT = "fs_matched_deals.json"
 ENV_PATH = ".env"
@@ -330,7 +330,7 @@ def generate_fs_case_email_html(case_data: Dict[str, Any], deal_match: Dict[str,
     case_attachments = case_data.get("caseAttachments", [])
     decisions = case_data.get("decisions", [])
 
-    subject = f"EC Foreign Subsidies Case Match – {target} / {acquirer}"
+    subject = f"FRMD: EC Foreign Subsidies Case (New) – {target} / {acquirer}"
 
     company_list = get_companies_from_case_title(case_data)
 
@@ -561,8 +561,7 @@ def match_cases_with_deals(filtered_cases: Dict[str, Any], deals_list: List[Dict
     print(
         f"\n{'='*60}\n🔍 Matching {len(filtered_cases)} FS cases with deals...\n{'='*60}\n")
 
-    deal_by_id = {str(d.get("deal_id", ""))
-                      : d for d in deals_list if d.get("deal_id")}
+    deal_by_id = {str(d.get("deal_id", ""))                  : d for d in deals_list if d.get("deal_id")}
     matched_count = 0
 
     for idx, (case_number, case_data) in enumerate(filtered_cases.items(), 1):

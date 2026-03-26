@@ -291,10 +291,10 @@ def generate_press_release_email_html(record_data, deal_match, updated_fields=No
     category = record_data.get("category") or "N/A"
 
     if updated_fields:
-        title_text = f"Bundeskartellamt Press Release Update – {target} / {acquirer}"
+        title_text = f"FRMD: German Bundeskartellamt Press Release (Updated) – {target} / {acquirer}"
         update_note = f"<p style='color:#e74c3c; font-weight:bold; padding:10px; background-color:#ffe6e6; border-radius:4px;'>⚠️ This record was updated. Changed fields: {', '.join(updated_fields)}</p>"
     else:
-        title_text = f"Bundeskartellamt Press Release – {target} / {acquirer}"
+        title_text = f"FRMD: German Bundeskartellamt Press Release (New) – {target} / {acquirer}"
         update_note = "<p style='color:#27ae60; font-weight:bold; padding:10px; background-color:#e6ffe6; border-radius:4px;'>✅ New press release added</p>"
 
     subject = title_text

@@ -1,0 +1,5 @@
+#LWP-Cookies-2.0
+Set-Cookie3: tst=0; path="/"; domain="edocket.prc.nm.gov"; path_spec; secure; discard; HttpOnly=None; version=0
+Set-Cookie3: ASP.NET_SessionId=y3n5p2eudxuh2rshpbxwvj4j; path="/"; domain="edocket.prc.nm.gov"; path_spec; secure; discard; HttpOnly=None; SameSite=Lax; version=0
+Set-Cookie3: .INFOSHARE=B97180B2890FBB14CD8D4B177FB77D4641EB7689E44235BD6754109540A72038F98DAC3262EA77057D0F1F6CA38BD1647A2BF7837A087263022752EC202FCA1FF7577B92CC21BFF12AB64AAF15B668CE0A1B9F76A1AD7EDFB1EFF58CC400B752658794F27DAF5563B541FBC44F1EA5040591A017091B610E2678B841D2E40A1843E5DD852F68BAE04E2723759BFB1080424172AE2A1A633B8BE6956A255C9599; path="/"; domain="edocket.prc.nm.gov"; path_spec; discard; HttpOnly=None; SameSite=Lax; version=0
+Set-Cookie3: tto=1440; path="/"; domain="edocket.prc.nm.gov"; path_spec; secure; discard; HttpOnly=None; version=0
