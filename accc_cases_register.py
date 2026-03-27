@@ -332,7 +332,7 @@ def _post_email_payload(payload: Dict[str, Any]) -> bool:
 def send_new_case_email(case_info: Dict[str, Any], deal_id: Optional[str]) -> bool:
     case_number = case_info.get("case_number", "N/A")
     title = case_info.get("title", "N/A")
-    subject = f"FRMD:ACCC (New) – {case_number}: {title}"
+    subject = f"[FRMD] ACCC Case (New) – {case_number}: {title}"
     url = case_info.get("url", "")
     notification_date = case_info.get("effective_notification_date", "")
     acquisition_status = case_info.get("acquisition_status", "")
@@ -368,7 +368,7 @@ def send_new_case_email(case_info: Dict[str, Any], deal_id: Optional[str]) -> bo
 def send_unmatched_usa_related_email(case_info: Dict[str, Any]) -> bool:
     case_number = case_info.get("case_number", "N/A")
     title = case_info.get("title", "N/A")
-    subject = f"FRUD: ACCC Case (USA-Related) – {case_number}"
+    subject = f"[FRUD] ACCC Case (USA-Related) – {case_number}"
     url = case_info.get("url", "")
 
     html = f"""

@@ -300,7 +300,7 @@ def generate_samr_unconditional_email_html(samr_data, deal_match):
     approval_date = samr_data.get("approval_date", date)
 
     title_text = f"SAMR China Unconditional Approval – {target} / {acquirer}" if target != "N/A" and acquirer != "N/A" else f"SAMR China Unconditional Approval – {title_en[:50]}"
-    subject = f"FRMD: SAMR China Unconditional Approval (New) – {target} / {acquirer}"
+    subject = f"[FRMD] SAMR China Unconditional Approval (New) – {target} / {acquirer}"
 
     html_email = f"""
 <!DOCTYPE html>
@@ -461,7 +461,7 @@ def generate_unmatched_samr_unconditional_email_html(record: dict, usa_company: 
     date_str = record.get("date", "N/A")
     url = record.get("url", "")
 
-    subject = f"FRUD: SAMR China Unconditional Approval (USA-Related) – {usa_company}"
+    subject = f"[FRUD] SAMR China Unconditional Approval (USA-Related) – {usa_company}"
 
     safe_table = escape_html(translated_table or "")
 

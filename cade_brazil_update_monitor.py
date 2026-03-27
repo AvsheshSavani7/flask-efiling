@@ -257,7 +257,7 @@ def generate_update_email_html(brazil_data, deal_info, new_records):
         table_records_html = "<p><em>No new records found.</em></p>"
 
     title_text = f"CADE Update – {target} / {acquirer}" if target != "N/A" and acquirer != "N/A" else f"CADE Brazil Update – Process {process}"
-    subject = f"FRMD: CADE Brazil (Updated) – {new_records_count} New Record(s) – {target} / {acquirer}"
+    subject = f"[FRMD] CADE Brazil (Updated) – {new_records_count} New Record(s) – {target} / {acquirer}"
 
     html_email = f"""
 <!DOCTYPE html>

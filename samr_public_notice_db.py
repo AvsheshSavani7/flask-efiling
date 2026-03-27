@@ -379,7 +379,7 @@ def generate_samr_email_html(samr_data, deal_match):
     url = samr_data.get("url", "")
 
     title_text = f"SAMR China – {target} / {acquirer}" if target != "N/A" and acquirer != "N/A" else f"SAMR China Match – {title_en[:50]}"
-    subject = f"FRMD: SAMR China Regulatory (New) – {target} / {acquirer}"
+    subject = f"[FRMD] SAMR China Regulatory (New) – {target} / {acquirer}"
 
     html_email = f"""
 <!DOCTYPE html>
@@ -526,7 +526,7 @@ def generate_unmatched_samr_email_html(record: dict) -> tuple:
     url = record.get("url", "")
 
     # Build subject
-    subject = f"FRUD: SAMR China Public Notice (USA-Related) – {title_en[:60]}"
+    subject = f"[FRUD] SAMR China Public Notice (USA-Related) – {title_en[:60]}"
 
     html_email = f"""
 <!DOCTYPE html>

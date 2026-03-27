@@ -330,7 +330,7 @@ def generate_fs_case_email_html(case_data: Dict[str, Any], deal_match: Dict[str,
     case_attachments = case_data.get("caseAttachments", [])
     decisions = case_data.get("decisions", [])
 
-    subject = f"FRMD: EC Foreign Subsidies Case (New) – {target} / {acquirer}"
+    subject = f"[FRMD] EC Foreign Subsidies Case (New) – {target} / {acquirer}"
 
     company_list = get_companies_from_case_title(case_data)
 

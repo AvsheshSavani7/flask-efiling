@@ -351,10 +351,10 @@ def generate_initial_filing_email_html(german_scrap_data, deal_match, updated_fi
     view_url = LAUFENDE_VERFAHREN_URL
 
     if updated_fields:
-        title_text = f"FRMD: German Bundeskartellamt Initial Filing (Updated) – {target} / {acquirer}"
+        title_text = f"[FRMD] German Bundeskartellamt Initial Filing (Updated) – {target} / {acquirer}"
         update_note = f"<p style='color:#e74c3c; font-weight:bold; padding:10px; background-color:#ffe6e6; border-radius:4px;'>⚠️ This record was updated. Changed fields: {', '.join(updated_fields)}</p>"
     else:
-        title_text = f"FRMD: German Bundeskartellamt Initial Filing (New) – {target} / {acquirer}"
+        title_text = f"[FRMD] German Bundeskartellamt Initial Filing (New) – {target} / {acquirer}"
         update_note = "<p style='color:#27ae60; font-weight:bold; padding:10px; background-color:#e6ffe6; border-radius:4px;'>✅ New initial filing added</p>"
 
     subject = title_text

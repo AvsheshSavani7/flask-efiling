@@ -721,7 +721,7 @@ def send_nz_update_email_via_webhook(
         deal_id = deal_match.get("deal_id", "N/A")
         case_number = (case_info.get("case_details")
                        or {}).get("Case number", "N/A")
-        subject = f"FRMD: NZ Case (Updated) – {case_number}: {target} / {acquirer}"
+        subject = f"[FRMD] NZ Case (Updated) – {case_number}: {target} / {acquirer}"
         webhook_url = os.getenv(
             "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/b3007d21-6845-47b5-aece-7b26583758bc")
         payload = {

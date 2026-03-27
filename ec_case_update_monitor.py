@@ -575,7 +575,7 @@ def send_ec_case_email_via_webhook(case_number: str, case_title: str, html_conte
     """
     try:
         # Generate email subject
-        subject = f"FRMD: EC Merger Case (Updated) – {case_number}: {case_title}"
+        subject = f"[FRMD] EC Merger Case (Updated) – {case_number}: {case_title}"
         print(f"   📝 Generated email subject: {subject}")
 
         # Get n8n webhook URL from environment variable

@@ -567,12 +567,12 @@ def generate_cma_case_email_html(case_info, deal_match, is_new_case=False, chang
     # Determine email type and subject
     if is_new_case:
         title_text = f"🆕 NEW UK CMA Merger Case – {target} / {acquirer}" if target != "N/A" and acquirer != "N/A" else f"🆕 NEW UK CMA Merger Case – {title[:50]}"
-        subject = f"FRMD: UK CMA Merger Case (New) – {target} / {acquirer}"
+        subject = f"[FRMD] UK CMA Merger Case (New) – {target} / {acquirer}"
         header_color = "#28a745"  # Green for new
         status_badge = '<div style="background-color:#28a745; color:white; padding:8px 16px; border-radius:4px; display:inline-block; margin-bottom:15px; font-weight:bold;">🆕 NEW CASE</div>'
     else:
         title_text = f"📝 UK CMA Merger Case Update – {target} / {acquirer}" if target != "N/A" and acquirer != "N/A" else f"📝 UK CMA Merger Case Update – {title[:50]}"
-        subject = f"FRMD: UK CMA Merger Case (Updated) – {target} / {acquirer}"
+        subject = f"[FRMD] UK CMA Merger Case (Updated) – {target} / {acquirer}"
         header_color = "#ff9800"  # Orange for update
         status_badge = '<div style="background-color:#ff9800; color:white; padding:8px 16px; border-radius:4px; display:inline-block; margin-bottom:15px; font-weight:bold;">📝 CASE UPDATED</div>'
 
@@ -825,7 +825,7 @@ def generate_unmatched_cma_case_email_html(record: dict) -> tuple:
     record_id = record.get("id", "")
 
     # Build subject
-    subject = f"FRUD: UK CMA Merger Case (USA-Related) – {title[:50]}"
+    subject = f"[FRUD] UK CMA Merger Case (USA-Related) – {title[:50]}"
 
     html_email = f"""
 <!DOCTYPE html>

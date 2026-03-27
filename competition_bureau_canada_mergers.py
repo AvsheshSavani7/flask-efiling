@@ -409,7 +409,7 @@ def generate_canada_case_email_html(case_info: Dict[str, Any], deal_match: Dict[
     matched_company = case_info.get("matched_company", "N/A")
     matched_role = case_info.get("matched_role", "N/A")
 
-    subject = f"FRMD: Canada Competition Bureau (New) – {target} / {acquirer}"
+    subject = f"[FRMD] Canada Competition Bureau (New) – {target} / {acquirer}"
 
     html = f"""<!doctype html>
 <html lang="en">
@@ -450,7 +450,7 @@ def generate_unmatched_canada_usa_email_html(case_info: Dict[str, Any]) -> Tuple
     industry = case_info.get("industry", "N/A")
     outcome = case_info.get("outcome", "N/A")
 
-    subject = f"FRUD: Canada Competition Bureau (USA-Related)"
+    subject = f"[FRUD] Canada Competition Bureau (USA-Related)"
 
     html = f"""<!doctype html>
 <html lang="en">

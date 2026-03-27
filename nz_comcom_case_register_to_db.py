@@ -236,7 +236,7 @@ def send_nz_new_case_matched_email(case_info: Dict[str, Any], deal_id: str) -> b
     parties = details.get("Parties", "")
     detail_url = case_info.get("detail_url", "")
 
-    subject = f"FRMD: NZ Case (New) – {case_number}: {title}"
+    subject = f"[FRMD] NZ Case (New) – {case_number}: {title}"
     html = f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -276,7 +276,7 @@ def send_unmatched_nz_usa_email_via_webhook(case_info: Dict[str, Any]) -> bool:
     title = case_info.get("title", "N/A")
     detail_url = case_info.get("detail_url", "")
 
-    subject = f"FRUD: NZ Case (USA-Related) – {case_number}"
+    subject = f"[FRUD] NZ Case (USA-Related) – {case_number}"
     html = f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>

@@ -385,7 +385,7 @@ def process_canada_case_updates() -> None:
                 deal, old_case, new_row, differences)
             save_html_file(parties[:50], html_content)
 
-            subject = f"FRMD: Canada Competition Bureau (Updated) – {target} / {acquirer}"
+            subject = f"[FRMD] Canada Competition Bureau (Updated) – {target} / {acquirer}"
             send_update_email_via_webhook(
                 subject,
                 html_content,

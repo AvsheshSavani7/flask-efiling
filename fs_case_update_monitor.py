@@ -548,7 +548,7 @@ def send_fs_case_email_via_webhook(
 ) -> bool:
     """Send email via n8n webhook for FS case updates."""
     try:
-        subject = f"FRMD: EC Foreign Subsidies Case(Updated) – {case_number}: {case_title}"
+        subject = f"[FRMD] EC Foreign Subsidies Case(Updated) – {case_number}: {case_title}"
         print(f"   📝 Generated email subject: {subject}")
         webhook_url = os.getenv(
             "N8N_WEBHOOK_URL",

@@ -386,7 +386,7 @@ def generate_conditional_approval_email_html(conditional_data, deal_match):
     approval_date = conditional_data.get("approval_date", "N/A")
 
     title_text = f"SAMR China Conditional Approval – {target} / {acquirer}" if target != "N/A" and acquirer != "N/A" else f"SAMR China Conditional Approval – {title_en[:50]}"
-    subject = f"FRMD: SAMR China Conditional Approval (New) – {target} / {acquirer}"
+    subject = f"[FRMD] SAMR China Conditional Approval (New) – {target} / {acquirer}"
 
     html_email = f"""
 <!DOCTYPE html>
@@ -542,7 +542,7 @@ def generate_unmatched_conditional_approval_email_html(record: dict) -> tuple:
     approval_date = record.get("approval_date", "N/A")
 
     # Build subject
-    subject = f"FRUD: SAMR China Conditional Approval (USA-Related) – {title_en[:60]}"
+    subject = f"[FRUD] SAMR China Conditional Approval (USA-Related) – {title_en[:60]}"
 
     html_email = f"""
 <!DOCTYPE html>
