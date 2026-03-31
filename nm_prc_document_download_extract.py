@@ -15,12 +15,17 @@ API flow:
 
 from __future__ import annotations
 
+import base64
 import copy
+import os
 import requests
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 
+from openai import OpenAI
 from PyPDF2 import PdfReader
+from dotenv import load_dotenv
 
 # e360 API endpoints (from nm api doc.json)
 BASE_URL = "https://e360.prc.nm.gov/core"
@@ -33,6 +38,17 @@ DEFAULT_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Content-Type": "application/json",
 }
+
+LLM_OCR_MODEL = "gpt-4.1-mini"
+LLM_OCR_MAX_PDF_BYTES = 15 * 1024 * 1024  # 15 MB
+
+# Load environment variables from project .env
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_LOCAL_ENV_PATH = _SCRIPT_DIR / ".env"
+# On platforms like Render, OPENAI_API_KEY is provided as an environment variable.
+# Only load local .env when the key is not already present.
+if not os.getenv("OPENAI_API_KEY") and _LOCAL_ENV_PATH.exists():
+    load_dotenv(_LOCAL_ENV_PATH)
 
 
 def get_download_token(session: requests.Session, document_id: str) -> str:
@@ -116,6 +132,63 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
         return ""
 
 
+def extract_text_with_llm_from_pdf(pdf_bytes: bytes, document_name: str = "document.pdf") -> str:
+    """
+    Fallback OCR/text extraction using OpenAI for image-only/non-selectable PDFs.
+
+    Args:
+        pdf_bytes: Raw PDF content
+        document_name: Optional filename for model context
+
+    Returns:
+        Extracted text, or empty string if extraction fails
+    """
+    if not pdf_bytes or not pdf_bytes.startswith(b"%PDF"):
+        return ""
+    if len(pdf_bytes) > LLM_OCR_MAX_PDF_BYTES:
+        return ""
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return ""
+
+    try:
+        client = OpenAI(api_key=api_key)
+        pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+        response = client.responses.create(
+            model=LLM_OCR_MODEL,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "Extract all readable text from this PDF. "
+                                "Return only extracted text, preserving order as best as possible. "
+                                "Do not summarize."
+                            ),
+                        },
+                        {
+                            "type": "input_file",
+                            "filename": document_name,
+                            "file_data": f"data:application/pdf;base64,{pdf_b64}",
+                        },
+                    ],
+                }
+            ],
+        )
+
+        print(f"Response: {response}")
+
+        text = (response.output_text or "").strip()
+        print(f"Text: {text}")
+
+        return text
+    except Exception:
+        return ""
+
+
 def download_and_extract(param: dict[str, Any], session: requests.Session | None = None) -> dict[str, Any]:
     """
     Download document via e360 APIs, extract text, and return param with extracted text.
@@ -151,7 +224,29 @@ def download_and_extract(param: dict[str, Any], session: requests.Session | None
         token = get_download_token(session, str(document_id))
         pdf_bytes = download_document(session, token)
         text = extract_text_from_pdf(pdf_bytes)
+        extraction_method = "pypdf2"
+
+        # Fallback for scanned/non-selectable PDFs.
+        if not (text or "").strip():
+            doc_name = f"{param.get('documentnumber') or document_id}.pdf"
+            llm_text = extract_text_with_llm_from_pdf(
+                pdf_bytes, document_name=doc_name)
+            if llm_text:
+                text = llm_text
+                extraction_method = "llm_fallback"
+            else:
+                if "OPENAI_API_KEY" not in os.environ:
+                    result["extracted_text_error"] = "No selectable PDF text and OPENAI_API_KEY missing for LLM fallback"
+                elif len(pdf_bytes) > LLM_OCR_MAX_PDF_BYTES:
+                    result["extracted_text_error"] = (
+                        f"No selectable PDF text and PDF too large for LLM fallback "
+                        f"({len(pdf_bytes)} bytes > {LLM_OCR_MAX_PDF_BYTES} bytes)"
+                    )
+                else:
+                    result["extracted_text_error"] = "No selectable PDF text and LLM fallback returned empty text"
+
         result["extracted_text"] = text or ""
+        result["extraction_method"] = extraction_method
     except requests.RequestException as e:
         result["extracted_text_error"] = str(e)
     except ValueError as e:
@@ -168,11 +263,58 @@ def main():
 
     sample = {
         "row_number": 2,
-        "Docket Number": "24-00266-UT",
-        "caseId": "975411b4-5f48-4186-85f6-64bc6b8da180",
-        "id": "29205b89-7d22-402c-a90e-b3e501832893",
-        "documentnumber": "DOC-000180445-26",
-        "documentname": "24-00266-UT 2.2.2026  Supplemental Filing to Motion To Reopen Case re Extraordinary Evidence 1000 Percent Rate Increase",
+        "Docket Number": "25-00060-UT",
+        "caseId": "df8795c2-9498-457d-a78a-0e47e11cf20b",
+        "id": "99663142-93a3-476d-bba5-b41a013adf07",
+        "documentnumber": "DOC-000246487-26",
+        "documentname": "Parties' Request for Guidance in Advance of Show Cause Proceeding",
+        "docname": "DOC-000246487-26 [Parties' Request for Guidance in Advance of Show Cause Proceeding]",
+        "documenttype": "Request",
+        "accesstype": "PUBLIC",
+        "audiencetype": "PUBLIC",
+        "typeCode": "REQUEST",
+        "storageSite": "",
+        "storagesitevalue": "",
+        "IsLegacy": True,
+        "shortdescription": "25-00060-UT 3.27.2026 request for guidance, COS",
+        "remarks": "25-00060-UT 3.27.2026 request for guidance, COS",
+        "confidential": "No",
+        "source": "Online",
+        "islinked": "No",
+        "islinkedparent": "No",
+        "documentRole": "",
+        "companyparties": "NEW ENERGY ECONOMY",
+        "caseid": "df8795c2-9498-457d-a78a-0e47e11cf20b",
+        "casenumber": "25-00060-UT",
+        "companypartyid": "4bc37f26-a269-4c21-bb48-8c23fc5fc7a0",
+        "company": "PUBLIC SERVICE COMPANY OF NEW MEXICO",
+        "filedby": "Mariel Nanasi",
+        "filedon": "2026-03-27T19:07:04.853796",
+        "fileddate": "2026-03-27T19:07:04.853796",
+        "canEdit": "",
+        "canAnnotate": "",
+        "canRedact": "",
+        "canBatesNumber": "",
+        "checkout": "No",
+        "checkoutby": " ",
+        "checkouton": "",
+        "hasdeletepermission": "",
+        "cancheckout": True,
+        "cancheckin": "",
+        "docType": "application/pdf",
+        "candownload": True,
+        "canMakeInternal": "",
+        "canpreview": "Yes",
+        "contenttype": "application/pdf",
+        "entityType": "cms.casex",
+        "entityId": "df8795c2-9498-457d-a78a-0e47e11cf20b",
+        "isLegacy": False,
+        "author": "Mariel Nanasi",
+        "canEditLegacyDocument": "",
+        "companypartylist": [
+            "NEW ENERGY ECONOMY"
+        ],
+        "fieldchanges": {}
     }
     out = download_and_extract(sample)
     print(out)
