@@ -998,7 +998,8 @@ def send_update_email(
         title = old_case.get("title", "N/A")
         deal_id = str(deal.get("_id")) if deal and deal.get("_id") else None
 
-        subject = f"[FRMD] ACCC Case (Updated) – {case_number}: {title}"
+        prefix = "[FRMD]" if deal else "[FRUD]"
+        subject = f"{prefix} ACCC Case (Updated) – {case_number}: {title}"
 
         payload = {
             "subject": subject,
