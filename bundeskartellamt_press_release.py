@@ -238,13 +238,11 @@ None
 """
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.2",
             messages=[
                 {"role": "system", "content": "You are an expert in M&A deal recognition."},
                 {"role": "user", "content": prompt},
-            ],
-            temperature=0,
-            max_tokens=100,
+            ]
         )
         return response.choices[0].message.content.strip()
     except Exception as e:

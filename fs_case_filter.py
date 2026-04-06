@@ -276,13 +276,11 @@ RESPONSE FORMAT:
 """
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.2",
             messages=[
                 {"role": "system", "content": "You are an expert in M&A deal recognition. Return Match: DEAL_ID|COMPANY|target|acquirer or None."},
                 {"role": "user", "content": prompt},
-            ],
-            temperature=0.1,
-            max_tokens=200,
+            ]
         )
         result = response.choices[0].message.content.strip()
         print(f"   🧠 LLM Response: {result}")

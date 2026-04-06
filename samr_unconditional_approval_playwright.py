@@ -788,14 +788,12 @@ If none, return []
 
         try:
             res = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5.2",
                 messages=[
                     {"role": "system",
                         "content": "You identify unconditional M&A approvals."},
                     {"role": "user", "content": prompt}
-                ],
-                temperature=0,
-                max_tokens=700
+                ]
             )
 
             print("GPT response:", res.choices[0].message.content)

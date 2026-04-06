@@ -918,13 +918,11 @@ IMPORTANT: Check carefully - if the interessados text matches or is contained in
 """
     try:
         res = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.2",
             messages=[
                 {"role": "system", "content": "You're an M&A deal identifier for Brazilian regulatory notices. Your job is to find matches between interessados text and deal companies. If the interessados text matches or is contained in any Target or Acquirer name, return the match. Be thorough and check all possibilities."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.1,  # Slightly higher temperature for more flexible matching
-            max_tokens=200
         )
 
         result = res.choices[0].message.content.strip()

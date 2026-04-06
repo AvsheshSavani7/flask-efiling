@@ -349,14 +349,12 @@ IMPORTANT: Check carefully - if the title matches or is contained in any Target,
 
     try:
         res = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.2",
             messages=[
                 {"role": "system",
                     "content": "You identify M&A deals from UK CMA merger case titles. Return Match: DEAL_ID|COMPANY|target|acquirer or None."},
                 {"role": "user", "content": prompt}
-            ],
-            temperature=0.1,
-            max_tokens=200
+            ]
         )
         result = res.choices[0].message.content.strip()
         print(f"🧠 LLM Response: {result}")
