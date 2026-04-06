@@ -178,10 +178,18 @@ NZ CASE:
 - Description: {description}
 
 INSTRUCTIONS:
-1. Extract ALL company names from the case (title, parties, description).
-2. Check if ANY of these names appears as Target OR Acquirer (or aliases) in the deals database.
-3. Consider variations, abbreviations, and partial matches.
-4. Match on a SINGLE company name.
+1. Extract only the companies that are explicitly and directly mentioned in the NZ case text (title, parties, description).
+2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, or service providers unless the company name is actually written in the case text.
+3. Check whether any directly mentioned company matches a Target, Acquirer, or known alias in the deals database.
+4. A match is valid if a single company name from the NZ case can be confidently linked to a company in the deals database.
+5. Allow normal name variations only when they clearly refer to the same company, such as:
+   - punctuation differences
+   - “Inc.” vs “Incorporated”
+   - “Corp.” vs “Corporation”
+   - “Ltd” vs “Limited”
+   - obvious spacing/casing differences
+6. Do not match based only on sector, business type, article topic, or indirect association.
+7. If the case does not directly name a company that appears in the deals database, return None.
 
 RESPONSE FORMAT:
 - If you find ANY match, respond EXACTLY: Match: DEAL_ID
@@ -236,7 +244,8 @@ def send_nz_new_case_matched_email(case_info: Dict[str, Any], deal_id: str) -> b
     parties = details.get("Parties", "")
     detail_url = case_info.get("detail_url", "")
 
-    subject = f"[FRMD] NZ Case (New) – {case_number}: {title}"
+    prefix = "[FRMD]" if deal_id else "[FRUD]"
+    subject = f"{prefix} NZ Case (New) – {case_number}: {title}"
     html = f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>

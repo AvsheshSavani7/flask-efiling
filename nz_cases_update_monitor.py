@@ -471,24 +471,30 @@ NZ CASE:
 - Description: {description}
 
 INSTRUCTIONS:
-1. Extract ALL company names from the case (title, parties, description).
-2. Check if ANY of these names appears as Target OR Acquirer (or aliases) in the deals database.
-3. Consider variations, abbreviations, and partial matches.
-4. Match on a SINGLE company name.
-
+1. Extract only the companies that are explicitly and directly mentioned in the NZ case text (title, parties, description).
+2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, or service providers unless the company name is actually written in the case text.
+3. Check whether any directly mentioned company matches a Target, Acquirer, or known alias in the deals database.
+4. A match is valid if a single company name from the NZ case can be confidently linked to a company in the deals database.
+5. Allow normal name variations only when they clearly refer to the same company, such as:
+   - punctuation differences
+   - “Inc.” vs “Incorporated”
+   - “Corp.” vs “Corporation”
+   - “Ltd” vs “Limited”
+   - obvious spacing/casing differences
+6. Do not match based only on sector, business type, article topic, or indirect association.
+7. If the case does not directly name a company that appears in the deals database, return None.
 RESPONSE FORMAT:
 - If you find ANY match, respond EXACTLY: Match: DEAL_ID
 - If NO match, respond with exactly: None"""
 
     try:
         res = client.chat.completions.create(
-            model="gpt-4.1",
+            model="gpt-5.2",
             messages=[
                 {"role": "system", "content": "You are an expert M&A deal matcher. Respond only with Match: DEAL_ID or None."},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0,
-            max_tokens=150,
+
         )
         content = res.choices[0].message.content.strip()
         if not content.lower().startswith("match"):
@@ -687,7 +693,7 @@ def generate_unmatched_nz_usa_email_html(case_info: Dict[str, Any]) -> tuple:
     category = details.get("Category", "N/A")
     status = details.get("Status", "N/A")
     date_opened = details.get("Date opened", "N/A")
-    subject = f"FRUD: NZ Case (USA-Related) – {case_number}"
+    subject = f"[FRUD] NZ Case (USA-Related) – {case_number}"
     html = f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -708,20 +714,20 @@ def generate_unmatched_nz_usa_email_html(case_info: Dict[str, Any]) -> tuple:
 # ---------- Webhooks ----------
 def send_nz_update_email_via_webhook(
     case_info: Dict[str, Any],
-    deal_match: Dict[str, Any],
+    deal_match: Optional[Dict[str, Any]],
     html_content: str,
     changes: List[Tuple[str, Any, Any, str]],
 ) -> bool:
-    """Send NZ update email (matched deal) via n8n webhook."""
+    """Send NZ update email via n8n webhook. [FRMD] if matched to a deal, else [FRUD]."""
     try:
-        target = deal_match.get("target") or deal_match.get(
-            "target_name", "N/A")
-        acquirer = deal_match.get(
-            "acquirer") or deal_match.get("acquire_name", "N/A")
-        deal_id = deal_match.get("deal_id", "N/A")
+        dm = deal_match or {}
+        target = dm.get("target") or dm.get("target_name", "N/A")
+        acquirer = dm.get("acquirer") or dm.get("acquire_name", "N/A")
+        deal_id = dm.get("deal_id", "N/A")
         case_number = (case_info.get("case_details")
                        or {}).get("Case number", "N/A")
-        subject = f"[FRMD] NZ Case (Updated) – {case_number}: {target} / {acquirer}"
+        prefix = "[FRMD]" if deal_match else "[FRUD]"
+        subject = f"{prefix} NZ Case (Updated) – {case_number}: {target} / {acquirer}"
         webhook_url = os.getenv(
             "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/b3007d21-6845-47b5-aece-7b26583758bc")
         payload = {
