@@ -30,6 +30,8 @@ from nz_comcom_case_register import main as nz_comcom_case_register_main
 from nz_comcom_case_register_to_db import run as nz_comcom_case_register_to_db_run
 from competition_bureau_canada_mergers import main as competition_bureau_canada_main
 from canada_competition_bureau_case_update_monitor import process_canada_case_updates
+from canada_cases_scripts.canada_cases_register import run_canada_cases_register
+from canada_cases_scripts.canada_cases_update_monitor import process_canada_cases_updates
 from nz_comcom_case_update_monitor import process_nz_case_updates
 from nz_cases_update_monitor import run as nz_cases_update_monitor_run
 from mongodb_connection import init_mongodb_connection, close_mongodb_connection, is_connected
@@ -105,6 +107,8 @@ def home():
             "/nz-cases-update-monitor": "GET - Monitor nz_cases collection for updates, match to deals, and send emails",
             "/competition-bureau-canada-scraper": "GET - Scrape Canada Competition Bureau merger reviews and match with deals",
             "/canada-competition-bureau-case-update-monitor": "GET - Monitor Canada Competition Bureau cases for updates and send email notifications",
+            "/new-canada-cases-register": "GET - Register new Canada Competition Bureau cases into canada_cases collection",
+            "/new-canada-cases-update-monitor": "GET - Monitor canada_cases collection for updates and send email notifications",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -1596,6 +1600,95 @@ def canada_competition_bureau_case_update_monitor():
     except Exception as e:
         logger.error(
             f"❌ Error starting Canada Competition Bureau case update monitor: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/new-canada-cases-register', methods=['GET'])
+def canada_cases_register():
+    """
+    Register new Canada Competition Bureau cases into canada_cases collection.
+    Scrapes the Competition Bureau report, filters by 3-day cutoff,
+    matches with deals via LLM, checks USA-relation for unmatched cases,
+    and sends email notifications for matched and USA-related cases.
+    Process runs in background - returns immediately.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        def run_register():
+            try:
+                logger.info("Starting Canada cases register in background")
+                run_canada_cases_register()
+                logger.info("✅ Canada cases register completed successfully")
+            except Exception as e:
+                logger.error(f"❌ Error in Canada cases register: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_register, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "Canada cases register started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Error starting Canada cases register: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/new-canada-cases-update-monitor', methods=['GET'])
+def canada_cases_update_monitor():
+    """
+    Monitor canada_cases collection for updates and send email notifications.
+    Fetches fresh Competition Bureau data, compares with stored cases,
+    attempts deal matching for cases without deal_id, and sends rich HTML emails.
+    Process runs in background - returns immediately.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        def run_monitor():
+            try:
+                logger.info(
+                    "Starting Canada cases update monitor in background")
+                process_canada_cases_updates()
+                logger.info("✅ Canada cases update monitor completed")
+            except Exception as e:
+                logger.error(
+                    f"❌ Error in Canada cases update monitor: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_monitor, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "Canada cases update monitor started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Error starting Canada cases update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
