@@ -33,8 +33,6 @@ from bson import ObjectId
 from dotenv import load_dotenv
 from openai import OpenAI
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 
 load_dotenv(".env")
 

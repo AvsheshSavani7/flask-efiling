@@ -19,7 +19,7 @@ from uk_cma_mergers_scraper_atom import main as uk_cma_main
 from bundeskartellamt_scraper import main as bundeskartellamt_main
 from bundeskartellamt_initial import main as bundeskartellamt_initial_main
 from bundeskartellamt_press_release import main as bundeskartellamt_press_release_main
-from ec_case_filter import main as ec_case_filter_main
+from ec_case_register import main as ec_case_register_main
 from fs_case_filter import main as fs_case_filter_main
 from accc_acquisitions import main as accc_acquisitions_main
 from accc_case_update_monitor import process_accc_case_updates
@@ -30,8 +30,8 @@ from nz_comcom_case_register import main as nz_comcom_case_register_main
 from nz_comcom_case_register_to_db import run as nz_comcom_case_register_to_db_run
 from competition_bureau_canada_mergers import main as competition_bureau_canada_main
 from canada_competition_bureau_case_update_monitor import process_canada_case_updates
-from canada_cases_scripts.canada_cases_register import run_canada_cases_register
-from canada_cases_scripts.canada_cases_update_monitor import process_canada_cases_updates
+from canada_cases_register import run_canada_cases_register
+from canada_cases_update_monitor import process_canada_cases_updates
 from nz_comcom_case_update_monitor import process_nz_case_updates
 from nz_cases_update_monitor import run as nz_cases_update_monitor_run
 from mongodb_connection import init_mongodb_connection, close_mongodb_connection, is_connected
@@ -94,9 +94,9 @@ def home():
             "/bundeskartellamt-scraper": "GET - Scrape Bundeskartellamt German merger cases and match with deals",
             "/bundeskartellamt-initial": "GET - Scrape Bundeskartellamt Laufende Verfahren (initial filing) and match with deals",
             "/bundeskartellamt-press-release": "GET - Scrape Bundeskartellamt press releases and match with deals",
-            "/ec-case-filter": "GET - Filter and match EC merger cases with deals",
+            "/new-ec-case-register": "GET - Filter and match EC merger cases with deals",
             "/fs-case-filter": "GET - Filter and match EC Foreign Subsidies cases with deals",
-            "/ec-case-update-monitor": "GET - Monitor EC merger cases for updates and send email notifications",
+            "/new-ec-case-update-monitor": "GET - Monitor EC merger cases for updates and send email notifications",
             "/fs-case-update-monitor": "GET - Monitor EC Foreign Subsidies cases for updates and send email notifications",
             "/new-accc-cases-register": "GET - Scrape ACCC acquisitions and match with deals",
             "/new-accc-cases-update-monitor": "GET - Monitor ACCC acquisition cases for updates and send email notifications",
@@ -1226,8 +1226,8 @@ def bundeskartellamt_press_release():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-@app.route('/ec-case-filter', methods=['GET'])
-def ec_case_filter():
+@app.route('/new-ec-case-register', methods=['GET'])
+def new_ec_case_register():
     """
     Filter and match EC merger cases with deals.
     Downloads EC case data, filters by criteria, and matches with MongoDB deals.
@@ -1245,7 +1245,7 @@ def ec_case_filter():
         def run_filter():
             try:
                 logger.info("Starting EC case filter in background")
-                result = ec_case_filter_main()
+                result = ec_case_register_main()
                 if result and result.get("success"):
                     logger.info(
                         f"EC case filter completed successfully. Filtered {result.get('total_filtered', 0)} cases, "
@@ -1331,8 +1331,8 @@ def fs_case_filter():
         }), 500
 
 
-@app.route('/ec-case-update-monitor', methods=['GET'])
-def ec_case_update_monitor():
+@app.route('/new-ec-case-update-monitor', methods=['GET'])
+def new_ec_case_update_monitor():
     """
     Monitor EC merger cases for updates.
     Compares latest EC case data with stored MongoDB records and sends email notifications for changes.
@@ -1346,7 +1346,7 @@ def ec_case_update_monitor():
     }
     """
     try:
-        from ec_case_update_monitor import process_case_updates
+        from ec_case_update_monitor_new import process_case_updates
 
         # Run the monitor process in background thread
         def run_monitor():

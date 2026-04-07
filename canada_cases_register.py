@@ -16,6 +16,7 @@ Flow:
    - Send rich HTML email notifications
 """
 
+
 from mongodb_connection import (
     get_database,
     get_deals_collection,
@@ -23,21 +24,18 @@ from mongodb_connection import (
     is_connected,
 )
 from llm_verification_service import verify_usa_relation
-import os
-import json
-import sys
 import logging
 import builtins
 from datetime import datetime, timedelta
 from html import escape as escape_html
 from typing import Any, Dict, List, Optional, Tuple
-
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from openai import OpenAI
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import os
+import json
+import sys
 
 
 load_dotenv(".env")
