@@ -19,7 +19,7 @@ from uk_cma_mergers_scraper_atom import main as uk_cma_main
 from bundeskartellamt_scraper import main as bundeskartellamt_main
 from bundeskartellamt_initial import main as bundeskartellamt_initial_main
 from bundeskartellamt_press_release import main as bundeskartellamt_press_release_main
-from ec_case_register import main as ec_case_register_main
+from ec_case_register import run_ec_case_register as ec_case_register_main
 from fs_case_filter import main as fs_case_filter_main
 from accc_acquisitions import main as accc_acquisitions_main
 from accc_case_update_monitor import process_accc_case_updates
