@@ -95,9 +95,9 @@ def home():
             "/bundeskartellamt-initial": "GET - Scrape Bundeskartellamt Laufende Verfahren (initial filing) and match with deals",
             "/bundeskartellamt-press-release": "GET - Scrape Bundeskartellamt press releases and match with deals",
             "/new-ec-case-register": "GET - Filter and match EC merger cases with deals",
-            "/fs-case-register": "GET - Filter and match EC Foreign Subsidies cases with deals",
+            "/new-fs-case-register": "GET - Filter and match EC Foreign Subsidies cases with deals",
             "/new-ec-case-update-monitor": "GET - Monitor EC merger cases for updates and send email notifications",
-            "/fs-case-update-monitor-new": "GET - Monitor EC Foreign Subsidies cases for updates and send email notifications",
+            "/new-fs-case-update-monitor-new": "GET - Monitor EC Foreign Subsidies cases for updates and send email notifications",
             "/new-accc-cases-register": "GET - Scrape ACCC acquisitions and match with deals",
             "/new-accc-cases-update-monitor": "GET - Monitor ACCC acquisition cases for updates and send email notifications",
             "/ftc-early-termination-scraper": "GET - Scrape FTC early termination notices and match with deals",
@@ -1279,7 +1279,7 @@ def new_ec_case_register():
         }), 500
 
 
-@app.route('/fs-case-register', methods=['GET'])
+@app.route('/new-fs-case-register', methods=['GET'])
 def fs_case_register():
     """
     Filter and match EC Foreign Subsidies cases with deals.
@@ -1378,8 +1378,8 @@ def new_ec_case_update_monitor():
         }), 500
 
 
-@app.route('/fs-case-update-monitor-new', methods=['GET'])
-def fs_case_update_monitor_new():
+@app.route('/new-fs-case-update-monitor-new', methods=['GET'])
+def new_fs_case_update_monitor_new():
     """
     Monitor EC Foreign Subsidies cases for updates.
     Compares latest FS case data with stored fs_ec_cases on deals, sends email notifications for changes.
