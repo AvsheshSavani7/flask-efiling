@@ -25,7 +25,7 @@ import os
 import json
 import logging
 import builtins
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -95,8 +95,7 @@ N8N_WEBHOOK_URL = os.getenv(
     "N8N_WEBHOOK_URL",
     "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6",
 )
-CUTOFF_DATE = datetime.now().replace(
-    hour=0, minute=0, second=0, microsecond=0)
+CUTOFF_DATE = datetime.now() - timedelta(days=2)
 
 
 # -----------------------------------------------------------------------------
@@ -189,8 +188,8 @@ def matches_criteria(case_data: Dict[str, Any]) -> bool:
     if initiation_date is None:
         return False
 
-    # if initiation_date is None or initiation_date < CUTOFF_DATE:
-    #     return False
+    if initiation_date is None or initiation_date < CUTOFF_DATE:
+        return False
 
     return True
 
