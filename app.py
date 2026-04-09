@@ -1346,13 +1346,13 @@ def new_ec_case_update_monitor():
     }
     """
     try:
-        from ec_case_update_monitor_new import process_case_updates
+        from ec_case_update_monitor_new import process_ec_case_updates
 
         # Run the monitor process in background thread
         def run_monitor():
             try:
                 logger.info("Starting EC case update monitor in background")
-                process_case_updates()
+                process_ec_case_updates()
                 logger.info("✅ EC case update monitor completed successfully")
             except Exception as e:
                 logger.error(f"❌ Error in EC case update monitor: {str(e)}")
