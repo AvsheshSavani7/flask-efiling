@@ -41,8 +41,8 @@ CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")
 
 N8N_WEBHOOK_URL = os.getenv(
     "N8N_WEBHOOK_URL",
-    # "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6",
-    "https://n8n-xwx1.onrender.com/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
+    "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6",
+    # "https://n8n-xwx1.onrender.com/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
 )
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -884,11 +884,13 @@ def process_brazil_cases_updates(headless: bool = True):
                       f"table_records={len(live_table)}, historico={len(live_historico)}")
 
                 should_close = any(
-                    rec.get("tipo_documento", "").strip() == "Certidão de Trânsito em Julgado"
+                    rec.get("tipo_documento", "").strip(
+                    ) == "Certidão de Trânsito em Julgado"
                     for rec in live_table
                 )
                 if should_close:
-                    print("  🔒 'Certidão de Trânsito em Julgado' found — will set is_open=False")
+                    print(
+                        "  🔒 'Certidão de Trânsito em Julgado' found — will set is_open=False")
 
                 # Step 4: detect changes
                 changes = detect_changes(

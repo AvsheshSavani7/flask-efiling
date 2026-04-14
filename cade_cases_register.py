@@ -56,8 +56,8 @@ PROCESS_TYPES = {
 }
 N8N_WEBHOOK_URL = os.getenv(
     "N8N_WEBHOOK_URL",
-    # "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6",
-    "https://n8n-xwx1.onrender.com/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
+    "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6",
+    # "https://n8n-xwx1.onrender.com/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
 )
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -1070,9 +1070,9 @@ def run_cade_cases_register(
 
     # Default date range
     if end_date is None:
-        end_date = datetime.datetime(2025, 2, 28)  # 26/02/2026
+        end_date = datetime.datetime.now()
     if start_date is None:
-        start_date = datetime.datetime(2025, 1, 1)
+        start_date = end_date - datetime.timedelta(days=2)
 
     new_cases: List[Dict[str, Any]] = []
 
