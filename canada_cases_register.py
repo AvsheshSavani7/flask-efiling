@@ -7,13 +7,13 @@ and registers new cases in the dedicated 'canada_cases' MongoDB collection.
 
 Flow:
 1. Fetch HTML table from Competition Bureau
-2. Parse rows and filter by CUTOFF_DATE (3 days ago)
+2. Parse rows and filter by CUTOFF_DATE (3 days ago) + concluded_date == "Ongoing"
 3. For each new row:
    - Check if already exists in canada_cases (skip if yes)
    - LLM call #1: Try to match with existing deals
    - LLM call #2 (if no match): Check if USA-related
-   - Insert matched OR USA-related cases
-   - Send rich HTML email notifications
+   - Insert ALL cases into DB (matched, USA-related, or neither) with is_open=True
+   - Send rich HTML email notifications for matched / USA-related cases
 """
 
 
@@ -523,17 +523,13 @@ def run_canada_cases_register():
     cutoff_date_only = CUTOFF_DATE.date()
 
     print(
-        f"📊 Processing rows (filtering by opened_date >= {cutoff_date_only})...\n")
-
-    # ONE-TIME PROCESS: Uncomment below to filter for "Ongoing" cases only (bypass date cutoff)
-    # for idx, row in enumerate(all_rows, 1):
-    #     concluded_date = row.get("concluded_date", "").strip()
-    #     if concluded_date.lower() != "ongoing":
-    #         continue
-    #     parties = row["parties"]
-    #     opened_date = row["opened_date"]
+        f"📊 Processing rows (filtering by opened_date >= {cutoff_date_only} AND concluded_date == 'Ongoing')...\n")
 
     for idx, row in enumerate(all_rows, 1):
+        concluded_date = (row.get("concluded_date") or "").strip()
+        if concluded_date.lower() != "ongoing":
+            continue
+
         opened_dt = row.get("opened_date_parsed")
         if opened_dt is None:
             continue
@@ -571,6 +567,7 @@ def run_canada_cases_register():
             "concluded_date": row["concluded_date"],
             "industry": row["industry"],
             "outcome": row["outcome"],
+            "is_open": True,
             "created_at": now_iso,
             "updated_at": now_iso,
         }
@@ -598,52 +595,42 @@ def run_canada_cases_register():
                 html_email = generate_matched_case_email_html(case_info, deal)
                 send_email_via_webhook(
                     subject, html_email, case_info, deal_id=matched_deal_id)
-
-            inserted_id = insert_case(collection, case_info)
-            if inserted_id:
-                print(
-                    f"  ✅ Inserted case into canada_cases (id={inserted_id})\n")
-                backup_case = dict(case_info)
-                backup_case.pop("_id", None)
-                new_cases.append(backup_case)
-            continue
-
-        # LLM Call #2: Check if USA-related
-        print("  🔍 LLM Call #2: Checking if USA-related...")
-        try:
-            details_for_llm = (
-                f"Parties: {parties}\n"
-                f"Industry (NAICS): {row['industry']}\n"
-                f"Outcome: {row['outcome']}\n"
-                f"Opened Date: {opened_date}\n"
-                f"Concluded Date: {row['concluded_date']}"
-            )
-            is_usa = verify_usa_relation(
-                company_details=details_for_llm,
-                case_type="CANADA",
-            )
-        except Exception as e:
-            print(f"  ⚠️ USA relation check error: {e}", level="warning")
-            is_usa = False
-
-        if is_usa:
-            print("  🇺🇸 Case is USA-related")
-            case_info["usa_related"] = True
-
-            subject = f"[FRUD] Canada Competition Bureau (USA-Related)"
-            html_email = generate_usa_related_email_html(case_info)
-            send_email_via_webhook(subject, html_email,
-                                   case_info, usa_related=True)
-
-            inserted_id = insert_case(collection, case_info)
-            if inserted_id:
-                print(
-                    f"  ✅ Inserted case into canada_cases (id={inserted_id})\n")
-                backup_case = dict(case_info)
-                backup_case.pop("_id", None)
-                new_cases.append(backup_case)
         else:
-            print("  ℹ️ Not matched and not USA-related; skipping\n")
+            # LLM Call #2: Check if USA-related
+            print("  🔍 LLM Call #2: Checking if USA-related...")
+            try:
+                details_for_llm = (
+                    f"Parties: {parties}\n"
+                    f"Industry (NAICS): {row['industry']}\n"
+                    f"Outcome: {row['outcome']}\n"
+                    f"Opened Date: {opened_date}\n"
+                    f"Concluded Date: {row['concluded_date']}"
+                )
+                is_usa = verify_usa_relation(
+                    company_details=details_for_llm,
+                    case_type="CANADA",
+                )
+            except Exception as e:
+                print(f"  ⚠️ USA relation check error: {e}", level="warning")
+                is_usa = False
+
+            if is_usa:
+                print("  🇺🇸 Case is USA-related")
+                subject = f"[FRUD] Canada Competition Bureau (USA-Related)"
+                html_email = generate_usa_related_email_html(case_info)
+                send_email_via_webhook(subject, html_email,
+                                       case_info, usa_related=True)
+            else:
+                print("  ℹ️ Not matched and not USA-related")
+
+        # Always insert case into DB
+        inserted_id = insert_case(collection, case_info)
+        if inserted_id:
+            print(
+                f"  ✅ Inserted case into canada_cases (id={inserted_id})\n")
+            backup_case = dict(case_info)
+            backup_case.pop("_id", None)
+            new_cases.append(backup_case)
 
     # Backup JSON
     if new_cases:

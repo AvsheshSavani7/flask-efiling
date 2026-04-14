@@ -5,13 +5,13 @@ Canada Cases Update Monitor
 Monitors cases in the 'canada_cases' MongoDB collection for changes.
 
 Flow:
-1. Fetch all cases from canada_cases collection
+1. Fetch all cases where is_open == True from canada_cases collection
 2. Fetch fresh data from Competition Bureau table
-3. Compare each case with fresh data
+3. Compare concluded_date and outcome for each case
 4. If changes detected:
-   - If deal_id exists: Send update email (no LLM call)
-   - If deal_id empty: Try LLM match, then send appropriate email
-5. Update case in database with new values
+   - If deal_id exists: Send update email
+   - If deal_id empty: Check USA-related → send email if true, else just update DB
+5. Update case in database; set is_open=False if concluded_date and outcome both != "Ongoing"
 """
 
 from mongodb_connection import (
@@ -20,6 +20,7 @@ from mongodb_connection import (
     init_mongodb_connection,
     is_connected,
 )
+from llm_verification_service import verify_usa_relation
 import os
 import sys
 import logging
@@ -213,8 +214,7 @@ def detect_changes(
     Returns list of (field_name, old_value, new_value).
     """
     differences: List[Tuple[str, Any, Any]] = []
-    fields_to_compare = ["parties", "opened_date",
-                         "concluded_date", "industry", "outcome"]
+    fields_to_compare = ["concluded_date", "outcome"]
 
     for field in fields_to_compare:
         old_val = (old_case.get(field) or "").strip(
@@ -492,12 +492,9 @@ def update_case_document(
             print("    ⚠️ Case document has no _id; cannot update", level="warning")
             return False
 
-        # Merge new data, preserving created_at and usa_related
         updated = dict(new_case_data)
         if "created_at" in case_doc:
             updated["created_at"] = case_doc["created_at"]
-        if "usa_related" in case_doc and "usa_related" not in updated:
-            updated["usa_related"] = case_doc["usa_related"]
 
         updated["updated_at"] = utc_now_iso()
 
@@ -534,15 +531,14 @@ def process_canada_cases_updates():
 
     deals_collection = get_deals_collection()
 
-    # Fetch only cases with concluded_date = "Ongoing"
-    cursor = cases_collection.find({"concluded_date": "Ongoing"})
+    cursor = cases_collection.find({"is_open": True})
     cases = list(cursor)
     if not cases:
-        print("⚠️ No cases with concluded_date='Ongoing' found in canada_cases collection.", level="warning")
+        print("⚠️ No cases with is_open=True found in canada_cases collection.", level="warning")
         return
 
     print(
-        f"📊 Found {len(cases)} cases with concluded_date='Ongoing' in canada_cases collection\n")
+        f"📊 Found {len(cases)} open cases (is_open=True) in canada_cases collection\n")
 
     # Fetch fresh data from Competition Bureau
     html = fetch_report_html(REPORT_URL)
@@ -583,12 +579,11 @@ def process_canada_cases_updates():
         changed_fields = [f for f, _, _ in differences]
         print(f"  🔄 Changes detected: {', '.join(changed_fields)}")
 
-        # Check if deal_id exists
         deal_id = case_doc.get("deal_id")
         deal = None
+        new_case_data = dict(new_row)
 
         if deal_id:
-            # Case already linked to deal - no LLM call needed
             print(f"  🔗 Case already linked to deal_id={deal_id}")
             if deals_collection is not None:
                 try:
@@ -598,19 +593,13 @@ def process_canada_cases_updates():
                     print(f"  ⚠️ Could not fetch deal: {e}", level="warning")
 
             send_update_email(case_doc, new_row, deal, differences)
-
-            # Update case with new data (preserve deal_id)
-            new_case_data = dict(new_row)
             new_case_data["deal_id"] = deal_id
-            update_case_document(cases_collection, case_doc, new_case_data)
         else:
-            # No deal_id - try LLM matching
-            print("  🔍 No deal_id found; attempting LLM match...")
+            print("  🔍 No deal_id found; attempting LLM deal match...")
             matched_deal_id = match_case_to_deal(parties)
 
             if matched_deal_id:
                 print(f"  🎯 LLM matched case to deal_id={matched_deal_id}")
-
                 if deals_collection is not None:
                     try:
                         deal = deals_collection.find_one(
@@ -619,18 +608,40 @@ def process_canada_cases_updates():
                         print(
                             f"  ⚠️ Could not fetch deal: {e}", level="warning")
 
-                # Update case with new data + deal_id
-                new_case_data = dict(new_row)
-                new_case_data["deal_id"] = matched_deal_id
-
                 send_update_email(case_doc, new_row, deal, differences)
-                update_case_document(cases_collection, case_doc, new_case_data)
+                new_case_data["deal_id"] = matched_deal_id
             else:
-                # No match - send USA-related update email
-                print("  🇺🇸 No deal match; sending USA-related update email")
+                print("  🔍 No deal match; checking if USA-related...")
+                try:
+                    details_for_llm = (
+                        f"Parties: {parties}\n"
+                        f"Industry (NAICS): {case_doc.get('industry', '')}\n"
+                        f"Outcome: {new_row.get('outcome', '')}\n"
+                        f"Opened Date: {opened_date}\n"
+                        f"Concluded Date: {new_row.get('concluded_date', '')}"
+                    )
+                    is_usa = verify_usa_relation(
+                        company_details=details_for_llm,
+                        case_type="CANADA",
+                    )
+                except Exception as e:
+                    print(f"  ⚠️ USA relation check error: {e}", level="warning")
+                    is_usa = False
 
-                send_update_email(case_doc, new_row, None, differences)
-                update_case_document(cases_collection, case_doc, new_row)
+                if is_usa:
+                    print("  🇺🇸 Case is USA-related; sending update email")
+                    send_update_email(case_doc, new_row, None, differences)
+                else:
+                    print("  ℹ️ Not USA-related; updating DB only (no email)")
+
+        # Set is_open=False if both concluded_date and outcome are not "Ongoing"
+        new_concluded = (new_row.get("concluded_date") or "").strip().lower()
+        new_outcome = (new_row.get("outcome") or "").strip().lower()
+        if new_concluded != "ongoing" and new_outcome != "ongoing":
+            new_case_data["is_open"] = False
+            print("  🔒 Case no longer ongoing; setting is_open=False")
+
+        update_case_document(cases_collection, case_doc, new_case_data)
 
     print("\n" + "=" * 60)
     print("📊 Summary:")

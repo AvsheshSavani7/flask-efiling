@@ -24,6 +24,8 @@ from fs_case_register import run_fs_case_register as fs_case_register_main
 from accc_acquisitions import main as accc_acquisitions_main
 from accc_case_update_monitor import process_accc_case_updates
 from accc_cases_register import run_accc_cases_register
+from cade_cases_register import run_cade_cases_register
+from cade_cases_update_monitor import process_brazil_cases_updates
 from accc_cases_update_monitor import process_accc_cases_updates
 from ftc_early_termination_scraper import main as ftc_early_termination_main
 from nz_comcom_case_register import main as nz_comcom_case_register_main
@@ -99,6 +101,8 @@ def home():
             "/new-ec-case-update-monitor": "GET - Monitor EC merger cases for updates and send email notifications",
             "/new-fs-case-update-monitor-new": "GET - Monitor EC Foreign Subsidies cases for updates and send email notifications",
             "/new-accc-cases-register": "GET - Scrape ACCC acquisitions and match with deals",
+            "/new-cade-cases-register": "GET - Scrape CADE Brazil public notices and store in brazil_cases collection (query params: headless, days)",
+            "/new-cade-cases-update-monitor": "GET - Monitor brazil_cases for updates and send email notifications (query param: headless)",
             "/new-accc-cases-update-monitor": "GET - Monitor ACCC acquisition cases for updates and send email notifications",
             "/ftc-early-termination-scraper": "GET - Scrape FTC early termination notices and match with deals",
             "/nz-comcom-case-register": "GET - Scrape NZ ComCom case register and match with deals",
@@ -1785,6 +1789,121 @@ def accc_cases_register_endpoint():
 
     except Exception as e:
         logger.error(f"❌ Error starting ACCC cases register scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/new-cade-cases-register', methods=['GET'])
+def cade_cases_register_endpoint():
+    """
+    Scrape CADE Brazil public notices for a date range and store all records
+    in the 'brazil_cases' collection. Matched and USA-related records get
+    table extraction and email notifications.
+    Process runs in background - returns immediately.
+
+    Query parameters:
+        headless: string (optional, "true" or "false", default: "true")
+        days: int (optional, default: 10) - Number of days back from today
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        headless_str = request.args.get('headless', 'true')
+        headless = headless_str.lower() in ('true', '1', 'yes')
+
+        days = int(request.args.get('days', '10'))
+        end_date = datetime.datetime.now()
+        start_date = end_date - datetime.timedelta(days=days)
+
+        def run_register():
+            try:
+                logger.info(
+                    f"Starting CADE cases register scraper in background "
+                    f"(date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')})"
+                )
+                run_cade_cases_register(
+                    start_date=start_date,
+                    end_date=end_date,
+                    headless=headless,
+                    test_mode=False,
+                )
+                logger.info("✅ CADE cases register scraper completed successfully")
+            except Exception as e:
+                logger.error(f"❌ Error in CADE cases register scraper: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_register, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "CADE cases register scraper started in background",
+            "status": "running",
+            "date_range": {
+                "start": start_date.strftime("%Y-%m-%d"),
+                "end": end_date.strftime("%Y-%m-%d"),
+            },
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Error starting CADE cases register scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/new-cade-cases-update-monitor', methods=['GET'])
+def cade_cases_update_monitor_endpoint():
+    """
+    Monitor all records in 'brazil_cases' for updates (type, interessados,
+    table_records, historico_records). Sends emails for deal-linked and
+    USA-related changes.
+    Process runs in background - returns immediately.
+
+    Query parameters:
+        headless: string (optional, "true" or "false", default: "true")
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        headless_str = request.args.get('headless', 'true')
+        headless = headless_str.lower() in ('true', '1', 'yes')
+
+        def run_monitor():
+            try:
+                logger.info("Starting CADE cases update monitor in background")
+                process_brazil_cases_updates(headless=headless)
+                logger.info("✅ CADE cases update monitor completed successfully")
+            except Exception as e:
+                logger.error(f"❌ Error in CADE cases update monitor: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_monitor, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "CADE cases update monitor started in background",
+            "status": "running",
+        }), 200
+
+    except Exception as e:
+        logger.error(f"❌ Error starting CADE cases update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
