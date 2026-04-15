@@ -387,7 +387,7 @@ def send_unmatched_usa_related_email(case_info: Dict[str, Any]) -> bool:
         "title": title,
         "case_url": url,
         "deal_id": None,
-        "usa_related": True,
+        # "usa_related": True,
         "is_unmatched": True,
         "is_new_case": True,
     }
@@ -719,7 +719,7 @@ def upsert_case_by_case_number(
         # Preserve created_at + linkage flags when this mode isn't setting them
         if existing.get("created_at") and not doc.get("created_at"):
             doc["created_at"] = existing["created_at"]
-        for key in ("deal_id", "usa_related"):
+        for key in ("deal_id"):
             if key in existing and key not in doc:
                 doc[key] = existing[key]
         doc["updated_at"] = now_iso
@@ -888,7 +888,7 @@ def run_accc_cases_register(test_mode: bool = False):
                             is_usa = False
 
                         if is_usa:
-                            case_info["usa_related"] = True
+                            # case_info["usa_related"] = True
                             print(
                                 "  🇺🇸 Case appears USA-related (unmatched); sending email"
                             )

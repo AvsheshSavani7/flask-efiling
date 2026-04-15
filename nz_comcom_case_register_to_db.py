@@ -167,7 +167,7 @@ def match_case_to_deal(
         lines.append(line)
     deals_text = "\n".join(lines)
 
-    prompt = f"""You are an expert M&A deal matcher. Determine if ANY company mentioned in this NZ Commerce Commission case appears in our deals database.
+    prompt = f"""You are an expert M&A deal matcher. Determine whether this NZ Commerce Commission case directly refers to a specific deal in our deals database.
 
 DEALS DATABASE:
 {deals_text}
@@ -178,22 +178,28 @@ NZ CASE:
 - Description: {description}
 
 INSTRUCTIONS:
-1. Extract only the companies that are explicitly and directly mentioned in the NZ case text (title, parties, description).
-2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, or service providers unless the company name is actually written in the case text.
-3. Check whether any directly mentioned company matches a Target, Acquirer, or known alias in the deals database.
-4. A match is valid if a single company name from the NZ case can be confidently linked to a company in the deals database.
-5. Allow normal name variations only when they clearly refer to the same company, such as:
+1. Extract only the company names that are explicitly and directly mentioned in the NZ case text (title, parties, description).
+2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, service providers, or any company not actually written in the NZ case text.
+3. For each deal in the deals database, check whether:
+   - the Acquirer (or its known alias), AND
+   - the Target (or its known alias)
+   are both directly mentioned in the NZ case text.
+4. A deal is a valid match only if BOTH sides of the same deal are confidently matched from the NZ case text:
+   - one match for the Acquirer side
+   - one match for the Target side
+5. Do not return a match if only one side is present, even if that single company is an exact match.
+6. Allow only normal name variations when they clearly refer to the same company, such as:
    - punctuation differences
    - “Inc.” vs “Incorporated”
    - “Corp.” vs “Corporation”
    - “Ltd” vs “Limited”
    - obvious spacing/casing differences
-6. Do not match based only on sector, business type, article topic, or indirect association.
-7. If the case does not directly name a company that appears in the deals database, return None.
+7. Do not match based only on sector, business type, article topic, indirect association, or partial deal overlap.
+8. If the NZ case does not directly name both companies for the same deal, return None.
 
 RESPONSE FORMAT:
-- If you find ANY match, respond EXACTLY: Match: DEAL_ID
-- If NO match, respond with exactly: None"""
+If BOTH the Acquirer and Target for one deal are directly matched, respond EXACTLY: Match: DEAL_ID
+If no deal satisfies this rule, respond exactly: None"""
 
     try:
         res = client.chat.completions.create(
@@ -312,7 +318,7 @@ def send_unmatched_nz_usa_email_via_webhook(case_info: Dict[str, Any]) -> bool:
         "case_number": case_number,
         "case_title": title,
         "detail_url": detail_url,
-        "usa_related": True,
+        # "usa_related": True,
         "is_unmatched": True,
         "source": "nz_comcom_case_register_to_db",
         "is_new_case": True,
@@ -535,9 +541,8 @@ def upsert_nz_case_by_detail_url(collection, detail_url: str, doc: Dict[str, Any
     if existing:
         if existing.get("created_at") and not out.get("created_at"):
             out["created_at"] = existing["created_at"]
-        for key in ("deal_id", "usa_related"):
-            if key in existing and key not in out:
-                out[key] = existing[key]
+        if "deal_id" in existing and "deal_id" not in out:
+            out["deal_id"] = existing["deal_id"]
         out["updated_at"] = now_iso
         out["scraped_at"] = now_iso
         collection.update_one({"detail_url": detail_url}, {
@@ -675,7 +680,7 @@ def run():
                     is_usa = False
 
                 if is_usa:
-                    doc["usa_related"] = True
+                    # doc["usa_related"] = True
                     print("      🇺🇸 USA-related (unmatched)")
                     if not test_mode:
                         send_unmatched_nz_usa_email_via_webhook(doc)

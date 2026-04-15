@@ -22,6 +22,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from openai import OpenAI
 from playwright.sync_api import sync_playwright
+from nz_comcom_case_register_to_db import match_case_to_deal
 
 from llm_verification_service import verify_usa_relation
 from mongodb_connection import (
@@ -441,74 +442,6 @@ def _summary_changes(changes: List[Tuple[str, Any, Any, str]]) -> List[str]:
     return summary
 
 
-# ---------- LLM match ----------
-def match_case_to_deal(title: str, parties: str, description: str, deals: List[Dict[str, Any]]) -> Optional[str]:
-    """
-    Ask LLM if this NZ case matches any deal. Returns deal_id or None.
-    """
-    if not deals:
-        return None
-    lines = []
-    for d in deals:
-        target = d.get("target") or d.get("target_name", "N/A")
-        acquirer = d.get("acquirer") or d.get("acquire_name", "N/A")
-        line = f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {target} | Acquirer: {acquirer}"
-        for alias_key in ("target_aliases", "parent_aliases"):
-            aliases = d.get(alias_key) or []
-            if aliases:
-                line += f" | {alias_key}: {', '.join(str(a) for a in aliases)}"
-        lines.append(line)
-    deals_text = "\n".join(lines)
-
-    prompt = f"""You are an expert M&A deal matcher. Determine if ANY company mentioned in this NZ Commerce Commission case appears in our deals database.
-
-DEALS DATABASE:
-{deals_text}
-
-NZ CASE:
-- Title: {title}
-- Parties: {parties}
-- Description: {description}
-
-INSTRUCTIONS:
-1. Extract only the companies that are explicitly and directly mentioned in the NZ case text (title, parties, description).
-2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, or service providers unless the company name is actually written in the case text.
-3. Check whether any directly mentioned company matches a Target, Acquirer, or known alias in the deals database.
-4. A match is valid if a single company name from the NZ case can be confidently linked to a company in the deals database.
-5. Allow normal name variations only when they clearly refer to the same company, such as:
-   - punctuation differences
-   - “Inc.” vs “Incorporated”
-   - “Corp.” vs “Corporation”
-   - “Ltd” vs “Limited”
-   - obvious spacing/casing differences
-6. Do not match based only on sector, business type, article topic, or indirect association.
-7. If the case does not directly name a company that appears in the deals database, return None.
-RESPONSE FORMAT:
-- If you find ANY match, respond EXACTLY: Match: DEAL_ID
-- If NO match, respond with exactly: None"""
-
-    try:
-        res = client.chat.completions.create(
-            model="gpt-5.2",
-            messages=[
-                {"role": "system", "content": "You are an expert M&A deal matcher. Respond only with Match: DEAL_ID or None."},
-                {"role": "user", "content": prompt},
-            ],
-
-        )
-        content = res.choices[0].message.content.strip()
-        if not content.lower().startswith("match"):
-            return None
-        try:
-            _prefix, deal_id_raw = content.split(":", 1)
-            return deal_id_raw.strip() or None
-        except Exception:
-            return None
-    except Exception as e:
-        logger.warning("LLM match error: %s", e)
-        return None
-
-
 # ---------- Email HTML (from nz_comcom_case_update_monitor / nz_comcom_case_register) ----------
 def generate_nz_update_email_html(
     case_info: Dict[str, Any],
@@ -684,7 +617,7 @@ def generate_nz_update_email_html(
     return html
 
 
-def generate_unmatched_nz_usa_email_html(case_info: Dict[str, Any]) -> tuple:
+def generate_unmatched_nz_usa_email_html(case_info: Dict[str, Any], changes: List[Tuple[str, Any, Any, str]]) -> tuple:
     """Generate HTML for USA-related unmatched NZ case."""
     title = case_info.get("title", "N/A")
     detail_url = case_info.get("detail_url", "")
@@ -693,6 +626,10 @@ def generate_unmatched_nz_usa_email_html(case_info: Dict[str, Any]) -> tuple:
     category = details.get("Category", "N/A")
     status = details.get("Status", "N/A")
     date_opened = details.get("Date opened", "N/A")
+    change_summary = _summary_changes(changes)
+    changes_html = "".join(
+        f'<li style="margin:0 0 6px 0;">{item}</li>' for item in change_summary
+    ) or '<li style="margin:0;">No structured changes listed.</li>'
     subject = f"[FRUD] NZ Case (USA-Related) – {case_number}"
     html = f"""<!doctype html>
 <html lang="en">
@@ -706,6 +643,12 @@ def generate_unmatched_nz_usa_email_html(case_info: Dict[str, Any]) -> tuple:
 </div>
 <div style="font-size:18px;font-weight:700;margin-bottom:8px;">{title}</div>
 <div style="font-size:14px;color:#64748b;">Case number: {case_number} | Category: {category} | Status: {status} | Opened: {date_opened}</div>
+<div style="margin-top:18px;padding:14px 16px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;">
+  <div style="font-size:14px;font-weight:700;color:#0f172a;margin-bottom:8px;">Detected changes</div>
+  <ul style="margin:0;padding-left:18px;color:#334155;font-size:14px;line-height:1.5;">
+    {changes_html}
+  </ul>
+</div>
 <a href="{detail_url}" target="_blank" style="display:inline-block;padding:12px 20px;background:#2563eb;color:#fff;text-decoration:none;border-radius:6px;font-weight:700;">View case details →</a>
 </div></body></html>"""
     return subject, html
@@ -752,10 +695,11 @@ def send_nz_update_email_via_webhook(
         return False
 
 
-def send_unmatched_nz_usa_email_via_webhook(case_info: Dict[str, Any]) -> bool:
+def send_unmatched_nz_usa_email_via_webhook(case_info: Dict[str, Any], changes: List[Tuple[str, Any, Any, str]]) -> bool:
     """Send USA-related unmatched NZ case email via webhook."""
     try:
-        subject, html_email = generate_unmatched_nz_usa_email_html(case_info)
+        subject, html_email = generate_unmatched_nz_usa_email_html(
+            case_info, changes)
         webhook_url = os.getenv(
             "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/b3007d21-6845-47b5-aece-7b26583758bc")
         payload = {
@@ -767,7 +711,7 @@ def send_unmatched_nz_usa_email_via_webhook(case_info: Dict[str, Any]) -> bool:
             "case_number": (case_info.get("case_details") or {}).get("Case number", "N/A"),
             "case_title": case_info.get("title", "N/A"),
             "detail_url": case_info.get("detail_url", ""),
-            "usa_related": True,
+            # "usa_related": True,
             "is_unmatched": True,
             "source": "nz_cases_update_monitor",
         }
@@ -1009,7 +953,8 @@ def run():
                         company_details=nz_details, case_type="NZ")
                     if is_usa:
                         logger.info("USA-related – sending email and updating")
-                        send_unmatched_nz_usa_email_via_webhook(updated_case)
+                        send_unmatched_nz_usa_email_via_webhook(
+                            updated_case, changes)
                     else:
                         logger.info("Not USA-related – updating only")
 

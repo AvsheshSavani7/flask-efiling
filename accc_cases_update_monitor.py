@@ -564,6 +564,7 @@ def generate_update_email_html(
     new_case: Dict[str, Any],
     deal: Optional[Dict[str, Any]],
     changes: List[Tuple[str, Any, Any, str]],
+    is_usa: bool = False,
 ) -> str:
     """
     Generate HTML email for ACCC case update, mirroring the rich layout from
@@ -666,8 +667,8 @@ def generate_update_email_html(
                 deal_id_str = str(deal.get("_id"))
         else:
             deal_id_str = str(deal.get("deal_id", ""))
-    usa_related = bool(new_case.get("usa_related")
-                       or old_case.get("usa_related"))
+    # usa_related = bool(new_case.get("usa_related")
+    #                    or old_case.get("usa_related"))
 
     # Helper to display change flags for high-level fields
     def change_flag(field_label: str) -> str:
@@ -731,7 +732,7 @@ def generate_update_email_html(
   </div>"""
         html += """
     </div>"""
-    elif usa_related:
+    elif is_usa:
         # USA-related but no matched deal
         html += """
 <div style="background:#dbeafe;border-radius:6px;padding:16px 22px;margin-bottom:20px;border-left:4px solid #3b82f6;">
@@ -991,9 +992,11 @@ def send_update_email(
     new_case: Dict[str, Any],
     deal: Optional[Dict[str, Any]],
     changes: List[Tuple[str, Any, Any, str]],
+    is_usa: bool = False,
 ) -> bool:
     try:
-        html = generate_update_email_html(old_case, new_case, deal, changes)
+        html = generate_update_email_html(
+            old_case, new_case, deal, changes, is_usa)
         case_number = old_case.get("case_number", "N/A")
         title = old_case.get("title", "N/A")
         deal_id = str(deal.get("_id")) if deal and deal.get("_id") else None
@@ -1009,6 +1012,7 @@ def send_update_email(
             "changed_fields": [c[0] for c in changes],
             "case_url": new_case.get("url", ""),
             "deal_id": deal_id,
+            "is_usa": is_usa,
         }
 
         import requests
@@ -1039,9 +1043,8 @@ def update_case_document(
 
         # Preserve existing linkage fields such as deal_id and usa_related
         updated = dict(new_case)
-        for key in ("deal_id", "usa_related"):
-            if key in case_doc and key not in updated:
-                updated[key] = case_doc[key]
+        if "deal_id" in case_doc and "deal_id" not in updated:
+            updated["deal_id"] = case_doc["deal_id"]
 
         # Preserve created_at; always bump updated_at
         if "created_at" in case_doc and "created_at" not in updated:
@@ -1231,8 +1234,9 @@ URL: {url}
 
             if is_usa:
                 print("  🇺🇸 Case appears USA-related; sending email and updating")
-                current_case["usa_related"] = True
-                send_update_email(case_doc, current_case, None, changes)
+                # current_case["usa_related"] = True
+                send_update_email(case_doc, current_case,
+                                  None, changes, is_usa=True)
                 update_case_document(cases_collection, case_doc, current_case)
             else:
                 print("  ℹ️ Not USA-related and no deal match; updating case only")
