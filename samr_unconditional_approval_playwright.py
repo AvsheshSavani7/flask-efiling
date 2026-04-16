@@ -759,21 +759,35 @@ You are a professional M&A analyst.
 Below is a translated table of unconditional merger approvals issued by SAMR.
 Each row includes the case name, the parties involved, and the approval date.
 
-Your task is:
-- Match any company involved in these cases to the deals below using partial or fuzzy match.
-- When matching, also consider target_aliases and parent_aliases - if a company name in the table matches an alias, treat it as a match for that deal.
-- For each match, include the exact "Deal ID" from the DEALS TO MATCH list - this uniquely identifies which deal was matched.
-- Return only matched companies, using their original names from the table (or the canonical Target/Acquirer name if matched via alias), and attach the approval date.
+MATCHING RULES:
+1. Extract only the companies that are explicitly and directly mentioned in each SAMR table row.
+2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, service providers, or any company not actually written in that row.
+3. For each deal in the DEALS TO MATCH list, treat aliases as valid only when they clearly refer to the same company:
+   - target_aliases count as the Target side
+   - parent_aliases count as the Acquirer side
+4. A deal is a valid match only if BOTH sides of the SAME deal are matched within the SAME SAMR row:
+   - one company matching the Acquirer side (canonical acquirer name or parent_alias)
+   - one company matching the Target side (canonical target name or target_alias)
+5. Do not return a match if only one side is present, even if that one side is an exact match.
+6. Allow only normal name variations when they clearly refer to the same company, such as:
+   - punctuation differences
+   - “Inc.” vs “Incorporated”
+   - “Corp.” vs “Corporation”
+   - “Ltd” vs “Limited”
+   - obvious spacing/casing differences
+7. Do not match based only on partial overlap, business similarity, sector similarity, or a single shared company.
+8. Return matches only when you are confident that the SAMR row directly names both sides of the same deal.
 
 {deals_section}
 Translated Table:
 {translated_table}
 
-Return a JSON array of matched companies using fuzzy or partial name matching.
+RESPONSE FORMAT:
+Return a JSON array of matched companies using direct name matching.
 Each match must include:
 - "deal_id": the Deal ID from the DEALS TO MATCH list (required - use this to identify which deal)
 - "company": full party name from the table
-- "matched_known_name": matched name (Target or Acquirer) from the deal
+- "matched_known_name": matched name (Target and Acquirer) from the deal (Target and Acquirer must be matched)
 - "approval_date": approval date in YYYY-MM-DD (from the row)
 Respond strictly as:
 [

@@ -1382,6 +1382,82 @@ def new_ec_case_update_monitor():
         }), 500
 
 
+@app.route('/ec-cases-html-register', methods=['GET'])
+def ec_cases_html_register():
+    """
+    Register new EC merger cases via Playwright scraping.
+    Scrapes the EC Competition portal, parses detail pages, matches deals via LLM,
+    and inserts new cases into ec_cases collection.
+    Process runs in background - returns immediately.
+    """
+    try:
+        from new_ec_cases_html import run as ec_cases_html_run, START_URL
+
+        def run_register():
+            try:
+                logger.info("Starting EC cases HTML register (Playwright) in background")
+                ec_cases_html_run(START_URL, max_pages=None, headed=False)
+                logger.info("EC cases HTML register completed successfully")
+            except Exception as e:
+                logger.error(f"Error in EC cases HTML register: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_register, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "EC cases HTML register (Playwright) started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting EC cases HTML register: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/ec-cases-html-update-monitor', methods=['GET'])
+def ec_cases_html_update_monitor():
+    """
+    Monitor open EC merger cases for updates via Playwright scraping.
+    Scrapes each open case's detail page, compares with DB record,
+    sends email notifications for changes, and closes cases with empty investigation_phase.
+    Process runs in background - returns immediately.
+    """
+    try:
+        from new_ec_cases_update_monitor import run as ec_update_monitor_run
+
+        def run_monitor():
+            try:
+                logger.info("Starting EC cases HTML update monitor (Playwright) in background")
+                ec_update_monitor_run(headed=False, max_cases=None)
+                logger.info("EC cases HTML update monitor completed successfully")
+            except Exception as e:
+                logger.error(f"Error in EC cases HTML update monitor: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_monitor, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "EC cases HTML update monitor (Playwright) started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting EC cases HTML update monitor: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 @app.route('/new-fs-case-update-monitor-new', methods=['GET'])
 def new_fs_case_update_monitor_new():
     """

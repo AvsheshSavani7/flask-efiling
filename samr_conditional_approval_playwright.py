@@ -283,7 +283,7 @@ def match_deal_with_llm(title_en, title_cn):
     deals_text = "\n".join(lines)
 
     prompt = f"""
-You are an M&A deal analyst. Given the translated title of a Chinese conditional approval notice, determine whether it explicitly relates to any of the companies listed below.
+You are an M&A deal analyst. Given the translated title of a Chinese conditional approval notice, determine whether it directly relates to any of the companies listed below.
 
 DEALS TO MATCH:
 {deals_text}
@@ -295,38 +295,40 @@ TITLE (Original Chinese):
 {title_cn}
 
 INSTRUCTIONS:
-1. Compare the title text with BOTH Target and Acquirer names in the deals list.
-2. When matching, also consider target_aliases and parent_aliases - if the title matches an alias, treat it as a match for that deal.
-3. Look for EXACT matches, partial matches, or variations of company names.
-4. Consider that the title might be:
-   - The full company name
-   - A department/division name that matches the company
-   - A translated version of the company name
-   - An alias (target_aliases or parent_aliases)
-5. If the title text appears in ANY form in a deal's Target, Acquirer, or aliases, it's a match.
-6. Be thorough - check if the title is contained within or matches any company name.
-7. Accept suffix variations (Inc., Ltd., PLC).
+1. Extract only the company names that are explicitly and directly mentioned in the conditional approval notice title.
+2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, service providers, or any company not actually written in the conditional approval notice title.
+3. For each deal in the deals database, check whether:
+   - the Acquirer (or its known alias), AND
+   - the Target (or its known alias)
+   are both directly mentioned in the conditional approval notice title.
+4. A deal is a valid match only if BOTH sides of the same deal are confidently matched from the conditional approval notice title:
+   - one match for the Acquirer side
+   - one match for the Target side
+5. Do not return a match if only one side is present, even if that single company is an exact match.
+6. Allow only normal name variations when they clearly refer to the same company, such as:
+   - punctuation differences
+   - “Inc.” vs “Incorporated”
+   - “Corp.” vs “Corporation”
+   - “Ltd” vs “Limited”
+   - obvious spacing/casing differences
+7. Do not match based only on sector, business type, article topic, indirect association, or partial deal overlap.
+8. If the conditional approval notice title does not directly name both companies for the same deal, return None.
 
-MATCHING EXAMPLES:
-- "General Motors" matches "General Motors Corporation" (partial match)
-- "Vibra Residencial" matches "Vibra Residencial Ltda." (partial match)
-- "Compass" matches "Compass Digital Acquisition Corp." (partial match)
 
 RESPONSE FORMAT:
-- If you find a match, respond EXACTLY in this format:
+- If you find BOTH the Acquirer and Target for one deal are directly matched, respond EXACTLY in this format:
   Match: DEAL_ID|COMPANY_NAME|(target|acquirer)
   Example: Match: 69665014d0bb42af1044aecd|General Motors|acquirer
 
-- If NO match is found after thorough checking, respond with:
+- If no deal satisfies this rule, respond exactly:
   None
 
-IMPORTANT: Check carefully - if the title matches or is contained in any Target, Acquirer, or alias name, return the match.
 """
     try:
         response = client.chat.completions.create(
             model="gpt-5.2",
             messages=[
-                {"role": "system", "content": "You are an expert in M&A deal recognition. Your job is to find matches between conditional approval notice titles and deal companies. If the title matches or is contained in any Target or Acquirer name, return the match. Be thorough and check all possibilities."},
+                {"role": "system", "content": "You are an expert in M&A deal recognition. Your job is to find matches between conditional approval notice titles and deal companies. If the title matches or is contained in any Target and Acquirer name, return the match. Be thorough and check all possibilities."},
                 {"role": "user", "content": prompt},
             ],
 
