@@ -24,6 +24,7 @@ from mongodb_connection import (
     init_mongodb_connection,
     is_connected,
 )
+from cade_cases_register import match_case_to_deal
 from html import escape as escape_html
 
 # ---------------------------------------------------------------------------
@@ -575,6 +576,7 @@ def update_case_in_db(
     live_table_records: List[Dict[str, Any]],
     live_historico_records: List[Dict[str, Any]],
     close_case: bool = False,
+    new_deal_id: Optional[str] = None,
 ) -> bool:
     """Apply detected changes to the stored record."""
     try:
@@ -587,6 +589,9 @@ def update_case_in_db(
 
         if close_case:
             update_fields["is_open"] = False
+
+        if new_deal_id:
+            update_fields["deal_id"] = new_deal_id
 
         for field, _old, new_val, change_type in changes:
             if field == "type":
@@ -942,37 +947,67 @@ def process_brazil_cases_updates(headless: bool = True):
                         )
                         continue
 
-                # No deal_id (or deal not found) → check USA relation
-                is_usa = False
+                # No deal_id (or deal not found) → try LLM deal matching first
                 interessados_text = case_doc.get(
                     "interessados") or live_interessados
+                translated_text = case_doc.get(
+                    "interessados_en") or translate_to_english(interessados_text) if interessados_text else ""
+
+                matched_deal_id = None
                 if interessados_text:
                     try:
-                        company_details = (
-                            f"Process: {process_num}\n"
-                            f"Type: {live_type}\n"
-                            f"Registration Date: {case_doc.get('registration_date', '')}\n"
-                            f"Interested Parties (PT): {interessados_text}\n"
-                            f"Interested Parties (EN): {case_doc.get('interessados_en', '')}\n"
-                            f"Detail URL: {detail_url}"
-                        )
-                        is_usa = bool(verify_usa_relation(
-                            company_details=company_details,
-                            case_type="BRAZIL",
-                        ))
+                        matched_deal_id = match_case_to_deal(
+                            interessados_text, translated_text)
                     except Exception as e:
-                        print(f"    ⚠️ Error verifying USA relation: {e}")
+                        print(f"    ⚠️ Error during deal matching: {e}")
 
-                if is_usa:
-                    print("    🇺🇸 USA-related — sending email")
-                    send_update_email(case_doc, changes, None)
+                if matched_deal_id:
+                    print(f"    🎯 Deal match found (deal_id={matched_deal_id})")
+                    matched_deal = None
+                    if deals_collection is not None:
+                        try:
+                            matched_deal = deals_collection.find_one(
+                                {"_id": ObjectId(matched_deal_id)}
+                            )
+                        except Exception as e:
+                            print(f"    ⚠️ Error resolving matched deal: {e}")
 
-                # Always update DB (with or without email)
-                update_case_in_db(
-                    cases_collection, case_doc, changes,
-                    live_table, live_historico,
-                    close_case=should_close,
-                )
+                    send_update_email(case_doc, changes, matched_deal)
+                    update_case_in_db(
+                        cases_collection, case_doc, changes,
+                        live_table, live_historico,
+                        close_case=should_close,
+                        new_deal_id=matched_deal_id,
+                    )
+                else:
+                    # No deal match → fall back to USA relation check
+                    is_usa = False
+                    if interessados_text:
+                        try:
+                            company_details = (
+                                f"Process: {process_num}\n"
+                                f"Type: {live_type}\n"
+                                f"Registration Date: {case_doc.get('registration_date', '')}\n"
+                                f"Interested Parties (PT): {interessados_text}\n"
+                                f"Interested Parties (EN): {case_doc.get('interessados_en', '')}\n"
+                                f"Detail URL: {detail_url}"
+                            )
+                            is_usa = bool(verify_usa_relation(
+                                company_details=company_details,
+                                case_type="BRAZIL",
+                            ))
+                        except Exception as e:
+                            print(f"    ⚠️ Error verifying USA relation: {e}")
+
+                    if is_usa:
+                        print("    🇺🇸 USA-related — sending email")
+                        send_update_email(case_doc, changes, None)
+
+                    update_case_in_db(
+                        cases_collection, case_doc, changes,
+                        live_table, live_historico,
+                        close_case=should_close,
+                    )
 
                 time.sleep(2)
 

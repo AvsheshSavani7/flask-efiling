@@ -274,18 +274,28 @@ ACCC CASE TITLE TO MATCH:
 {title}
 
 MATCHING INSTRUCTIONS:
-1. Extract ALL company names from the ACCC title (both acquirer and target / vendors).
-2. Check if ANY of these company names appears as either a Target OR Acquirer in the deals database.
-3. When matching, also consider target_aliases and parent_aliases - if the title matches an alias, treat it as a match for that deal.
-4. Consider variations, abbreviations, and partial matches.
-5. Match on a SINGLE company name - you don't need both sides to match.
+1. . Extract only the company names that are explicitly and directly mentioned in the ACCC title (both acquirer and target / vendors).
+2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, service providers, or any company not actually written in the ACCC title.
+3. For each deal in the deals database, check whether:
+   - the Acquirer (or its known alias), AND
+   - the Target (or its known alias)
+   are both directly mentioned in the ACCC title.
+4. A deal is a valid match only if BOTH sides of the same deal are confidently matched from the ACCC title:
+   - one match for the Acquirer side
+   - one match for the Target side
+5. Do not return a match if only one side is present, even if that single company is an exact match.
+6. Allow only normal name variations when they clearly refer to the same company, such as:
+   - punctuation differences
+   - “Inc.” vs “Incorporated”
+   - “Corp.” vs “Corporation”
+   - “Ltd” vs “Limited”
+   - obvious spacing/casing differences
+7. Do not match based only on sector, business type, article topic, indirect association, or partial deal overlap.
+8. If the ACCC title does not directly name both companies for the same deal, return None.
 
 RESPONSE FORMAT:
-- If you find ANY match, respond EXACTLY in this format (no extra text):
-  Match: DEAL_ID
-
-- If NO match is found after thorough checking, respond with exactly:
-  None
+-If BOTH the Acquirer and Target for one deal are directly matched, respond EXACTLY: Match: DEAL_ID
+-If no deal satisfies this rule, respond exactly: None
 """
 
         res = client.chat.completions.create(

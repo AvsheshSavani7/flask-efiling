@@ -17,6 +17,7 @@ from mongodb_connection import (
     is_connected,
 )
 from llm_verification_service import verify_usa_relation
+from accc_cases_register import match_case_to_deal
 
 
 load_dotenv(".env")
@@ -450,99 +451,6 @@ def detect_changes(
     diff_recursive("", old_filtered, new_filtered)
 
     return changes
-
-
-def match_case_to_deal(title: str) -> Optional[str]:
-    """
-    Use LLM to match the ACCC case to an existing deal.
-
-    Returns deal_id string or None.
-    """
-    try:
-        deals_collection = get_deals_collection()
-        # PyMongo collections do not support truthiness; compare explicitly
-        if deals_collection is None:
-            return None
-
-        # Only consider active / open deals for matching
-        status_filter = {
-            "$or": [
-                {"deal_status": {"$in": ["Open", "Unknown"]}},
-                {"deal_status": None},
-                {"deal_status": {"$exists": False}},
-            ]
-        }
-        deals = list(deals_collection.find(status_filter))
-        print(f"    🔍 Deals: length {len(deals)}")
-        if not deals:
-            return None
-
-        lines = []
-        for d in deals:
-            deal_id = str(d.get("_id"))
-            target = d.get("target") or d.get("target_name", "N/A")
-            acquirer = d.get("acquirer") or d.get("acquire_name", "N/A")
-            line = f"Deal ID: {deal_id} | Target: {target} | Acquirer: {acquirer}"
-            target_aliases = d.get("target_aliases") or []
-            parent_aliases = d.get("parent_aliases") or []
-            if target_aliases:
-                line += f" | Target aliases: {', '.join(str(a) for a in target_aliases)}"
-            if parent_aliases:
-                line += f" | Parent aliases: {', '.join(str(a) for a in parent_aliases)}"
-            lines.append(line)
-
-        deals_text = "\n".join(lines)
-
-        prompt = f"""You are an expert M&A deal matcher. Your task is to determine if ANY company mentioned in the ACCC case title appears in our deals database.
-
-DEALS DATABASE:
-{deals_text}
-
-ACCC CASE TITLE TO MATCH:
-{title}
-
-MATCHING INSTRUCTIONS:
-1. Extract ALL company names from the ACCC title (both acquirer and target / vendors).
-2. Check if ANY of these company names appears as either a Target OR Acquirer in the deals database.
-3. When matching, also consider target_aliases and parent_aliases - if the title matches an alias, treat it as a match for that deal.
-4. Consider variations, abbreviations, and partial matches.
-5. Match on a SINGLE company name - you don't need both sides to match.
-
-RESPONSE FORMAT:
-- If you find ANY match, respond EXACTLY in this format (no extra text):
-  Match: DEAL_ID
-
-- If NO match is found after thorough checking, respond with exactly:
-  None
-"""
-
-        res = client.chat.completions.create(
-            model="gpt-5.2",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an expert M&A deal identifier and matcher.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-
-        )
-
-        content = res.choices[0].message.content.strip()
-        print(f"    🔍 LLM response: {content}")
-        if not content.lower().startswith("match"):
-            return None
-
-        # Expect exactly "Match: DEAL_ID"
-        try:
-            _prefix, deal_id_raw = content.split(":", 1)
-            deal_id = deal_id_raw.strip()
-            return deal_id or None
-        except Exception:
-            return None
-    except Exception as e:
-        print(f"    ⚠️ LLM match error: {e}")
-        return None
 
 
 def build_change_summary(changes: List[Tuple[str, Any, Any, str]]) -> str:
