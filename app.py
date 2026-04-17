@@ -1395,7 +1395,8 @@ def ec_cases_html_register():
 
         def run_register():
             try:
-                logger.info("Starting EC cases HTML register (Playwright) in background")
+                logger.info(
+                    "Starting EC cases HTML register (Playwright) in background")
                 ec_cases_html_run(START_URL, max_pages=None, headed=False)
                 logger.info("EC cases HTML register completed successfully")
             except Exception as e:
@@ -1433,11 +1434,14 @@ def ec_cases_html_update_monitor():
 
         def run_monitor():
             try:
-                logger.info("Starting EC cases HTML update monitor (Playwright) in background")
+                logger.info(
+                    "Starting EC cases HTML update monitor (Playwright) in background")
                 ec_update_monitor_run(headed=False, max_cases=None)
-                logger.info("EC cases HTML update monitor completed successfully")
+                logger.info(
+                    "EC cases HTML update monitor completed successfully")
             except Exception as e:
-                logger.error(f"Error in EC cases HTML update monitor: {str(e)}")
+                logger.error(
+                    f"Error in EC cases HTML update monitor: {str(e)}")
                 import traceback
                 traceback.print_exc()
 
@@ -1497,6 +1501,86 @@ def new_fs_case_update_monitor_new():
 
     except Exception as e:
         logger.error(f"❌ Error starting FS case update monitor: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/new-fs-cases-html-register', methods=['GET'])
+def fs_cases_html_register():
+    """
+    Register new EC Foreign Subsidies cases via Playwright scraping.
+    Scrapes the EC Competition portal (FS instrument), parses detail pages,
+    matches deals via LLM, and inserts new cases into fs_cases collection.
+    Process runs in background - returns immediately.
+    """
+    try:
+        from new_fs_cases_html import run as fs_cases_html_run, START_URL
+
+        def run_register():
+            try:
+                logger.info(
+                    "Starting FS cases HTML register (Playwright) in background")
+                fs_cases_html_run(START_URL, max_pages=None, headed=False)
+                logger.info("FS cases HTML register completed successfully")
+            except Exception as e:
+                logger.error(f"Error in FS cases HTML register: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_register, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "FS cases HTML register (Playwright) started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting FS cases HTML register: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/new-fs-cases-html-update-monitor', methods=['GET'])
+def fs_cases_html_update_monitor():
+    """
+    Monitor open EC Foreign Subsidies cases for updates via Playwright scraping.
+    Scrapes each open case's detail page, compares with DB record,
+    sends email notifications for changes, and closes cases with real last_decision_date.
+    Process runs in background - returns immediately.
+    """
+    try:
+        from new_fs_cases_html_update_monitor import run as fs_update_monitor_run
+
+        def run_monitor():
+            try:
+                logger.info(
+                    "Starting FS cases HTML update monitor (Playwright) in background")
+                fs_update_monitor_run(headed=False, max_cases=None)
+                logger.info(
+                    "FS cases HTML update monitor completed successfully")
+            except Exception as e:
+                logger.error(
+                    f"Error in FS cases HTML update monitor: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_monitor, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "FS cases HTML update monitor (Playwright) started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting FS cases HTML update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -1910,9 +1994,11 @@ def cade_cases_register_endpoint():
                     headless=headless,
                     test_mode=False,
                 )
-                logger.info("✅ CADE cases register scraper completed successfully")
+                logger.info(
+                    "✅ CADE cases register scraper completed successfully")
             except Exception as e:
-                logger.error(f"❌ Error in CADE cases register scraper: {str(e)}")
+                logger.error(
+                    f"❌ Error in CADE cases register scraper: {str(e)}")
                 import traceback
                 traceback.print_exc()
 
@@ -1963,7 +2049,8 @@ def cade_cases_update_monitor_endpoint():
             try:
                 logger.info("Starting CADE cases update monitor in background")
                 process_brazil_cases_updates(headless=headless)
-                logger.info("✅ CADE cases update monitor completed successfully")
+                logger.info(
+                    "✅ CADE cases update monitor completed successfully")
             except Exception as e:
                 logger.error(f"❌ Error in CADE cases update monitor: {str(e)}")
                 import traceback
