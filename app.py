@@ -16,6 +16,8 @@ from samr_public_notice_db import main as samr_main
 from samr_conditional_approval_playwright import main as samr_conditional_main
 from samr_unconditional_approval_playwright import main as samr_unconditional_main
 from uk_cma_mergers_scraper_atom import main as uk_cma_main
+from new_uk_cma_mergers_scraper_atom import main as new_uk_cma_main
+from new_uk_cma_mergers_update_monitor import main as new_uk_cma_update_monitor_main
 from bundeskartellamt_scraper import main as bundeskartellamt_main
 from bundeskartellamt_initial import main as bundeskartellamt_initial_main
 from bundeskartellamt_press_release import main as bundeskartellamt_press_release_main
@@ -1089,6 +1091,88 @@ def uk_cma_scraper():
 
     except Exception as e:
         logger.error(f"Error starting CMA scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/new-uk-cma-scraper', methods=['GET'])
+def new_uk_cma_scraper():
+    """
+    Scrape UK CMA open merger cases, match with deals, and store in uk_cma_cases collection.
+    Process runs in background - returns immediately.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        def run_scraper():
+            try:
+                logger.info("Starting new UK CMA open mergers scraper in background")
+                new_uk_cma_main()
+                logger.info("New UK CMA open mergers scraper completed successfully.")
+            except Exception as e:
+                logger.error(f"Error in background new UK CMA scraper: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_scraper, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "New UK CMA open mergers scraping process started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting new UK CMA scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/new-uk-cma-update-monitor', methods=['GET'])
+def new_uk_cma_update_monitor():
+    """
+    Monitor existing open UK CMA cases for updates, detect changes, and send emails.
+    Process runs in background - returns immediately.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        def run_monitor():
+            try:
+                logger.info("Starting new UK CMA update monitor in background")
+                new_uk_cma_update_monitor_main()
+                logger.info("New UK CMA update monitor completed successfully.")
+            except Exception as e:
+                logger.error(f"Error in background new UK CMA update monitor: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_monitor, daemon=True)
+        thread.start()
+
+        return jsonify({
+            "success": True,
+            "message": "New UK CMA update monitor started in background",
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting new UK CMA update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)

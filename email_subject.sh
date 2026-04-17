@@ -1,87 +1,89 @@
+### Email subject for each case type ###
 # ACCC:
     New Case:
-    Matched: subject = f"FRMD:ACCC (New) – {case_number}: {title}"
-    Unmatched: subject = f"FRUD: ACCC Case (USA-Related) – {case_number}"
+    Matched: subject = f"[FRMD] ACCC Case (New) – {case_number}: {title}"
+    Unmatched: subject = f"[FRUD] ACCC Case (USA-Related) – {case_number}"
 
     Updated Case:
-    subject = f"FRMD: ACCC Case (Updated) – {case_number}: {title}"
+    subject = f"[FRMD] ACCC Case (Updated) – {case_number}: {title}"
 
 # CADE Brazil:
+    
     New Case:
-    Matched: subject = f"FRMD: CADE Brazil Regulatory (New) – {target} / {acquirer}"
-    Unmatched: subject = f"FRUD: CADE Brazil (USA-Related) – {process}"
+    Matched: subject = f"[FRMD] CADE Brazil Regulatory (New) – {target} / {acquirer}"
+    Unmatched: subject = f"[FRUD] CADE Brazil (USA-Related) – {process}"
 
     Update:
-    subject = f"FRMD: CADE Brazil (Updated) – {new_records_count} New Record(s) – {target} / {acquirer}"
+    subject = f"[FRMD] CADE Brazil (Updated) – {new_records_count} New Record(s) – {target} / {acquirer}"
 
 # SAMR China public notice:
     New Case:
-    Matched: subject = f"FRMD: SAMR China Regulatory (New) – {target} / {acquirer}"
-    Unmatched: subject = f"FRUD: SAMR China Public Notice (USA-Related) – {title_en[:60]}"
+    Matched: subject = f"[FRMD] SAMR China Regulatory (New) – {target} / {acquirer}"
+    Unmatched: subject = f"[FRUD] SAMR China Public Notice (USA-Related) – {title_en[:60]}"
 
     # SAMR China conditional approval:
     New Case:
-    Matched: subject = f"FRMD: SAMR China Conditional Approval (New) – {target} / {acquirer}"
-    Unmatched: subject = f"FRUD: SAMR China Conditional Approval (USA-Related) – {title_en[:60]}"
+    Matched: subject = f"[FRMD] SAMR China Conditional Approval (New) – {target} / {acquirer}"
+    Unmatched: subject = f"[FRUD] SAMR China Conditional Approval (USA-Related) – {title_en[:60]}"
 
 # SAMR China unconditional approval:
     New Case:
-    Matched:  subject = f"FRMD: SAMR China Unconditional Approval (New) – {target} / {acquirer}"
-    Unmatched: subject = f"FRUD: SAMR China Unconditional Approval (USA-Related) – {usa_company}"
+    Matched:  subject = f"[FRMD] SAMR China Unconditional Approval (New) – {target} / {acquirer}"
+    Unmatched: subject = f"[FRUD] SAMR China Unconditional Approval (USA-Related) – {usa_company}"
 
 
 # UK CMA mergers:
     New Case:
-    Matched: subject = f"FRMD: UK CMA Merger Case(New) – {target} / {acquirer}"
+    Matched: subject = f"[FRMD] UK CMA Merger Case(New) – {target} / {acquirer}"
     
-    Unmatched: subject = f"FRUD: UK CMA Merger Case (USA-Related) – {title[:50]}"
+    Unmatched: subject = f"[FRUD] UK CMA Merger Case (USA-Related) – {title[:50]}"
     Update:
-    subject = f"FRMD: UK CMA Merger Case (Updated) – {target} / {acquirer}"
+    subject = f"[FRMD] UK CMA Merger Case (Updated) – {target} / {acquirer}"
 
 #German Bundeskartellamt initial filing:
     New Case:
-    Matched: subject = f"FRMD: German Bundeskartellamt Initial Filing (New) – {target} / {acquirer}"
+    Matched: subject = f"[FRMD] German Bundeskartellamt Initial Filing (New) – {target} / {acquirer}"
     
     Update:
-    subject = f"FRMD: German Bundeskartellamt Initial Filing (Updated) – {target} / {acquirer}"
+    subject = f"[FRMD] German Bundeskartellamt Initial Filing (Updated) – {target} / {acquirer}"
 
 
 #German Bundeskartellamt press release:
     New Case:
-    Matched: subject = f"FRMD: German Bundeskartellamt Press Release (New) – {target} / {acquirer}"
+    Matched: subject = f"[FRMD] German Bundeskartellamt Press Release (New) – {target} / {acquirer}"
 
     Update:
-    subject = f"FRMD: German Bundeskartellamt Press Release (Updated) – {target} / {acquirer}"
+    subject = f"[FRMD] German Bundeskartellamt Press Release (Updated) – {target} / {acquirer}"
 
 #EC Merger Case:
     New Case:
-    Matched: subject = f"FRMD: EC Merger Case (New) – {target} / {acquirer}"
-    Unmatched: subject = f"FRUD: EC Merger Case (USA-Related) – {case_num}: {companies_str}"
+    Matched: subject = f"[FRMD] EC Merger Case (New) – {target} / {acquirer}"
+    Unmatched: subject = f"[FRUD] EC Merger Case (USA-Related) – {case_num}: {companies_str}"
 
     Update:
-    subject = f"FRMD: EC Merger Case (Updated) – {case_number}: {case_title}"
+    subject = f"[FRMD] EC Merger Case (Updated) – {case_number}: {case_title}"
 
 #EC Foreign Subsidies Case:
     New Case:
-    Matched: subject = f"FRMD: EC Foreign Subsidies Case (New) – {target} / {acquirer}"
+    Matched: subject = f"[FRMD] EC Foreign Subsidies Case (New) – {target} / {acquirer}"
 
     Update:
-    subject = f"FRMD: EC Foreign Subsidies Case (Updated) – {case_number}: {case_title}"
+    subject = f"[FRMD] EC Foreign Subsidies Case (Updated) – {case_number}: {case_title}"
   
   
 #FTC
     New Case:
-    Matched: subject = f"FRMD: FTC Early Termination (New) – {target} / {acquirer}"
+    Matched: subject = f"[RFTCMD] FTC Early Termination (New) – {target} / {acquirer}"
 
-    Unmatched: subject = f"FRUD: FTC Early Termination (USA-Related) – {case_id}"
+    Unmatched: subject = f"[RFTCUD] FTC Early Termination (USA-Related) – {case_id}"
 
 #New NZ ComCom case:
-    Matched: subject = f"FRMD: NZ Case (New) – {case_number}: {title}"
-    Unmatched: subject = f"FRUD: NZ Case (USA-Related) – {case_number}"
+    Matched: subject = f"[FRMD] NZ Case (New) – {case_number}: {title}"
+    Unmatched: subject = f"[FRUD] NZ Case (USA-Related) – {case_number}"
   
 
     Update:
-    subject = f"FRMD: NZ Case (Updated) – {case_number}: {target} / {acquirer}"
+    subject = f"[FRMD] NZ Case (Updated) – {case_number}: {target} / {acquirer}"
 
 #canada competition bureau:
     New Case:
@@ -96,6 +98,53 @@
     
 
 
+### Active routes and files ###
+
+    EC:
+        File: new_ec_cases_html.py
+        Route:"/ec-cases-html-register"
+
+        File: new_ec_cases_update_monitor.py
+        Route:"ec-cases-html-update-monitor"
+
+    FS:
+        File: new_fs_cases_html.py
+        Route:"/new-fs-cases-html-register"
+
+        File: new_fs_cases_html_update_monitor.py
+        Route:"/new-fs-cases-html-update-monitor"
+
+    ACCC:
+
+        File: accc_cases_register
+        Route:"/new-accc-cases-register"
+
+        File: accc_case_update_monitor.py
+        Route:"/accc-case-update-monitor"
 
 
-    
+    CADE Brazil:
+
+        File: cade_cases_register.py
+        Route:"/new-cade-cases-register"
+
+        File: cade_cases_update_monitor.py
+        Route:"/new-cade-cases-update-monitor"
+
+    FTC:
+        File: ftc_early_termination_scraper.py
+        Route:"/ftc-early-termination-scraper"
+
+    NZ ComCom:
+        File: nz_comcom_case_register_to_db.py
+        Route:"/new-nz-comcom-case-register-to-db"
+
+        File: nz_cases_update_monitor.py
+        Route:"/new-nz-cases-update-monitor"
+
+    Canada Competition Bureau:
+        File: canada_cases_register.py
+        Route:"/new-canada-cases-register"
+
+        File: canada_cases_update_monitor.py
+        Route:"/new-canada-cases-update-monitor"
