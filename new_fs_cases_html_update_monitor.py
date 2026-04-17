@@ -92,8 +92,8 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 ENV_PATH = ".env"
 N8N_WEBHOOK_URL = os.getenv(
     "N8N_WEBHOOK_URL",
-    # "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6",
-    "https://n8n-xwx1.onrender.com/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
+    "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6",
+    # "https://n8n-xwx1.onrender.com/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
 )
 
 # Fields to exclude from comparison:
@@ -514,10 +514,35 @@ def generate_update_email_html(
 
     if changed_names:
         html += (
-            f'<div style="padding:14px 18px;margin:18px 28px;border-radius:6px;font-size:14px;'
-            f'font-weight:600;color:#dc2626;background-color:#fef2f2;border-left:4px solid #ef4444;">'
+            '<div style="padding:14px 18px;margin:18px 28px;border-radius:6px;font-size:14px;'
+            'font-weight:600;color:#dc2626;background-color:#fef2f2;border-left:4px solid #ef4444;">'
             f'This case was updated. Changed fields: {", ".join(changed_names)}</div>'
         )
+        html += (
+            '<div style="margin:0 28px 18px 28px;border:1px solid #e5e7eb;border-radius:6px;overflow:hidden;">'
+            '<table style="width:100%;border-collapse:collapse;font-size:13px;">'
+            '<thead><tr style="background:#f9fafb;">'
+            '<th style="text-align:left;padding:10px 14px;color:#6b7280;font-weight:700;border-bottom:1px solid #e5e7eb;">Field</th>'
+            '<th style="text-align:left;padding:10px 14px;color:#6b7280;font-weight:700;border-bottom:1px solid #e5e7eb;">Previous Value</th>'
+            '<th style="text-align:left;padding:10px 14px;color:#6b7280;font-weight:700;border-bottom:1px solid #e5e7eb;">New Value</th>'
+            '</tr></thead><tbody>'
+        )
+        for diff_path, old_val, new_val in differences:
+            def _fmt_val(v):
+                if v is None:
+                    return '<span style="color:#9ca3af;font-style:italic;">(empty)</span>'
+                if isinstance(v, (dict, list)):
+                    return json.dumps(v, ensure_ascii=False, default=str)
+                return str(v)
+            label = diff_path.replace("_", " ").replace(".", " > ")
+            html += (
+                '<tr>'
+                f'<td style="padding:8px 14px;border-bottom:1px solid #f3f4f6;font-weight:600;color:#374151;">{label}</td>'
+                f'<td style="padding:8px 14px;border-bottom:1px solid #f3f4f6;color:#ef4444;text-decoration:line-through;">{_fmt_val(old_val)}</td>'
+                f'<td style="padding:8px 14px;border-bottom:1px solid #f3f4f6;color:#059669;font-weight:700;">{_fmt_val(new_val)}</td>'
+                '</tr>'
+            )
+        html += '</tbody></table></div>'
 
     # Decisions section
     decisions = case.get("decisions") or []
@@ -721,6 +746,12 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                 if name not in changed_names:
                     changed_names.append(name)
             print(f"  Changes detected: {', '.join(changed_names)}")
+            for diff_path, old_val, new_val in differences:
+                old_display = json.dumps(old_val, ensure_ascii=False) if isinstance(
+                    old_val, (dict, list)) else str(old_val) if old_val is not None else "(empty)"
+                new_display = json.dumps(new_val, ensure_ascii=False) if isinstance(
+                    new_val, (dict, list)) else str(new_val) if new_val is not None else "(empty)"
+                print(f"    {diff_path}: {old_display} -> {new_display}")
 
             # Check last_decision_date for is_open
             extra_fields: Dict[str, Any] = {}
