@@ -351,49 +351,31 @@ def detect_changes(db_record, scraped):
 # ===================================================================
 
 def match_title_with_deals(title):
+    """Ask LLM if this CMA case title matches any deal. Returns deal_id or None."""
     global deals
     if not deals:
         print("⚠️ Deals list is empty, reloading...")
         load_deals()
 
-    deals_list = []
-    for deal in deals:
-        info = {"deal_id": deal.get("deal_id", "")}
-        target = deal.get("target") or deal.get("target_name", "")
-        acquirer = deal.get("acquirer") or deal.get("acquire_name", "")
-        if target:
-            info["target"] = target
-        if acquirer:
-            info["acquirer"] = acquirer
-
-        target_aliases = deal.get("target_aliases") or []
-        parent_aliases = deal.get("parent_aliases") or []
-        if isinstance(target_aliases, list) and target_aliases:
-            info["target_aliases"] = target_aliases
-        if isinstance(parent_aliases, list) and parent_aliases:
-            info["parent_aliases"] = parent_aliases
-
-        if target or acquirer:
-            deals_list.append(info)
-
-    if not deals_list:
+    if not deals:
         print("⚠️ No deals with company names found")
-        return "None"
+        return None
 
     lines = []
-    for d in deals_list:
-        line = f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {d.get('target', 'N/A')} | Acquirer: {d.get('acquirer', 'N/A')}"
-        ta = d.get("target_aliases", []) or []
-        pa = d.get("parent_aliases", []) or []
-        if ta:
-            line += f" | Target aliases: {', '.join(str(a) for a in ta)}"
-        if pa:
-            line += f" | Parent aliases: {', '.join(str(a) for a in pa)}"
+    for deal in deals:
+        target = deal.get("target") or deal.get("target_name", "N/A")
+        acquirer = deal.get("acquirer") or deal.get("acquire_name", "N/A")
+        if not target and not acquirer:
+            continue
+        line = f"Deal ID: {deal.get('deal_id', 'N/A')} | Target: {target} | Acquirer: {acquirer}"
+        for alias_key in ("target_aliases", "parent_aliases"):
+            aliases = deal.get(alias_key) or []
+            if aliases:
+                line += f" | {alias_key}: {', '.join(str(a) for a in aliases)}"
         lines.append(line)
     deals_text = "\n".join(lines)
 
-    prompt = f"""
-You are a professional M&A analyst specializing in UK merger cases.
+    prompt = f"""You are a professional M&A analyst specializing in UK merger cases.
 
 Below is a CMA merger case title. Your task is to match it with any of the deals listed below.
 
@@ -403,26 +385,28 @@ DEALS TO MATCH:
 CASE TITLE: {title}
 
 INSTRUCTIONS:
-1. Compare the case title with BOTH Target and Acquirer names in the deals list.
-2. When matching, also consider target_aliases and parent_aliases - if the title matches an alias, treat it as a match for that deal.
-3. Look for EXACT matches, partial matches, or variations of company names.
-4. Consider that the title might be:
-   - The full company name
-   - A department/division name that matches the company
-   - An alias (target_aliases or parent_aliases)
-5. If the title appears in ANY form in a deal's Target, Acquirer, or aliases, it's a match.
-6. Accept suffix variations (Inc., Ltd., PLC).
+1. Extract only the company names that are explicitly and directly mentioned in the UK CMA case text (title).
+2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, service providers, or any company not actually written in the UK CMA case text.
+3. For each deal in the deals database, check whether:
+   - the Acquirer (or its known alias), AND
+   - the Target (or its known alias)
+   are both directly mentioned in the UK CMA case text.
+4. A deal is a valid match only if BOTH sides of the same deal are confidently matched from the UK CMA case text:
+   - one match for the Acquirer side
+   - one match for the Target side
+5. Do not return a match if only one side is present, even if that single company is an exact match.
+6. Allow only normal name variations when they clearly refer to the same company, such as:
+   - punctuation differences
+   - “Inc.” vs “Incorporated”
+   - “Corp.” vs “Corporation”
+   - “Ltd” vs “Limited”
+   - obvious spacing/casing differences
+7. Do not match based only on sector, business type, article topic, indirect association, or partial deal overlap.
+8. If the UK CMA case text does not directly name both companies for the same deal, return None.
 
 RESPONSE FORMAT:
-- If you find a match, respond EXACTLY in this format:
-  Match: DEAL_ID|COMPANY_NAME|(target|acquirer)
-  Example: Match: 69665014d0bb42af1044aecd|Warburg Pincus|acquirer
-
-- If NO match is found after thorough checking, respond with:
-  None
-
-IMPORTANT: Check carefully - if the title matches or is contained in any Target, Acquirer, or alias name, return the match.
-"""
+If you find a match, respond EXACTLY: Match: DEAL_ID
+If no deal satisfies this rule, respond exactly: None"""
 
     with open(PROMPT_LOG_PATH, "a", encoding="utf-8") as f:
         f.write(
@@ -430,43 +414,31 @@ IMPORTANT: Check carefully - if the title matches or is contained in any Target,
 
     try:
         res = openai_client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.2",
             messages=[
                 {
                     "role": "system",
-                    "content": "You identify M&A deals from UK CMA merger case titles. Return Match: DEAL_ID|COMPANY|target|acquirer or None.",
+                    "content": "You identify M&A deals from UK CMA merger case titles. Respond only with Match: DEAL_ID or None.",
                 },
                 {"role": "user", "content": prompt},
-            ],
+            ]
         )
-        result = res.choices[0].message.content.strip()
-        print(f"  🧠 LLM match response: {result}")
-        return result
+        content = (res.choices[0].message.content or "").strip()
+        print(f"  🧠 LLM match response: {content}")
+        if not content.lower().startswith("match"):
+            return None
+        try:
+            _prefix, deal_id_raw = content.split(":", 1)
+            return deal_id_raw.strip() or None
+        except Exception:
+            return None
     except Exception as e:
         print(f"  ❌ LLM error: {e}")
-        return "None"
-
-
-def parse_match_result(match_result):
-    if not match_result or str(match_result).strip().lower() == "none":
         return None
-    stripped = str(match_result).strip()
-    if not stripped.lower().startswith("match:"):
-        return None
-    parts = stripped[6:].strip().split("|")
-    if len(parts) < 3:
-        return None
-    deal_id = parts[0].strip()
-    company_name = parts[1].strip()
-    role = parts[2].strip().lower().replace("(", "").replace(")", "")
-    if role not in ("target", "acquirer"):
-        role = "acquirer"
-    return deal_id, company_name, role
 
 
 def find_deal_by_id(deal_id):
-    deal_by_id = {str(d.get("deal_id", ""))
-                      : d for d in deals if d.get("deal_id")}
+    deal_by_id = {str(d.get("deal_id", ""))                  : d for d in deals if d.get("deal_id")}
     return deal_by_id.get(deal_id)
 
 
@@ -493,7 +465,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 """
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5.2",
             messages=[
                 {
                     "role": "system",
@@ -836,34 +808,30 @@ def process_case(db_record):
 
     if not deal_id:
         # No deal_id -> try LLM matching
-        match_result = match_title_with_deals(case_info["title"])
-        parsed = parse_match_result(match_result)
+        matched_deal_id = match_title_with_deals(case_info["title"])
+        deal_match = find_deal_by_id(
+            matched_deal_id) if matched_deal_id else None
 
-        if parsed:
-            matched_deal_id, company_name, role = parsed
-            deal_match = find_deal_by_id(matched_deal_id)
+        if deal_match:
+            acquirer = deal_match.get(
+                "acquirer") or deal_match.get("acquire_name", "N/A")
+            target = deal_match.get("target") or deal_match.get(
+                "target_name", "N/A")
+            print(f"  🎯 New match: {acquirer} / {target}")
 
-            if deal_match:
-                acquirer = deal_match.get(
-                    "acquirer") or deal_match.get("acquire_name", "N/A")
-                target = deal_match.get("target") or deal_match.get(
-                    "target_name", "N/A")
-                print(
-                    f"  🎯 New match: {company_name} ({role}) -> {acquirer} / {target}")
+            deal_id = matched_deal_id
 
-                deal_id = matched_deal_id
-
-                subj, html = generate_update_email_html(
-                    case_info, changes, deal_match)
-                send_email_via_webhook(subj, html, {
-                    "deal_id": deal_id,
-                    "title": case_info["title"],
-                    "url": detail_url,
-                    "is_update": True,
-                })
-            else:
-                print(f"  ⚠️ Deal ID from LLM not found: {matched_deal_id}")
+            subj, html = generate_update_email_html(
+                case_info, changes, deal_match)
+            send_email_via_webhook(subj, html, {
+                "deal_id": deal_id,
+                "title": case_info["title"],
+                "url": detail_url,
+                "is_update": True,
+            })
         else:
+            if matched_deal_id:
+                print(f"  ⚠️ Deal ID from LLM not found: {matched_deal_id}")
             # No match -> check USA relation
             print(f"  ➖ No deal match for: {case_info['title'][:60]}")
             try:
