@@ -19,7 +19,7 @@ from uk_cma_mergers_scraper_atom import main as uk_cma_main
 from new_uk_cma_mergers_scraper_atom import main as new_uk_cma_main
 from new_uk_cma_mergers_update_monitor import main as new_uk_cma_update_monitor_main
 from bundeskartellamt_scraper import main as bundeskartellamt_main
-from bundeskartellamt_initial import main as bundeskartellamt_initial_main
+from bundeskartellamt_initial_proxy import main as bundeskartellamt_initial_proxy_main
 from bundeskartellamt_press_release import main as bundeskartellamt_press_release_main
 from ec_case_register import run_ec_case_register as ec_case_register_main
 from fs_case_register import run_fs_case_register as fs_case_register_main
@@ -91,9 +91,9 @@ def home():
             "/nm-prc-download-extract": "POST - Download NM PRC e360 document by document param and extract text",
             "/brazil-scraper": "GET - Scrape CADE public notices and match with deals (date range: yesterday to today, query param: headless)",
             "/cade-brazil-monitor": "GET - Monitor existing Brazil deals for new table records updates (query param: headless)",
-            "/samr-public-scraper": "GET - Scrape SAMR China public notices and match with deals (query param: headless)",
-            "/samr-conditional-scraper": "GET - Scrape SAMR China conditional approval notices and match with deals (query params: headless, use_html)",
-            "/samr-unconditional-scraper": "GET - Scrape SAMR China unconditional approval notices and match with deals (query params: headless, use_html)",
+            "/new-samr-public-scraper": "GET - Scrape SAMR China public notices and match with deals (query param: headless)",
+            "/new-samr-conditional-scraper": "GET - Scrape SAMR China conditional approval notices and match with deals (query params: headless, use_html)",
+            "/new-samr-unconditional-scraper": "GET - Scrape SAMR China unconditional approval notices and match with deals (query params: headless, use_html)",
             "/uk-cma-scraper": "GET - Scrape UK CMA merger cases and match with deals (query params: use_html)",
             "/bundeskartellamt-scraper": "GET - Scrape Bundeskartellamt German merger cases and match with deals",
             "/bundeskartellamt-initial": "GET - Scrape Bundeskartellamt Laufende Verfahren (initial filing) and match with deals",
@@ -1252,7 +1252,7 @@ def bundeskartellamt_initial():
             try:
                 logger.info(
                     "Starting Bundeskartellamt Laufende Verfahren (initial) scraper in background")
-                result = bundeskartellamt_initial_main()
+                result = bundeskartellamt_initial_proxy_main()
                 if result.get("success"):
                     logger.info(
                         f"Bundeskartellamt initial scraper completed. Extracted {result.get('total_extracted', 0)} records, "
