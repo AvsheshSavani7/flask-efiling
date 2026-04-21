@@ -12,9 +12,9 @@ from nm_prc_service import login_nm_prc, get_html_from_nm_prc, extract_pdf_text_
 from nm_prc_document_download_extract import download_and_extract
 from cade_public_notice_brazil import main as cade_main
 from cade_brazil_update_monitor import monitor_brazil_deals
-from samr_public_notice_db import main as samr_main
-from samr_conditional_approval_playwright import main as samr_conditional_main
-from samr_unconditional_approval_playwright import main as samr_unconditional_main
+from new_samr_public_notice_db import main as new_samr_public_notice_main
+from new_samr_conditional_approval_db import main as new_samr_conditional_approval_main
+from new_samr_unconditional_approval_db import main as new_samr_unconditional_approval_main
 from uk_cma_mergers_scraper_atom import main as uk_cma_main
 from new_uk_cma_mergers_scraper_atom import main as new_uk_cma_main
 from new_uk_cma_mergers_update_monitor import main as new_uk_cma_update_monitor_main
@@ -845,8 +845,8 @@ def brazil_monitor():
         }), 500
 
 
-@app.route('/samr-public-scraper', methods=['GET'])
-def samr_public_scraper():
+@app.route('/new-samr-public-scraper', methods=['GET'])
+def new_samr_public_scraper():
     """
     Scrape SAMR China public notices and match with deals.
     Extracts records from SAMR website with cutoff date filtering.
@@ -871,17 +871,17 @@ def samr_public_scraper():
         def run_scraper():
             try:
                 logger.info(
-                    f"Starting SAMR public notice scraper in background (headless={headless})")
-                result = samr_main(headless=headless)
+                    f"Starting new SAMR public notice scraper in background (headless={headless})")
+                result = new_samr_public_notice_main(headless=headless)
                 if result.get("success"):
                     logger.info(
-                        f"SAMR scraper completed successfully. Extracted {result.get('total_extracted', 0)} records, "
+                        f"new SAMR scraper completed successfully. Extracted {result.get('total_extracted', 0)} records, "
                         f"found {result.get('total_matched', 0)} matches.")
                 else:
                     logger.warning(
-                        f"SAMR scraper completed with errors: {result.get('error', 'Unknown error')}")
+                        f"new SAMR scraper completed with errors: {result.get('error', 'Unknown error')}")
             except Exception as e:
-                logger.error(f"Error in background SAMR scraper: {str(e)}")
+                logger.error(f"Error in background new SAMR scraper: {str(e)}")
                 import traceback
                 traceback.print_exc()
 
@@ -892,21 +892,21 @@ def samr_public_scraper():
         # Return immediate response
         return jsonify({
             "success": True,
-            "message": "SAMR public notice scraping process started in background",
+            "message": "new SAMR public notice scraping process started in background",
             "status": "running",
             "headless": headless
         }), 200
 
     except Exception as e:
-        logger.error(f"Error starting SAMR scraper: {str(e)}")
+        logger.error(f"Error starting new SAMR scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
         }), 500
 
 
-@app.route('/samr-conditional-scraper', methods=['GET'])
-def samr_conditional_scraper():
+@app.route('/new-samr-conditional-scraper', methods=['GET'])
+def new_samr_conditional_scraper():
     """
     Scrape SAMR China conditional approval notices and match with deals.
     Extracts records from SAMR website with cutoff date filtering.
@@ -935,19 +935,19 @@ def samr_conditional_scraper():
         def run_scraper():
             try:
                 logger.info(
-                    f"Starting SAMR conditional approval scraper in background (headless={headless}, use_html={use_html})")
-                result = samr_conditional_main(
+                    f"Starting new SAMR conditional approval scraper in background (headless={headless}, use_html={use_html})")
+                result = new_samr_conditional_approval_main(
                     use_existing_html=use_html, headless=headless)
                 if result.get("success"):
                     logger.info(
-                        f"SAMR conditional approval scraper completed successfully. Extracted {result.get('total_extracted', 0)} records, "
+                        f"new SAMR conditional approval scraper completed successfully. Extracted {result.get('total_extracted', 0)} records, "
                         f"found {result.get('total_matched', 0)} matches.")
                 else:
                     logger.warning(
-                        f"SAMR conditional approval scraper completed with errors: {result.get('error', 'Unknown error')}")
+                        f"new SAMR conditional approval scraper completed with errors: {result.get('error', 'Unknown error')}")
             except Exception as e:
                 logger.error(
-                    f"Error in background SAMR conditional approval scraper: {str(e)}")
+                    f"Error in background new SAMR conditional approval scraper: {str(e)}")
                 import traceback
                 traceback.print_exc()
 
@@ -958,7 +958,7 @@ def samr_conditional_scraper():
         # Return immediate response
         return jsonify({
             "success": True,
-            "message": "SAMR conditional approval scraping process started in background",
+            "message": "new SAMR conditional approval scraping process started in background",
             "status": "running",
             "headless": headless,
             "use_html": use_html
@@ -966,15 +966,15 @@ def samr_conditional_scraper():
 
     except Exception as e:
         logger.error(
-            f"Error starting SAMR conditional approval scraper: {str(e)}")
+            f"Error starting new SAMR conditional approval scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
         }), 500
 
 
-@app.route('/samr-unconditional-scraper', methods=['GET'])
-def samr_unconditional_scraper():
+@app.route('/new-samr-unconditional-scraper', methods=['GET'])
+def new_samr_unconditional_scraper():
     """
     Scrape SAMR China unconditional approval notices and match with deals.
     Extracts records from SAMR website with cutoff date filtering.
@@ -1003,19 +1003,19 @@ def samr_unconditional_scraper():
         def run_scraper():
             try:
                 logger.info(
-                    f"Starting SAMR unconditional approval scraper in background (headless={headless}, use_html={use_html})")
-                result = samr_unconditional_main(
+                    f"Starting new SAMR unconditional approval scraper in background (headless={headless}, use_html={use_html})")
+                result = new_samr_unconditional_approval_main(
                     use_existing_html=use_html, headless=headless)
                 if result.get("success"):
                     logger.info(
-                        f"SAMR unconditional approval scraper completed successfully. Extracted {result.get('total_extracted', 0)} records, "
+                        f"new SAMR unconditional approval scraper completed successfully. Extracted {result.get('total_extracted', 0)} records, "
                         f"found {result.get('total_matched', 0)} matches.")
                 else:
                     logger.warning(
-                        f"SAMR unconditional approval scraper completed with errors: {result.get('error', 'Unknown error')}")
+                        f"new SAMR unconditional approval scraper completed with errors: {result.get('error', 'Unknown error')}")
             except Exception as e:
                 logger.error(
-                    f"Error in background SAMR unconditional approval scraper: {str(e)}")
+                    f"Error in background new SAMR unconditional approval scraper: {str(e)}")
                 import traceback
                 traceback.print_exc()
 
@@ -1026,7 +1026,7 @@ def samr_unconditional_scraper():
         # Return immediate response
         return jsonify({
             "success": True,
-            "message": "SAMR unconditional approval scraping process started in background",
+            "message": "new SAMR unconditional approval scraping process started in background",
             "status": "running",
             "headless": headless,
             "use_html": use_html
@@ -1034,7 +1034,7 @@ def samr_unconditional_scraper():
 
     except Exception as e:
         logger.error(
-            f"Error starting SAMR unconditional approval scraper: {str(e)}")
+            f"Error starting new SAMR unconditional approval scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -1113,11 +1113,14 @@ def new_uk_cma_scraper():
     try:
         def run_scraper():
             try:
-                logger.info("Starting new UK CMA open mergers scraper in background")
+                logger.info(
+                    "Starting new UK CMA open mergers scraper in background")
                 new_uk_cma_main()
-                logger.info("New UK CMA open mergers scraper completed successfully.")
+                logger.info(
+                    "New UK CMA open mergers scraper completed successfully.")
             except Exception as e:
-                logger.error(f"Error in background new UK CMA scraper: {str(e)}")
+                logger.error(
+                    f"Error in background new UK CMA scraper: {str(e)}")
                 import traceback
                 traceback.print_exc()
 
@@ -1156,9 +1159,11 @@ def new_uk_cma_update_monitor():
             try:
                 logger.info("Starting new UK CMA update monitor in background")
                 new_uk_cma_update_monitor_main()
-                logger.info("New UK CMA update monitor completed successfully.")
+                logger.info(
+                    "New UK CMA update monitor completed successfully.")
             except Exception as e:
-                logger.error(f"Error in background new UK CMA update monitor: {str(e)}")
+                logger.error(
+                    f"Error in background new UK CMA update monitor: {str(e)}")
                 import traceback
                 traceback.print_exc()
 
