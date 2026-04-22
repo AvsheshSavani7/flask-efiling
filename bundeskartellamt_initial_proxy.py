@@ -34,12 +34,12 @@ load_dotenv(".env")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 BASE_URL = "https://www.bundeskartellamt.de/SiteGlobals/Forms/Suche/LaufendeVerfahren/LaufendeVerfahren_Formular.html"
-LAUFENDE_VERFAHREN_URL = f"{BASE_URL}?resultsPerPage=15"
+LAUFENDE_VERFAHREN_URL = f"{BASE_URL}?resultsPerPage=50"
 
 EXTRACTED_RECORDS_JSON = "bundeskartellamt_laufende_verfahren_extracted.json"
 SOURCE_INITIAL_FILING = "initial_filing"
 
-CUTOFF_DATE = (datetime.now() - timedelta(days=112)
+CUTOFF_DATE = (datetime.now() - timedelta(days=15)
                ).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
