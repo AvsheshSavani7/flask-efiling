@@ -34,12 +34,12 @@ load_dotenv(".env")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 BASE_URL = "https://www.bundeskartellamt.de/SiteGlobals/Forms/Suche/LaufendeVerfahren/LaufendeVerfahren_Formular.html"
-LAUFENDE_VERFAHREN_URL = f"{BASE_URL}?resultsPerPage=50"
+LAUFENDE_VERFAHREN_URL = f"{BASE_URL}?resultsPerPage=15"
 
 EXTRACTED_RECORDS_JSON = "bundeskartellamt_laufende_verfahren_extracted.json"
 SOURCE_INITIAL_FILING = "initial_filing"
 
-CUTOFF_DATE = (datetime.now() - timedelta(days=5)
+CUTOFF_DATE = (datetime.now() - timedelta(days=112)
                ).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
@@ -69,25 +69,29 @@ def _build_proxy_dict():
     return {"http": proxy_url, "https": proxy_url}
 
 
-def fetch_html_with_proxy(url):
-    """Fetch page via DE residential proxy, fallback to direct."""
-    strategies = [
-        ("DE residential proxy", _build_proxy_dict()),
-        ("Direct (no proxy)", None),
-    ]
-    for label, proxies in strategies:
-        try:
-            print(f"   🌐 Strategy: {label}...")
-            resp = requests.get(url, headers=FETCH_HEADERS,
-                                proxies=proxies, timeout=45)
-            print(f"   📃 HTTP {resp.status_code}, {len(resp.text):,} chars")
-            if resp.status_code == 200 and len(resp.text) > 500:
-                print(f"   ✅ Success via {label}\n")
-                return resp.text
-            print(
-                f"   ⚠️ Got HTTP {resp.status_code} — trying next strategy...")
-        except Exception as e:
-            print(f"   ❌ {label} failed: {e}")
+def fetch_html_with_proxy(url, max_retries=3):
+    """Fetch page via DE residential proxy, fallback to direct. Retries on transient failures."""
+    for attempt in range(1, max_retries + 1):
+        for label, proxies in [("DE residential proxy", _build_proxy_dict()), ("Direct (no proxy)", None)]:
+            try:
+                if attempt > 1:
+                    print(f"   🌐 [{attempt}/{max_retries}] {label}...")
+                else:
+                    print(f"   🌐 Strategy: {label}...")
+                resp = requests.get(url, headers=FETCH_HEADERS,
+                                    proxies=proxies, timeout=45)
+                print(
+                    f"   📃 HTTP {resp.status_code}, {len(resp.text):,} chars")
+                if resp.status_code == 200 and len(resp.text) > 500:
+                    print(f"   ✅ Success via {label}\n")
+                    return resp.text
+                print(
+                    f"   ⚠️ Got HTTP {resp.status_code} — trying next strategy...")
+            except Exception as e:
+                print(f"   ❌ {label} failed: {e}")
+        if attempt < max_retries:
+            print(f"   ⏳ Retrying in 5s...")
+            time.sleep(5)
     raise RuntimeError(
         "All fetch strategies failed — could not reach Bundeskartellamt")
 
@@ -152,7 +156,8 @@ def insert_german_case(collection, doc: Dict[str, Any]) -> Optional[str]:
 
 
 def utc_now_iso() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    from datetime import timezone
+    return datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
@@ -250,17 +255,23 @@ def determine_is_open(diploma: str) -> bool:
 # Pagination: fetch all pages until cutoff date exceeded
 # ---------------------------------------------------------------------------
 
+def _page_url(page_num: int) -> str:
+    """Build the URL for a given page number.
+    Page 1 has no gtp param; page N uses gtp=83488_list%253D{N} (double-encoded %3D)."""
+    if page_num <= 1:
+        return LAUFENDE_VERFAHREN_URL
+    return f"{LAUFENDE_VERFAHREN_URL}&gtp=83488_list%253D{page_num}#pagination-83488"
+
+
 def fetch_all_records_with_pagination(cutoff: date) -> List[Dict]:
     """Fetch pages from the Bundeskartellamt until all records newer than cutoff are collected."""
     all_records = []
+    seen_file_numbers: Set[str] = set()
     page_num = 1
+    max_pages = 30
 
-    while True:
-        if page_num == 1:
-            url = LAUFENDE_VERFAHREN_URL
-        else:
-            url = f"{LAUFENDE_VERFAHREN_URL}&gtp=%7B%2283488_list%22%3A%22{page_num}%22%7D"
-
+    while page_num <= max_pages:
+        url = _page_url(page_num)
         print(f"   📄 Page {page_num}: fetching...")
         try:
             html = fetch_html_with_proxy(url)
@@ -273,7 +284,17 @@ def fetch_all_records_with_pagination(cutoff: date) -> List[Dict]:
             print(f"   🏁 No rows on page {page_num}, stopping")
             break
 
-        print(f"   📋 Page {page_num}: {len(raw_rows)} rows extracted")
+        # Detect duplicate page (same rows = pagination URL not working)
+        page_fns = {r.get("file_number", "") for r in raw_rows}
+        new_fns = page_fns - seen_file_numbers
+        if not new_fns:
+            print(
+                f"   🏁 Page {page_num} returned duplicate rows, stopping pagination")
+            break
+        seen_file_numbers.update(page_fns)
+
+        print(
+            f"   📋 Page {page_num}: {len(raw_rows)} rows ({len(new_fns)} new)")
 
         filtered, reached_cutoff = filter_by_cutoff(raw_rows, cutoff)
         all_records.extend(filtered)
@@ -332,10 +353,24 @@ TRANSLATED TEXT:
 {pursue_en}
 
 INSTRUCTIONS:
-1. Compare the translated text with BOTH Target and Acquirer names in the deals list.
-2. When matching, also consider target_aliases and parent_aliases.
-3. Match only if the company name or a well-known alias appears in the translated text.
-4. Accept suffix variations (Inc., Ltd., PLC, GmbH, AG, SE).
+1.  Extract only the company names that are explicitly and directly mentioned in the German case text (pursue_en).
+2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, service providers, or any company not actually written in the German case text.  
+3. For each deal in the deals database, check whether:
+   - the Acquirer (or its known alias), AND
+   - the Target (or its known alias)
+   are both directly mentioned in the German case text.
+4. A deal is a valid match only if BOTH sides of the same deal are confidently matched from the German case text:
+   - one match for the Acquirer side
+   - one match for the Target side
+5. Do not return a match if only one side is present, even if that single company is an exact match.
+6. Allow only normal name variations when they clearly refer to the same company, such as:
+   - punctuation differences
+   - “Inc.” vs “Incorporated”
+   - “Corp.” vs “Corporation”
+   - “Ltd” vs “Limited”
+   - obvious spacing/casing differences
+7. Do not match based only on sector, business type, article topic, indirect association, or partial deal overlap.
+8. If the German case text does not directly name both companies for the same deal, return None.
 
 RESPONSE FORMAT:
 - If match found: Match: DEAL_ID|COMPANY_NAME|(target|acquirer)
@@ -411,7 +446,7 @@ def generate_matched_email(record: Dict, deal: Dict) -> Tuple[str, str]:
     acquirer = deal.get("acquirer") or deal.get("acquire_name", "N/A")
     deal_id = deal.get("deal_id", "N/A")
 
-    subject = f"[FRMD] German Bundeskartellamt Initial Filing (New) – {target} / {acquirer}"
+    subject = f"[FRMD] German Bundeskartellamt-{record.get("file_number", "N/A")} (New) – {target} / {acquirer}"
 
     deal_banner = f"""
 <div style="background:#dbeafe;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #2563eb;">
@@ -441,7 +476,7 @@ def generate_usa_related_email(record: Dict) -> Tuple[str, str]:
     fn = record.get("file_number", "N/A")
     pursue_en = record.get("pursue_en", "N/A")
 
-    subject = f"[FRUD] German Bundeskartellamt Initial Filing (USA-Related) – {fn}: {pursue_en[:60]}"
+    subject = f"[FRUD] German Bundeskartellamt-{record.get("file_number", "N/A")} (USA-Related) – {fn}: {pursue_en[:60]}"
 
     usa_banner = """
 <div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
@@ -471,7 +506,8 @@ def send_email_via_webhook(subject: str, html: str, file_number: str = "",
     try:
         webhook_url = os.getenv(
             "N8N_WEBHOOK_URL",
-            "https://n8n-xwx1.onrender.com/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f"
+            "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6"
+            # "https://n8n-xwx1.onrender.com/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f"
         )
         payload = {
             "subject": subject,
@@ -507,7 +543,8 @@ def main():
 
     # Step 1a: Fetch deals
     deals = fetch_deals()
-    deal_by_id = {str(d.get("deal_id", ""))                  : d for d in deals if d.get("deal_id")}
+    deal_by_id = {str(d.get("deal_id", ""))
+                      : d for d in deals if d.get("deal_id")}
 
     # Step 2: Fetch german_cases (is_open=True) for dedup
     gc_collection = get_german_cases_collection()
@@ -561,7 +598,6 @@ def main():
         is_open = determine_is_open(raw.get("diploma", ""))
 
         record = {
-            "source": SOURCE_INITIAL_FILING,
             "file_number": fn,
             "date": raw.get("date", ""),
             "pursue": raw.get("pursue", ""),
@@ -572,8 +608,6 @@ def main():
             "diploma_en": diploma_en,
             "is_open": is_open,
             "deal_id": None,
-            "matched_company": None,
-            "matched_role": None,
             "created_at": utc_now_iso(),
             "updated_at": utc_now_iso(),
         }

@@ -21,6 +21,7 @@ from new_uk_cma_mergers_scraper_atom import main as new_uk_cma_main
 from new_uk_cma_mergers_update_monitor import main as new_uk_cma_update_monitor_main
 from bundeskartellamt_scraper import main as bundeskartellamt_main
 from bundeskartellamt_initial_proxy import main as bundeskartellamt_initial_proxy_main
+from bundeskartellamt_update_monitor import main as bundeskartellamt_update_monitor_main
 from bundeskartellamt_press_release import main as bundeskartellamt_press_release_main
 from ec_case_register import run_ec_case_register as ec_case_register_main
 from fs_case_register import run_fs_case_register as fs_case_register_main
@@ -97,7 +98,8 @@ def home():
             "/new-samr-unconditional-scraper": "GET - Scrape SAMR China unconditional approval notices and match with deals (query params: headless, use_html)",
             "/uk-cma-scraper": "GET - Scrape UK CMA merger cases and match with deals (query params: use_html)",
             "/bundeskartellamt-scraper": "GET - Scrape Bundeskartellamt German merger cases and match with deals",
-            "/bundeskartellamt-initial": "GET - Scrape Bundeskartellamt Laufende Verfahren (initial filing) and match with deals",
+            "/bundeskartellamt-initial": "GET - Scrape Bundeskartellamt Laufende Verfahren (initial filing) — new cases to german_cases collection",
+            "/bundeskartellamt-update-monitor": "GET - Monitor open german_cases for changes, match deals, send update emails",
             "/bundeskartellamt-press-release": "GET - Scrape Bundeskartellamt press releases and match with deals",
             "/new-ec-case-register": "GET - Filter and match EC merger cases with deals",
             "/new-fs-case-register": "GET - Filter and match EC Foreign Subsidies cases with deals",
@@ -1316,6 +1318,47 @@ def bundeskartellamt_initial():
     except Exception as e:
         logger.error(
             f"Error starting Bundeskartellamt initial scraper: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/bundeskartellamt-update-monitor', methods=['GET'])
+def bundeskartellamt_update_monitor():
+    """
+    Monitor open german_cases for changes against the live Bundeskartellamt listing.
+    Detects field changes, matches deals via LLM, sends [FRMD]/[FRUD] update emails.
+    Process runs in background - returns immediately.
+    """
+    try:
+        def run_monitor():
+            try:
+                logger.info(
+                    "Starting Bundeskartellamt update monitor in background")
+                result = bundeskartellamt_update_monitor_main()
+                if result.get("success"):
+                    logger.info(
+                        f"Bundeskartellamt update monitor completed. "
+                        f"Checked {result.get('checked', 0)}, "
+                        f"updated {result.get('updated', 0)}, "
+                        f"emails sent {result.get('email_sent', 0)}.")
+                else:
+                    logger.warning(
+                        f"Bundeskartellamt update monitor failed: {result.get('error', 'Unknown error')}")
+            except Exception as e:
+                logger.error(
+                    f"Error in background Bundeskartellamt update monitor: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_monitor, daemon=True)
+        thread.start()
+        return jsonify({
+            "success": True,
+            "message": "Bundeskartellamt update monitor started in background",
+            "status": "running"
+        }), 200
+    except Exception as e:
+        logger.error(
+            f"Error starting Bundeskartellamt update monitor: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
