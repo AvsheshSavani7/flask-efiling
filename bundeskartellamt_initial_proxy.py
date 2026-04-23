@@ -445,8 +445,9 @@ def generate_matched_email(record: Dict, deal: Dict) -> Tuple[str, str]:
     target = deal.get("target") or deal.get("target_name", "N/A")
     acquirer = deal.get("acquirer") or deal.get("acquire_name", "N/A")
     deal_id = deal.get("deal_id", "N/A")
+    file_number = record.get("file_number", "N/A")
 
-    subject = f"[FRMD] German Bundeskartellamt-{record.get("file_number", "N/A")} (New) – {target} / {acquirer}"
+    subject = f"[FRMD] German Bundeskartellamt- {file_number} (New) – {target} / {acquirer}"
 
     deal_banner = f"""
 <div style="background:#dbeafe;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #2563eb;">
@@ -475,8 +476,9 @@ def generate_matched_email(record: Dict, deal: Dict) -> Tuple[str, str]:
 def generate_usa_related_email(record: Dict) -> Tuple[str, str]:
     fn = record.get("file_number", "N/A")
     pursue_en = record.get("pursue_en", "N/A")
+    file_number = record.get("file_number", "N/A")
 
-    subject = f"[FRUD] German Bundeskartellamt-{record.get("file_number", "N/A")} (USA-Related) – {fn}: {pursue_en[:60]}"
+    subject = f"[FRUD] German Bundeskartellamt- {file_number} (USA-Related) – {fn}: {pursue_en[:60]}"
 
     usa_banner = """
 <div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
