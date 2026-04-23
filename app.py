@@ -40,6 +40,7 @@ from canada_cases_register import run_canada_cases_register
 from canada_cases_update_monitor import process_canada_cases_updates
 from nz_comcom_case_update_monitor import process_nz_case_updates
 from nz_cases_update_monitor import run as nz_cases_update_monitor_run
+from mt_psc_scraper import scrape_mt_psc
 from mongodb_connection import init_mongodb_connection, close_mongodb_connection, is_connected
 import logging
 import os
@@ -2455,6 +2456,80 @@ def new_nz_cases_update_monitor_endpoint():
             "success": False,
             "error": str(e)
         }), 500
+
+
+@app.route('/mt-psc-scraper', methods=['GET', 'POST'])
+def mt_psc_scraper_endpoint():
+    """
+    Scrape Montana PSC REDDI docket filings via Playwright + OKTA SSO.
+
+    GET params or POST JSON body:
+        docket_number: Docket number (default: 2025.10.078)
+        case_id: REDDI Case ID (default: DCKT-3556)
+        last_id: Watermark (e.g. FIL-38222_DOC-69608). Only new items before this are processed.
+        username: OKTA username (or set MT_PSC_USERNAME env var)
+        password: OKTA password (or set MT_PSC_PASSWORD env var)
+        headless: Run headless (default: true)
+    """
+    try:
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+        else:
+            data = request.args.to_dict()
+
+        docket_number = data.get("docket_number", "2025.10.078")
+        case_id = data.get("case_id", "DCKT-3556")
+        last_id = data.get("last_id")
+        username = data.get("username") or os.getenv("MT_PSC_USERNAME", "")
+        password = data.get("password") or os.getenv("MT_PSC_PASSWORD", "")
+        headless = str(data.get("headless", "true")).lower() != "false"
+
+        if not username or not password:
+            return jsonify({
+                "success": False,
+                "error": "Username and password required. Pass in request body or set MT_PSC_USERNAME/MT_PSC_PASSWORD env vars."
+            }), 400
+
+        def run_scraper():
+            try:
+                logger.info(
+                    f"Starting MT PSC scraper in background for docket {docket_number}, "
+                    f"case {case_id}, last_id={last_id}"
+                )
+                result = scrape_mt_psc(
+                    docket_number=docket_number,
+                    case_id=case_id,
+                    last_id=last_id,
+                    username=username,
+                    password=password,
+                    headless=headless,
+                )
+                if result.get("success"):
+                    logger.info(
+                        f"MT PSC scraper completed. {result.get('total_filings', 0)} filings scraped."
+                    )
+                else:
+                    logger.warning(
+                        f"MT PSC scraper failed: {result.get('error', 'Unknown error')}"
+                    )
+            except Exception as e:
+                logger.error(f"Error in background MT PSC scraper: {str(e)}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=run_scraper, daemon=True)
+        thread.start()
+        return jsonify({
+            "success": True,
+            "message": f"MT PSC scraper started in background for docket {docket_number}",
+            "docket_number": docket_number,
+            "case_id": case_id,
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting MT PSC scraper: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 if __name__ == '__main__':
