@@ -53,8 +53,13 @@ import atexit
 import threading
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
+
+for _pymongo_logger in ["pymongo", "pymongo.monitoring", "pymongo.serverSelection",
+                         "pymongo.connection", "pymongo.command", "pymongo.topology"]:
+    logging.getLogger(_pymongo_logger).setLevel(logging.WARNING)
+
 
 app = Flask(__name__)
 

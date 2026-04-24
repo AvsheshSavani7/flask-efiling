@@ -343,43 +343,93 @@ def _search_docket(page: Page, docket_number: str) -> Any:
         raise RuntimeError(
             "Could not find docket number input field in iframe.")
 
-    docket_input.fill(docket_number)
-    logger.info(f"Docket number '{docket_number}' entered.")
+    # Use click + type (not fill) to simulate real user input.
+    # PEGA's JS event handlers (data-change, data-keydown) only fire
+    # on actual input events, not programmatic value changes.
+    docket_input.click()
+    frame.wait_for_timeout(500)
+    docket_input.fill("")
+    docket_input.type(docket_number, delay=50)
+    logger.info(f"Docket number '{docket_number}' typed.")
+    frame.wait_for_timeout(1000)
 
+    # Trigger PEGA's postValue by dispatching change event, then search
+    docket_input.dispatch_event("change")
+    frame.wait_for_timeout(1000)
+
+    # Try multiple approaches to trigger the search
+    search_triggered = False
+
+    # Approach 1: Click the Search button
     search_btn_selectors = [
         "button.pzbutton:has-text('Search')",
         "button.Strong:has-text('Search')",
         "button:has-text('Search')",
     ]
-
     for sel in search_btn_selectors:
         try:
             btn = frame.locator(sel).first
-            if btn.is_visible(timeout=5000):
+            if btn.is_visible(timeout=8000):
                 btn.click()
                 logger.info(f"Search button clicked (selector: {sel}).")
-                frame.wait_for_timeout(6000)
-                return frame
+                search_triggered = True
+                break
         except PlaywrightTimeoutError:
             continue
 
-    raise RuntimeError("Could not find or click the Search button in iframe.")
+    # Approach 2: Press Enter on the input
+    if not search_triggered:
+        logger.info("Search button not found, pressing Enter...")
+        docket_input.press("Enter")
+        logger.info("Enter key pressed on docket input.")
+        search_triggered = True
+
+    # Wait for results to load
+    frame.wait_for_timeout(5000)
+
+    # Poll for search results (DCKT or FIL rows in the results table)
+    for attempt in range(6):
+        try:
+            result_row = frame.locator(
+                "tr[oaargs*='DCKT-'], tr[oaargs*='FIL-']").first
+            if result_row.is_visible(timeout=5000):
+                logger.info("Search results loaded.")
+                return frame
+        except PlaywrightTimeoutError:
+            pass
+        logger.info(f"  Waiting for search results (attempt {attempt + 1}/6)...")
+        frame.wait_for_timeout(3000)
+
+    # If still no results, return frame anyway and let _click_case handle it
+    logger.warning("Search results may not have loaded, proceeding anyway...")
+    return frame
 
 
 def _click_case(frame, case_id: str) -> None:
     """Click on a specific REDDI Case ID in the search results table."""
     logger.info(f"Looking for case: {case_id}")
 
-    for sel in [f"a:has-text('{case_id}')", f"td a:has-text('{case_id}')"]:
-        try:
-            link = frame.locator(sel).first
-            if link.is_visible(timeout=5000):
-                link.click()
-                logger.info(f"Clicked on case {case_id}.")
-                frame.wait_for_timeout(4000)
-                return
-        except PlaywrightTimeoutError:
-            continue
+    selectors = [
+        f"a:has-text('{case_id}')",
+        f"td a:has-text('{case_id}')",
+        f"a:text-is('{case_id}')",
+    ]
+
+    # Retry up to 3 times with increasing waits (headless can be slow)
+    for attempt in range(3):
+        for sel in selectors:
+            try:
+                link = frame.locator(sel).first
+                if link.is_visible(timeout=10000):
+                    link.click()
+                    logger.info(f"Clicked on case {case_id} (attempt {attempt + 1}).")
+                    frame.wait_for_timeout(4000)
+                    return
+            except PlaywrightTimeoutError:
+                continue
+
+        logger.info(f"  Case {case_id} not found yet (attempt {attempt + 1}/3), waiting...")
+        frame.wait_for_timeout(5000)
 
     raise RuntimeError(
         f"Could not find case link for {case_id} in search results.")
@@ -826,7 +876,10 @@ def scrape_mt_psc(
     logger.info(f"Download directory: {download_dir}")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
+        launch_args = ["--disable-blink-features=AutomationControlled"]
+        if headless:
+            launch_args.append("--headless=new")
+        browser = p.chromium.launch(headless=headless, args=launch_args)
         context = browser.new_context(
             viewport={"width": 1280, "height": 800},
             user_agent=(
@@ -943,7 +996,7 @@ def main():
     )
     args = parser.parse_args()
 
-    result = scrape_mt_psc(
+    records = scrape_mt_psc(
         docket_number=args.docket,
         case_id=args.case_id,
         last_id=args.last_id,
@@ -953,11 +1006,13 @@ def main():
         save_json=args.save_json,
     )
 
-    if result and len(result) > 0:
-
-        return result
+    if records:
+        print(f"\nSuccess! Scraped {len(records)} documents.")
+        for rec in records:
+            print(f"  - {rec.get('case_id')} | {rec.get('document_id')} | "
+                  f"{rec.get('filing_type')} | {rec.get('description')}")
     else:
-        print(f"\nScraper failed: {result.get('error', 'Unknown error')}")
+        print("\nNo new documents found (or scraper failed).")
         sys.exit(1)
 
 
