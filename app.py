@@ -2490,42 +2490,19 @@ def mt_psc_scraper_endpoint():
                 "error": "Username and password required. Pass in request body or set MT_PSC_USERNAME/MT_PSC_PASSWORD env vars."
             }), 400
 
-        def run_scraper():
-            try:
-                logger.info(
-                    f"Starting MT PSC scraper in background for docket {docket_number}, "
-                    f"case {case_id}, last_id={last_id}"
-                )
-                result = scrape_mt_psc(
-                    docket_number=docket_number,
-                    case_id=case_id,
-                    last_id=last_id,
-                    username=username,
-                    password=password,
-                    headless=headless,
-                )
-                if result.get("success"):
-                    logger.info(
-                        f"MT PSC scraper completed. {result.get('total_filings', 0)} filings scraped."
-                    )
-                else:
-                    logger.warning(
-                        f"MT PSC scraper failed: {result.get('error', 'Unknown error')}"
-                    )
-            except Exception as e:
-                logger.error(f"Error in background MT PSC scraper: {str(e)}")
-                import traceback
-                traceback.print_exc()
-
-        thread = threading.Thread(target=run_scraper, daemon=True)
-        thread.start()
-        return jsonify({
-            "success": True,
-            "message": f"MT PSC scraper started in background for docket {docket_number}",
-            "docket_number": docket_number,
-            "case_id": case_id,
-            "status": "running"
-        }), 200
+        logger.info(
+            f"Starting MT PSC scraper for docket {docket_number}, "
+            f"case {case_id}, last_id={last_id}"
+        )
+        result = scrape_mt_psc(
+            docket_number=docket_number,
+            case_id=case_id,
+            last_id=last_id,
+            username=username,
+            password=password,
+            headless=headless,
+        )
+        return jsonify(result), 200
 
     except Exception as e:
         logger.error(f"Error starting MT PSC scraper: {str(e)}")
