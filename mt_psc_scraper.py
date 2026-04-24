@@ -787,7 +787,7 @@ def scrape_mt_psc(
     username: Optional[str] = None,
     password: Optional[str] = None,
     headless: bool = True,
-    save_json: bool = False,
+    save_json: bool = True,
 ) -> Dict[str, Any]:
     """
     Main scraper entry point.
@@ -953,14 +953,7 @@ def main():
         save_json=args.save_json,
     )
 
-    if result["success"]:
-        print(f"\nSuccess! Scraped {result['total_filings']} new filings.")
-        if result.get("new_last_id"):
-            print(f"New watermark: {result['new_last_id']}")
-        for filing in result["filings"]:
-            doc_count = len(filing.get("documents", []))
-            print(f"  - {filing.get('case_id')} | {filing.get('filing_type')} | "
-                  f"{filing.get('description')} | {doc_count} docs")
+    if result and len(result) > 0:
 
         return result
     else:
