@@ -65,6 +65,35 @@ def _now_iso() -> str:
     )
 
 
+def _normalize_datetime_for_z(value: str) -> str:
+    """
+    Normalize a scraped date/time string to MM/DD/YYYY.
+    """
+    if not value:
+        return ""
+
+    raw = value.strip()
+    if not raw:
+        return ""
+
+    formats = (
+        "%m/%d/%Y",
+        "%m/%d/%Y %I:%M %p",
+        "%m/%d/%Y %H:%M",
+        "%Y-%m-%d",
+        "%Y-%m-%d %H:%M:%S",
+    )
+    for fmt in formats:
+        try:
+            parsed = datetime.strptime(raw, fmt)
+            return parsed.strftime("%m/%d/%Y")
+        except ValueError:
+            continue
+
+    # If unknown format, keep raw value.
+    return raw
+
+
 def _parse_last_id(last_id: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     """Parse 'FIL-38222_DOC-69608' into (filing_id, doc_id)."""
     if not last_id:
@@ -682,12 +711,14 @@ def _flatten_filings(filings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "filing_type": filing.get("filing_type", ""),
                 "description": filing.get("description", ""),
                 "filed_by": filing.get("filed_by", ""),
-                "created_date": filing.get("created_date", ""),
+                "created_date": _normalize_datetime_for_z(filing.get("created_date", "")),
                 "document_id": doc.get("document_id", ""),
                 "document_index": doc.get("index", ""),
                 "document_type": doc.get("type", ""),
                 "document_name": doc.get("name", ""),
-                "document_filed_on": doc.get("filed_on", ""),
+                "document_filed_on": _normalize_datetime_for_z(
+                    doc.get("filed_on", "")
+                ),
                 "document_filename": doc.get("filename", ""),
                 "extracted_text": doc.get("extracted_text", ""),
             })
