@@ -57,7 +57,7 @@ logging.basicConfig(level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
 
 for _pymongo_logger in ["pymongo", "pymongo.monitoring", "pymongo.serverSelection",
-                         "pymongo.connection", "pymongo.command", "pymongo.topology"]:
+                        "pymongo.connection", "pymongo.command", "pymongo.topology"]:
     logging.getLogger(_pymongo_logger).setLevel(logging.WARNING)
 
 
@@ -2488,11 +2488,12 @@ def mt_psc_scraper_endpoint():
         username = data.get("username") or os.getenv("MT_PSC_USERNAME", "")
         password = data.get("password") or os.getenv("MT_PSC_PASSWORD", "")
         headless = str(data.get("headless", "true")).lower() != "false"
+        row_number = data.get("row_number", None)
 
-        if not username or not password:
+        if not username or not password or not row_number or not last_id:
             return jsonify({
                 "success": False,
-                "error": "Username and password required. Pass in request body or set MT_PSC_USERNAME/MT_PSC_PASSWORD env vars."
+                "error": "Username and password required. Pass in request body or set MT_PSC_USERNAME/MT_PSC_PASSWORD env vars. Also, row_number and last_id are required."
             }), 400
 
         logger.info(
@@ -2506,6 +2507,7 @@ def mt_psc_scraper_endpoint():
             username=username,
             password=password,
             headless=headless,
+            row_number=row_number,
         )
         return jsonify(result), 200
 
