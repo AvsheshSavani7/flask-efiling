@@ -540,7 +540,7 @@ def _extract_case_details(frame) -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 
 def _scrape_filings_table(
-    frame, stop_filing_id: Optional[str], stop_doc_id: Optional[str], row_number: Optional[int]
+    frame, stop_filing_id: Optional[str], stop_doc_id: Optional[str], row_number: Optional[int], docket_number: Optional[str]
 ) -> Tuple[List[Dict[str, Any]], bool]:
     """
     Scrape filings from the PEGA grid. For each filing, expand to get documents.
@@ -585,6 +585,7 @@ def _scrape_filings_table(
 
     for idx, filing in enumerate(all_filing_rows):
         filing["row_number"] = row_number
+        filing["docket_number"] = docket_number
         fid = filing.get("case_id", "")
 
         # If this filing IS the watermark filing, we need to check documents
@@ -721,6 +722,7 @@ def _flatten_filings(filings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 ),
                 "document_filename": doc.get("filename", ""),
                 "extracted_text": doc.get("extracted_text", ""),
+                "docket_number": filing.get("docket_number", ""),
             })
     return flat
 
@@ -950,7 +952,7 @@ def scrape_mt_psc(
 
             # Step 7: Scrape filings + documents (stop at watermark)
             filings, reached_watermark = _scrape_filings_table(
-                case_frame, stop_filing_id, stop_doc_id, row_number
+                case_frame, stop_filing_id, stop_doc_id, row_number, docket_number
             )
             result["total_filings"] = len(filings)
             result["reached_watermark"] = reached_watermark
