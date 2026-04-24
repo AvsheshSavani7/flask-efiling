@@ -397,7 +397,8 @@ def _search_docket(page: Page, docket_number: str) -> Any:
                 return frame
         except PlaywrightTimeoutError:
             pass
-        logger.info(f"  Waiting for search results (attempt {attempt + 1}/6)...")
+        logger.info(
+            f"  Waiting for search results (attempt {attempt + 1}/6)...")
         frame.wait_for_timeout(3000)
 
     # If still no results, return frame anyway and let _click_case handle it
@@ -422,13 +423,15 @@ def _click_case(frame, case_id: str) -> None:
                 link = frame.locator(sel).first
                 if link.is_visible(timeout=10000):
                     link.click()
-                    logger.info(f"Clicked on case {case_id} (attempt {attempt + 1}).")
+                    logger.info(
+                        f"Clicked on case {case_id} (attempt {attempt + 1}).")
                     frame.wait_for_timeout(4000)
                     return
             except PlaywrightTimeoutError:
                 continue
 
-        logger.info(f"  Case {case_id} not found yet (attempt {attempt + 1}/3), waiting...")
+        logger.info(
+            f"  Case {case_id} not found yet (attempt {attempt + 1}/3), waiting...")
         frame.wait_for_timeout(5000)
 
     raise RuntimeError(
@@ -959,7 +962,7 @@ def scrape_mt_psc(
             context.close()
             browser.close()
 
-    return flat_records
+    return flat_records[::-1]
 
 
 def main():
