@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 from playwright.sync_api import Page, sync_playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from tier1_summary_generator import generate_tier1_summary
 
 load_dotenv(".env")
 
@@ -728,26 +729,132 @@ def _flatten_filings(filings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# PDF Text Extraction
+# Text Extraction (PDF, DOCX, XLSX, PPTX, ZIP)
 # ---------------------------------------------------------------------------
 
 def _extract_text_from_pdf(file_path: str) -> str:
-    """Extract text from a downloaded PDF using PyPDF2."""
     try:
         from PyPDF2 import PdfReader
         reader = PdfReader(file_path)
-        text_parts = []
+        parts = []
         for page in reader.pages:
             try:
                 text = page.extract_text()
                 if text:
-                    text_parts.append(text)
+                    parts.append(text)
             except Exception:
                 continue
-        return "\n".join(text_parts)
+        return "\n".join(parts)
     except Exception as e:
-        logger.warning(f"PDF text extraction failed for {file_path}: {e}")
+        logger.warning(f"PDF extraction failed for {file_path}: {e}")
         return ""
+
+
+def _extract_text_from_docx(file_path: str) -> str:
+    try:
+        from docx import Document as DocxDocument
+        doc = DocxDocument(file_path)
+        parts = [p.text for p in doc.paragraphs if p.text.strip()]
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                if cells:
+                    parts.append("\t".join(cells))
+        return "\n".join(parts)
+    except Exception as e:
+        logger.warning(f"DOCX extraction failed for {file_path}: {e}")
+        return ""
+
+
+def _extract_text_from_xlsx(file_path: str) -> str:
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(file_path, read_only=True, data_only=True)
+        parts = []
+        for sheet in wb.sheetnames:
+            ws = wb[sheet]
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c) for c in row if c is not None]
+                if cells:
+                    parts.append("\t".join(cells))
+        wb.close()
+        return "\n".join(parts)
+    except Exception as e:
+        logger.warning(f"XLSX extraction failed for {file_path}: {e}")
+        return ""
+
+
+def _extract_text_from_pptx(file_path: str) -> str:
+    try:
+        from pptx import Presentation
+        prs = Presentation(file_path)
+        parts = []
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        text = para.text.strip()
+                        if text:
+                            parts.append(text)
+                if shape.has_table:
+                    for row in shape.table.rows:
+                        cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                        if cells:
+                            parts.append("\t".join(cells))
+        return "\n".join(parts)
+    except Exception as e:
+        logger.warning(f"PPTX extraction failed for {file_path}: {e}")
+        return ""
+
+
+def _extract_text_from_zip(zip_path: str) -> str:
+    """Extract text from all supported files inside a zip archive."""
+    import tempfile
+    import zipfile
+
+    extractors = {
+        ".pdf": _extract_text_from_pdf,
+        ".docx": _extract_text_from_docx,
+        ".xlsx": _extract_text_from_xlsx,
+        ".pptx": _extract_text_from_pptx,
+    }
+    combined = []
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            supported = [
+                n for n in zf.namelist()
+                if os.path.splitext(n)[1].lower() in extractors
+            ]
+            if not supported:
+                logger.info(f"  No supported files inside {os.path.basename(zip_path)}")
+                return ""
+            with tempfile.TemporaryDirectory() as tmpdir:
+                for name in sorted(supported):
+                    ext = os.path.splitext(name)[1].lower()
+                    extracted_path = zf.extract(name, tmpdir)
+                    text = extractors[ext](extracted_path)
+                    if text:
+                        combined.append(text)
+    except Exception as e:
+        logger.warning(f"ZIP extraction failed for {zip_path}: {e}")
+    return "\n\n".join(combined)
+
+
+def _extract_text(file_path: str) -> str:
+    """Route to the correct extractor based on file extension."""
+    ext = os.path.splitext(file_path)[1].lower()
+    extractors = {
+        ".pdf": _extract_text_from_pdf,
+        ".docx": _extract_text_from_docx,
+        ".xlsx": _extract_text_from_xlsx,
+        ".pptx": _extract_text_from_pptx,
+        ".zip": _extract_text_from_zip,
+    }
+    extractor = extractors.get(ext)
+    if extractor:
+        return extractor(file_path)
+    logger.info(f"  Unsupported file type ({ext}): {os.path.basename(file_path)}")
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -821,7 +928,7 @@ def _download_all_documents(
                         downloaded += 1
                         logger.info(f"  {doc_id}: downloaded → {safe_name}")
 
-                        extracted = _extract_text_from_pdf(save_path)
+                        extracted = _extract_text(save_path)
                         doc["extracted_text"] = extracted
                         if extracted:
                             logger.info(
@@ -1014,7 +1121,7 @@ def main():
         help="REDDI Case ID to open (default: DCKT-3556)",
     )
     parser.add_argument(
-        "--last-id", default="FIL-38225_DOC-69612",
+        "--last-id", default="",
         help="Watermark: FIL-xxxxx_DOC-xxxxx. Only process filings BEFORE this.",
     )
     parser.add_argument(
@@ -1050,6 +1157,32 @@ def main():
         for rec in records:
             print(f"  - {rec.get('case_id')} | {rec.get('document_id')} | "
                   f"{rec.get('filing_type')} | {rec.get('description')}")
+
+        print("\nGenerating tier1 summaries and saving to MongoDB...")
+        for rec in records:
+            text = (rec.get("extracted_text") or "").strip()
+            if not text:
+                print(
+                    f"  - {rec.get('document_id')}: skipped (no extracted_text)")
+                continue
+
+            metadata = {
+                "document_id": rec.get("document_id", ""),
+                "date": rec.get("document_filed_on") or rec.get("created_date") or "",
+                "document_type": rec.get("document_type") or rec.get("filing_type") or "N/A",
+                "additional_info": rec.get("description", ""),
+                "on_behalf_of": rec.get("filed_by", ""),
+                "docket_number": rec.get("docket_number") or args.docket,
+                "docket_type": "mt-psc",
+            }
+            result = generate_tier1_summary(metadata=metadata, text=text)
+            status = result.get("status", "unknown")
+            if result.get("error"):
+                print(
+                    f"  - {rec.get('document_id')}: error - {result.get('error')}")
+            else:
+                print(
+                    f"  - {rec.get('document_id')}: {status} (summary_length={result.get('summary_length', 0)})")
     else:
         print("\nNo new documents found (or scraper failed).")
         sys.exit(1)
