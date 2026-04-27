@@ -41,6 +41,7 @@ from canada_cases_update_monitor import process_canada_cases_updates
 from nz_comcom_case_update_monitor import process_nz_case_updates
 from nz_cases_update_monitor import run as nz_cases_update_monitor_run
 from mt_psc_scraper import scrape_mt_psc
+from ne_psc_scraper import scrape_ne_psc
 from mongodb_connection import init_mongodb_connection, close_mongodb_connection, is_connected
 import logging
 import os
@@ -2513,6 +2514,65 @@ def mt_psc_scraper_endpoint():
 
     except Exception as e:
         logger.error(f"Error starting MT PSC scraper: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/ne-psc-scraper', methods=['GET', 'POST'])
+def ne_psc_scraper_endpoint():
+    """
+    Scrape Nebraska PSC Order Search via Playwright.
+
+    GET params or POST JSON body:
+        docket_number: Docket number (required, e.g. 128)
+        row_number: Row number for batch tracking (required)
+        last_pdf_url: Watermark — PDF URL of the last processed record. Only newer records are processed. (required)
+        department: Department dropdown value (default: Natural_Gas)
+        from_date: Start date MM/DD/YYYY (default: 2 days ago)
+        to_date: End date MM/DD/YYYY (default: today)
+        division: Division prefix filter (optional)
+        headless: Run headless (default: true)
+    """
+    try:
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+        else:
+            data = request.args.to_dict()
+
+        docket_number = data.get("docket_number")
+        row_number = data.get("row_number")
+        last_pdf_url = data.get("last_pdf_url")
+        from_days = data.get("from_days", 2)
+        department = data.get("department", "Natural_Gas")
+        from datetime import datetime, timedelta
+        today = datetime.now()
+        default_from = (today - timedelta(days=from_days)).strftime("%m/%d/%Y")
+        default_to = today.strftime("%m/%d/%Y")
+        from_date = data.get("from_date", default_from)
+        to_date = data.get("to_date", default_to)
+        headless = str(data.get("headless", "true")).lower() != "false"
+
+        if not docket_number or not row_number or not last_pdf_url:
+            return jsonify({
+                "success": False,
+                "error": "docket_number, row_number, and last_pdf_url are required."
+            }), 400
+
+        logger.info(
+            f"Starting NE PSC scraper for department={department}, "
+            f"docket={docket_number}, last_pdf_url={last_pdf_url}"
+        )
+        result = scrape_ne_psc(
+            docket_number=docket_number,
+            from_date=from_date,
+            to_date=to_date,
+            last_pdf_url=last_pdf_url,
+            headless=headless,
+            row_number=row_number,
+        )
+        return jsonify(result), 200
+
+    except Exception as e:
+        logger.error(f"Error starting NE PSC scraper: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
