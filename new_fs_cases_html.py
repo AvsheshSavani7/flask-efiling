@@ -89,8 +89,8 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 ENV_PATH = ".env"
 N8N_WEBHOOK_URL = os.getenv(
     "N8N_WEBHOOK_URL",
-    # "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6",
-    "https://n8n-xwx1.onrender.com/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
+    "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6",
+    # "https://n8n-xwx1.onrender.com/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
 )
 
 START_URL = (
