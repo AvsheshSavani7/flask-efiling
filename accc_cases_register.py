@@ -784,17 +784,24 @@ def run_accc_cases_register(test_mode: bool = False):
 
         print(
             f"📄 Loading ACCC acquisitions register list page:\n   {LIST_URL}")
-        page.goto(LIST_URL, wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
 
-        try:
-            page.wait_for_selector(".views-row", timeout=10000)
-            html_content = page.content()
-            items = parse_list_items(html_content)
-        except Exception as e:
-            print(f"⚠️ Error loading list page items: {e}")
-            browser.close()
-            return
+        max_retries = 3
+        items = []
+        for attempt in range(1, max_retries + 1):
+            try:
+                page.goto(LIST_URL, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(3000)
+                page.wait_for_selector(".views-row", timeout=30000)
+                html_content = page.content()
+                items = parse_list_items(html_content)
+                break
+            except Exception as e:
+                print(f"⚠️ Attempt {attempt}/{max_retries} failed loading list page: {e}")
+                if attempt == max_retries:
+                    print("❌ All retries exhausted; exiting")
+                    browser.close()
+                    return
+                page.wait_for_timeout(5000)
 
         # Process each list item
         for idx, item in enumerate(items, 1):
