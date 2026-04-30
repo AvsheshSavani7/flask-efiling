@@ -71,6 +71,7 @@ BACKUP_JSON = "accc_cases_register_backup.json"
 N8N_WEBHOOK_URL = os.getenv(
     "N8N_WEBHOOK_URL",
     "https://n8n-xwx1.onrender.com/webhook/b3007d21-6845-47b5-aece-7b26583758bc",
+    # "https://n8n-xwx1.onrender.com/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
 )
 
 
@@ -798,17 +799,21 @@ def run_accc_cases_register(test_mode: bool = False):
         print(
             f"📄 Loading ACCC acquisitions register list page:\n   {LIST_URL}")
 
+        user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
+        headers = {"User-Agent": user_agent}
+
         max_retries = 3
         items = []
         for attempt in range(1, max_retries + 1):
             try:
-                page.goto(LIST_URL, wait_until="load", timeout=60000)
-                page.wait_for_timeout(6000)
-                page.wait_for_selector(".views-row", timeout=60000)
-                html_content = page.content()
-                items = parse_list_items(html_content)
+                resp = requests.get(LIST_URL, headers=headers, timeout=30)
+                resp.raise_for_status()
+                items = parse_list_items(resp.text)
                 print(
-                    f"✅ Found {len(items)} list items from ol.filter__results-list")
+                    f"✅ Found {len(items)} list items from acquisitions register")
                 break
             except Exception as e:
                 print(
@@ -817,7 +822,8 @@ def run_accc_cases_register(test_mode: bool = False):
                     print("❌ All retries exhausted; exiting")
                     browser.close()
                     return
-                page.wait_for_timeout(6000)
+                import time
+                time.sleep(5)
 
         # Process each list item
         for idx, item in enumerate(items, 1):
