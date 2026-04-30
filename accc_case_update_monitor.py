@@ -15,6 +15,12 @@ load_dotenv(".env")
 ENV_PATH = ".env"
 HTML_OUTPUT_DIR = "accc_case_updates"
 
+# Residential proxy configuration
+PROXY_HOST = "108.59.242.138"
+PROXY_PORT = 46885
+PROXY_USERNAME = "GSenAgrfKhuNWkd"
+PROXY_PASSWORD = "8lmVa5yl0pKp9MI"
+
 
 def get_deals_with_accc_cases() -> List[Dict[str, Any]]:
     """Fetch deals from MongoDB that have 'accc_cases' node, limited to active/open deals."""
@@ -743,8 +749,27 @@ def process_accc_case_updates():
     total_cases_updated = 0
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                f"--proxy-server=http://{PROXY_HOST}:{PROXY_PORT}",
+            ],
+        )
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+            proxy={
+                "server": f"http://{PROXY_HOST}:{PROXY_PORT}",
+                "username": PROXY_USERNAME,
+                "password": PROXY_PASSWORD,
+            },
+        )
         page = context.new_page()
 
         for deal_idx, deal in enumerate(deals, 1):
