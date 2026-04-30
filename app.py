@@ -996,7 +996,6 @@ def new_samr_conditional_scraper():
 
     Query parameters:
         headless: string (optional, "true" or "false", default: "true") - Run browser in headless mode
-        use_html: string (optional, "true" or "false", default: "false") - Extract from existing HTML files instead of scraping
 
     Returns:
     {
@@ -1010,16 +1009,13 @@ def new_samr_conditional_scraper():
         headless_str = request.args.get('headless', 'true')
         headless = headless_str.lower() in ('true', '1', 'yes')
 
-        use_html_str = request.args.get('use_html', 'false')
-        use_html = use_html_str.lower() in ('true', '1', 'yes')
-
         # Run the scraping process in background thread
         def run_scraper():
             try:
                 logger.info(
-                    f"Starting new SAMR conditional approval scraper in background (headless={headless}, use_html={use_html})")
+                    f"Starting new SAMR conditional approval scraper in background (headless={headless})")
                 result = new_samr_conditional_approval_main(
-                    use_existing_html=use_html, headless=headless)
+                    headless=headless)
                 if result.get("success"):
                     logger.info(
                         f"new SAMR conditional approval scraper completed successfully. Extracted {result.get('total_extracted', 0)} records, "
@@ -1040,8 +1036,7 @@ def new_samr_conditional_scraper():
             "success": True,
             "message": msg,
             "status": "running",
-            "headless": headless,
-            "use_html": use_html
+            "headless": headless
         }), 200
 
     except Exception as e:
@@ -1062,7 +1057,6 @@ def new_samr_unconditional_scraper():
 
     Query parameters:
         headless: string (optional, "true" or "false", default: "true") - Run browser in headless mode
-        use_html: string (optional, "true" or "false", default: "false") - Extract from existing HTML files instead of scraping
 
     Returns:
     {
@@ -1076,16 +1070,13 @@ def new_samr_unconditional_scraper():
         headless_str = request.args.get('headless', 'true')
         headless = headless_str.lower() in ('true', '1', 'yes')
 
-        use_html_str = request.args.get('use_html', 'false')
-        use_html = use_html_str.lower() in ('true', '1', 'yes')
-
         # Run the scraping process in background thread
         def run_scraper():
             try:
                 logger.info(
-                    f"Starting new SAMR unconditional approval scraper in background (headless={headless}, use_html={use_html})")
+                    f"Starting new SAMR unconditional approval scraper in background (headless={headless})")
                 result = new_samr_unconditional_approval_main(
-                    use_existing_html=use_html, headless=headless)
+                    headless=headless)
                 if result.get("success"):
                     logger.info(
                         f"new SAMR unconditional approval scraper completed successfully. Extracted {result.get('total_extracted', 0)} records, "
@@ -1106,8 +1097,7 @@ def new_samr_unconditional_scraper():
             "success": True,
             "message": msg,
             "status": "running",
-            "headless": headless,
-            "use_html": use_html
+            "headless": headless
         }), 200
 
     except Exception as e:
