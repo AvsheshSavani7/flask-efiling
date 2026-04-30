@@ -6,11 +6,16 @@ import builtins
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+import time
+
 import requests
+import urllib3
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from openai import OpenAI
 from playwright.sync_api import sync_playwright
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from llm_verification_service import verify_usa_relation
 from mongodb_connection import (
@@ -68,6 +73,17 @@ LIST_URL = (
     "?f[0]=acccgov_merger_matter_status:under_assessment&items_per_page=50"
 )
 BACKUP_JSON = "accc_cases_register_backup.json"
+
+# Residential proxy configuration
+PROXY_HOST = "108.59.242.138"
+PROXY_PORT = 46885
+PROXY_USERNAME = "GSenAgrfKhuNWkd"
+PROXY_PASSWORD = "8lmVa5yl0pKp9MI"
+PROXY_DICT = {
+    "http": f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}",
+    "https": f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}",
+}
+
 N8N_WEBHOOK_URL = os.getenv(
     "N8N_WEBHOOK_URL",
     "https://n8n-xwx1.onrender.com/webhook/b3007d21-6845-47b5-aece-7b26583758bc",
@@ -778,6 +794,51 @@ def run_accc_cases_register(test_mode: bool = False):
 
     new_cases: List[Dict[str, Any]] = []
 
+    # ------------------------------------------------------------------
+    # Step 1: Fetch list page HTML via residential proxy (requests)
+    # ------------------------------------------------------------------
+    print(f"📄 Loading ACCC acquisitions register list page:\n   {LIST_URL}")
+    print(f"   🌐 Using residential proxy: {PROXY_HOST}:{PROXY_PORT}")
+
+    list_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    max_retries = 3
+    items = []
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.get(
+                LIST_URL,
+                headers=list_headers,
+                proxies=PROXY_DICT,
+                timeout=(10, 60),
+                verify=False,
+                allow_redirects=True,
+            )
+            resp.raise_for_status()
+            items = parse_list_items(resp.text)
+            if not items:
+                raise Exception("HTML fetched but no .views-row items found")
+            print(f"✅ Found {len(items)} list items from acquisitions register")
+            break
+        except Exception as e:
+            print(f"⚠️ Attempt {attempt}/{max_retries} failed loading list page: {e}")
+            if attempt == max_retries:
+                print("❌ All retries exhausted; exiting")
+                return
+            wait_time = 5 * attempt
+            print(f"   Retrying in {wait_time}s...")
+            time.sleep(wait_time)
+
+    # ------------------------------------------------------------------
+    # Step 2: Process each item's detail page via Playwright
+    # ------------------------------------------------------------------
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -795,31 +856,6 @@ def run_accc_cases_register(test_mode: bool = False):
             ),
         )
         page = context.new_page()
-
-        print(
-            f"📄 Loading ACCC acquisitions register list page:\n   {LIST_URL}")
-
-        max_retries = 3
-        items = []
-        for attempt in range(1, max_retries + 1):
-            try:
-                page.goto(LIST_URL, wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(10000)
-                html_content = page.content()
-                items = parse_list_items(html_content)
-                if not items:
-                    raise Exception(f"Page loaded but no .views-row items found (attempt {attempt})")
-                print(
-                    f"✅ Found {len(items)} list items from acquisitions register")
-                break
-            except Exception as e:
-                print(
-                    f"⚠️ Attempt {attempt}/{max_retries} failed loading list page: {e}")
-                if attempt == max_retries:
-                    print("❌ All retries exhausted; exiting")
-                    browser.close()
-                    return
-                page.wait_for_timeout(5000)
 
         # Process each list item
         for idx, item in enumerate(items, 1):
