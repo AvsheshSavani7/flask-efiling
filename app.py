@@ -52,7 +52,9 @@ import subprocess
 import platform
 import datetime
 import atexit
-import threading
+import traceback
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, force=True)
@@ -79,6 +81,37 @@ atexit.register(close_mongodb_connection)
 # Configure CORS to allow requests from http://localhost:8080
 CORS(app, origins=["http://localhost:8080",
      "https://rag-summary-fe.onrender.com"])
+
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
+
+# --- Memory-safe background task infrastructure ---
+scraper_pool = ThreadPoolExecutor(max_workers=3)
+_running_tasks = {}
+_running_lock = Lock()
+
+
+def _run_and_cleanup(task_name, func):
+    """Wrapper that removes the task from the registry when done."""
+    try:
+        func()
+    except Exception:
+        logger.exception(f"Background task '{task_name}' failed")
+    finally:
+        with _running_lock:
+            _running_tasks.pop(task_name, None)
+
+
+def submit_unique_task(task_name, func):
+    """Submit *func* only if *task_name* is not already running.
+    Returns (submitted: bool, message: str).
+    """
+    with _running_lock:
+        future = _running_tasks.get(task_name)
+        if future and not future.done():
+            return False, f"{task_name} is already running"
+        future = scraper_pool.submit(_run_and_cleanup, task_name, func)
+        _running_tasks[task_name] = future
+        return True, f"{task_name} started in background"
 
 
 @app.route('/')
@@ -386,7 +419,6 @@ def fetch_dockets():
             sort_field=sort_field,
             sort_order=sort_order
         )
-        print(result)
 
         # Return appropriate status code based on result
         status_code = 200 if result.get("success") else 500
@@ -403,12 +435,17 @@ def fetch_dockets():
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Health check endpoint"""
+    """Health check endpoint with active scraper visibility"""
     mongodb_status = "connected" if is_connected() else "disconnected"
+    with _running_lock:
+        active = [k for k, v in _running_tasks.items() if not v.done()]
     return jsonify({
         "status": "healthy",
         "service": "Minnesota E-filing Scraper API",
-        "mongodb": mongodb_status
+        "mongodb": mongodb_status,
+        "active_scrapers": active,
+        "active_count": len(active),
+        "pool_max_workers": scraper_pool._max_workers
     }), 200
 
 
@@ -815,14 +852,13 @@ def brazil_scraper():
             except Exception as e:
                 logger.error(f"Error in background CADE scraper: {str(e)}")
 
-        # Start background thread
-        thread = threading.Thread(target=run_scraper, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("brazil-scraper", run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
-        # Return immediate response
         return jsonify({
             "success": True,
-            "message": "Process started in background",
+            "message": msg,
             "status": "running",
             "date_range": {
                 "start": start_date.strftime("%Y-%m-%d"),
@@ -876,14 +912,13 @@ def brazil_monitor():
                 logger.error(
                     f"Error in background CADE Brazil monitor: {str(e)}")
 
-        # Start background thread
-        thread = threading.Thread(target=run_monitor, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("cade-brazil-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
-        # Return immediate response
         return jsonify({
             "success": True,
-            "message": "Brazil deal monitoring process started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
@@ -931,18 +966,15 @@ def new_samr_public_scraper():
                     logger.warning(
                         f"new SAMR scraper completed with errors: {result.get('error', 'Unknown error')}")
             except Exception as e:
-                logger.error(f"Error in background new SAMR scraper: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception(f"Error in background new SAMR scraper")
 
-        # Start background thread
-        thread = threading.Thread(target=run_scraper, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("samr-public-scraper", run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
-        # Return immediate response
         return jsonify({
             "success": True,
-            "message": "new SAMR public notice scraping process started in background",
+            "message": msg,
             "status": "running",
             "headless": headless
         }), 200
@@ -996,19 +1028,15 @@ def new_samr_conditional_scraper():
                     logger.warning(
                         f"new SAMR conditional approval scraper completed with errors: {result.get('error', 'Unknown error')}")
             except Exception as e:
-                logger.error(
-                    f"Error in background new SAMR conditional approval scraper: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in background new SAMR conditional approval scraper")
 
-        # Start background thread
-        thread = threading.Thread(target=run_scraper, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("samr-conditional-scraper", run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
-        # Return immediate response
         return jsonify({
             "success": True,
-            "message": "new SAMR conditional approval scraping process started in background",
+            "message": msg,
             "status": "running",
             "headless": headless,
             "use_html": use_html
@@ -1064,19 +1092,15 @@ def new_samr_unconditional_scraper():
                     logger.warning(
                         f"new SAMR unconditional approval scraper completed with errors: {result.get('error', 'Unknown error')}")
             except Exception as e:
-                logger.error(
-                    f"Error in background new SAMR unconditional approval scraper: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in background new SAMR unconditional approval scraper")
 
-        # Start background thread
-        thread = threading.Thread(target=run_scraper, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("samr-unconditional-scraper", run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
-        # Return immediate response
         return jsonify({
             "success": True,
-            "message": "new SAMR unconditional approval scraping process started in background",
+            "message": msg,
             "status": "running",
             "headless": headless,
             "use_html": use_html
@@ -1122,19 +1146,15 @@ def uk_cma_scraper():
                 logger.info(
                     f"CMA merger cases scraper completed successfully.")
             except Exception as e:
-                logger.error(
-                    f"Error in background CMA scraper: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in background CMA scraper")
 
-        # Start background thread
-        thread = threading.Thread(target=run_scraper, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("uk-cma-scraper", run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
-        # Return immediate response
         return jsonify({
             "success": True,
-            "message": "CMA merger cases scraping process started in background",
+            "message": msg,
             "status": "running",
             "use_html": use_html
         }), 200
@@ -1169,17 +1189,15 @@ def new_uk_cma_scraper():
                 logger.info(
                     "New UK CMA open mergers scraper completed successfully.")
             except Exception as e:
-                logger.error(
-                    f"Error in background new UK CMA scraper: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in background new UK CMA scraper")
 
-        thread = threading.Thread(target=run_scraper, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("new-uk-cma-scraper", run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "New UK CMA open mergers scraping process started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
@@ -1212,17 +1230,15 @@ def new_uk_cma_update_monitor():
                 logger.info(
                     "New UK CMA update monitor completed successfully.")
             except Exception as e:
-                logger.error(
-                    f"Error in background new UK CMA update monitor: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in background new UK CMA update monitor")
 
-        thread = threading.Thread(target=run_monitor, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("new-uk-cma-update-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "New UK CMA update monitor started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
@@ -1265,19 +1281,15 @@ def bundeskartellamt_scraper():
                     logger.warning(
                         f"Bundeskartellamt scraper completed with errors: {result.get('error', 'Unknown error')}")
             except Exception as e:
-                logger.error(
-                    f"Error in background Bundeskartellamt scraper: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in background Bundeskartellamt scraper")
 
-        # Start background thread
-        thread = threading.Thread(target=run_scraper, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("bundeskartellamt-scraper", run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
-        # Return immediate response
         return jsonify({
             "success": True,
-            "message": "Bundeskartellamt scraping process started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
@@ -1311,16 +1323,14 @@ def bundeskartellamt_initial():
                     logger.warning(
                         f"Bundeskartellamt initial scraper failed: {result.get('error', 'Unknown error')}")
             except Exception as e:
-                logger.error(
-                    f"Error in background Bundeskartellamt initial scraper: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in background Bundeskartellamt initial scraper")
 
-        thread = threading.Thread(target=run_scraper, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("bundeskartellamt-initial", run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
         return jsonify({
             "success": True,
-            "message": "Bundeskartellamt Laufende Verfahren (initial) scraping started in background",
+            "message": msg,
             "status": "running"
         }), 200
     except Exception as e:
@@ -1352,16 +1362,14 @@ def bundeskartellamt_update_monitor():
                     logger.warning(
                         f"Bundeskartellamt update monitor failed: {result.get('error', 'Unknown error')}")
             except Exception as e:
-                logger.error(
-                    f"Error in background Bundeskartellamt update monitor: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in background Bundeskartellamt update monitor")
 
-        thread = threading.Thread(target=run_monitor, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("bundeskartellamt-update-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
         return jsonify({
             "success": True,
-            "message": "Bundeskartellamt update monitor started in background",
+            "message": msg,
             "status": "running"
         }), 200
     except Exception as e:
@@ -1392,16 +1400,14 @@ def bundeskartellamt_press_release():
                     logger.warning(
                         f"Bundeskartellamt press release scraper failed: {result.get('error', 'Unknown error')}")
             except Exception as e:
-                logger.error(
-                    f"Error in background Bundeskartellamt press release scraper: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in background Bundeskartellamt press release scraper")
 
-        thread = threading.Thread(target=run_scraper, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("bundeskartellamt-press-release", run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
         return jsonify({
             "success": True,
-            "message": "Bundeskartellamt press release scraping started in background",
+            "message": msg,
             "status": "running"
         }), 200
     except Exception as e:
@@ -1440,18 +1446,15 @@ def new_ec_case_register():
                     logger.warning(
                         f"EC case filter completed with errors: {error_msg}")
             except Exception as e:
-                logger.error(f"Error in background EC case filter: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in background EC case filter")
 
-        # Start background thread
-        thread = threading.Thread(target=run_filter, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("ec-case-register", run_filter)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
-        # Return immediate response
         return jsonify({
             "success": True,
-            "message": "EC case filtering process started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
@@ -1494,16 +1497,15 @@ def fs_case_register():
                     logger.warning(
                         f"FS case register completed with errors: {error_msg}")
             except Exception as e:
-                logger.error(f"Error in background FS case register: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in background FS case register")
 
-        thread = threading.Thread(target=run_filter, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("fs-case-register", run_filter)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "FS (Foreign Subsidies) case filtering process started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
@@ -1539,23 +1541,20 @@ def new_ec_case_update_monitor():
                 process_ec_case_updates()
                 logger.info("✅ EC case update monitor completed successfully")
             except Exception as e:
-                logger.error(f"❌ Error in EC case update monitor: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in EC case update monitor")
 
-        # Start background thread
-        thread = threading.Thread(target=run_monitor, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("ec-case-update-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
-        # Return immediate response
         return jsonify({
             "success": True,
-            "message": "EC case update monitor started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
     except Exception as e:
-        logger.error(f"❌ Error starting EC case update monitor: {str(e)}")
+        logger.error(f"Error starting EC case update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -1580,16 +1579,15 @@ def ec_cases_html_register():
                 ec_cases_html_run(START_URL, max_pages=None, headed=False)
                 logger.info("EC cases HTML register completed successfully")
             except Exception as e:
-                logger.error(f"Error in EC cases HTML register: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in EC cases HTML register")
 
-        thread = threading.Thread(target=run_register, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("ec-cases-html-register", run_register)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "EC cases HTML register (Playwright) started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
@@ -1620,17 +1618,15 @@ def ec_cases_html_update_monitor():
                 logger.info(
                     "EC cases HTML update monitor completed successfully")
             except Exception as e:
-                logger.error(
-                    f"Error in EC cases HTML update monitor: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in EC cases HTML update monitor")
 
-        thread = threading.Thread(target=run_monitor, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("ec-cases-html-update-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "EC cases HTML update monitor (Playwright) started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
@@ -1666,21 +1662,20 @@ def new_fs_case_update_monitor_new():
                 process_fs_case_updates()
                 logger.info("✅ FS case update monitor completed successfully")
             except Exception as e:
-                logger.error(f"❌ Error in FS case update monitor: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in FS case update monitor")
 
-        thread = threading.Thread(target=run_monitor, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("fs-case-update-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "FS (Foreign Subsidies) case update monitor started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
     except Exception as e:
-        logger.error(f"❌ Error starting FS case update monitor: {str(e)}")
+        logger.error(f"Error starting FS case update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -1705,16 +1700,15 @@ def fs_cases_html_register():
                 fs_cases_html_run(START_URL, max_pages=None, headed=False)
                 logger.info("FS cases HTML register completed successfully")
             except Exception as e:
-                logger.error(f"Error in FS cases HTML register: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in FS cases HTML register")
 
-        thread = threading.Thread(target=run_register, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("fs-cases-html-register", run_register)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "FS cases HTML register (Playwright) started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
@@ -1745,17 +1739,15 @@ def fs_cases_html_update_monitor():
                 logger.info(
                     "FS cases HTML update monitor completed successfully")
             except Exception as e:
-                logger.error(
-                    f"Error in FS cases HTML update monitor: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in FS cases HTML update monitor")
 
-        thread = threading.Thread(target=run_monitor, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("fs-cases-html-update-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "FS cases HTML update monitor (Playwright) started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
@@ -1790,23 +1782,20 @@ def accc_acquisitions_scraper():
                 logger.info(
                     "✅ ACCC acquisitions scraper completed successfully")
             except Exception as e:
-                logger.error(f"❌ Error in ACCC acquisitions scraper: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in ACCC acquisitions scraper")
 
-        # Start background thread
-        thread = threading.Thread(target=run_scraper, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("accc-acquisitions-scraper", run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
-        # Return immediate response
         return jsonify({
             "success": True,
-            "message": "ACCC acquisitions scraper started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
     except Exception as e:
-        logger.error(f"❌ Error starting ACCC acquisitions scraper: {str(e)}")
+        logger.error(f"Error starting ACCC acquisitions scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -1837,23 +1826,20 @@ def ftc_early_termination_scraper():
                 logger.info(
                     "✅ FTC early termination scraper completed successfully")
             except Exception as e:
-                logger.error(
-                    f"❌ Error in FTC early termination scraper: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in FTC early termination scraper")
 
-        thread = threading.Thread(target=run_scraper, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("ftc-early-termination-scraper", run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "FTC early termination scraper started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
     except Exception as e:
-        logger.error(
-            f"❌ Error starting FTC early termination scraper: {str(e)}")
+        logger.error(f"Error starting FTC early termination scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -1887,23 +1873,20 @@ def competition_bureau_canada_scraper():
                 logger.info(
                     "✅ Canada Competition Bureau scraper completed successfully")
             except Exception as e:
-                logger.error(
-                    f"❌ Error in Canada Competition Bureau scraper: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in Canada Competition Bureau scraper")
 
-        thread = threading.Thread(target=run_scraper, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("competition-bureau-canada-scraper", run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "Canada Competition Bureau scraper started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
     except Exception as e:
-        logger.error(
-            f"❌ Error starting Canada Competition Bureau scraper: {str(e)}")
+        logger.error(f"Error starting Canada Competition Bureau scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -1927,23 +1910,20 @@ def canada_competition_bureau_case_update_monitor():
                 logger.info(
                     "✅ Canada Competition Bureau case update monitor completed")
             except Exception as e:
-                logger.error(
-                    f"❌ Error in Canada Competition Bureau case update monitor: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in Canada Competition Bureau case update monitor")
 
-        thread = threading.Thread(target=run_monitor, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("canada-competition-bureau-update-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "Canada Competition Bureau case update monitor started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
     except Exception as e:
-        logger.error(
-            f"❌ Error starting Canada Competition Bureau case update monitor: {str(e)}")
+        logger.error(f"Error starting Canada Competition Bureau case update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -1973,21 +1953,20 @@ def canada_cases_register():
                 run_canada_cases_register()
                 logger.info("✅ Canada cases register completed successfully")
             except Exception as e:
-                logger.error(f"❌ Error in Canada cases register: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in Canada cases register")
 
-        thread = threading.Thread(target=run_register, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("canada-cases-register", run_register)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "Canada cases register started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
     except Exception as e:
-        logger.error(f"❌ Error starting Canada cases register: {str(e)}")
+        logger.error(f"Error starting Canada cases register: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -2017,22 +1996,20 @@ def canada_cases_update_monitor():
                 process_canada_cases_updates()
                 logger.info("✅ Canada cases update monitor completed")
             except Exception as e:
-                logger.error(
-                    f"❌ Error in Canada cases update monitor: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in Canada cases update monitor")
 
-        thread = threading.Thread(target=run_monitor, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("canada-cases-update-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "Canada cases update monitor started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
     except Exception as e:
-        logger.error(f"❌ Error starting Canada cases update monitor: {str(e)}")
+        logger.error(f"Error starting Canada cases update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -2067,23 +2044,20 @@ def accc_case_update_monitor():
                 logger.info(
                     "✅ ACCC case update monitor completed successfully")
             except Exception as e:
-                logger.error(f"❌ Error in ACCC case update monitor: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in ACCC case update monitor")
 
-        # Start background thread
-        thread = threading.Thread(target=run_monitor, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("accc-case-update-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
-        # Return immediate response
         return jsonify({
             "success": True,
-            "message": "ACCC case update monitor started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
     except Exception as e:
-        logger.error(f"❌ Error starting ACCC case update monitor: {str(e)}")
+        logger.error(f"Error starting ACCC case update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -2113,22 +2087,20 @@ def accc_cases_register_endpoint():
                 logger.info(
                     "✅ ACCC cases register scraper completed successfully")
             except Exception as e:
-                logger.error(
-                    f"❌ Error in ACCC cases register scraper: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in ACCC cases register scraper")
 
-        thread = threading.Thread(target=run_register, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("accc-cases-register", run_register)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "ACCC cases register scraper started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
     except Exception as e:
-        logger.error(f"❌ Error starting ACCC cases register scraper: {str(e)}")
+        logger.error(f"Error starting ACCC cases register scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -2177,17 +2149,15 @@ def cade_cases_register_endpoint():
                 logger.info(
                     "✅ CADE cases register scraper completed successfully")
             except Exception as e:
-                logger.error(
-                    f"❌ Error in CADE cases register scraper: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in CADE cases register scraper")
 
-        thread = threading.Thread(target=run_register, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("cade-cases-register", run_register)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "CADE cases register scraper started in background",
+            "message": msg,
             "status": "running",
             "date_range": {
                 "start": start_date.strftime("%Y-%m-%d"),
@@ -2196,7 +2166,7 @@ def cade_cases_register_endpoint():
         }), 200
 
     except Exception as e:
-        logger.error(f"❌ Error starting CADE cases register scraper: {str(e)}")
+        logger.error(f"Error starting CADE cases register scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -2232,21 +2202,20 @@ def cade_cases_update_monitor_endpoint():
                 logger.info(
                     "✅ CADE cases update monitor completed successfully")
             except Exception as e:
-                logger.error(f"❌ Error in CADE cases update monitor: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in CADE cases update monitor")
 
-        thread = threading.Thread(target=run_monitor, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("cade-cases-update-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "CADE cases update monitor started in background",
+            "message": msg,
             "status": "running",
         }), 200
 
     except Exception as e:
-        logger.error(f"❌ Error starting CADE cases update monitor: {str(e)}")
+        logger.error(f"Error starting CADE cases update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -2278,23 +2247,20 @@ def accc_cases_update_monitor_endpoint():
                 logger.info(
                     "✅ ACCC cases update monitor completed successfully")
             except Exception as e:
-                logger.error(
-                    f"❌ Error in ACCC cases update monitor: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in ACCC cases update monitor")
 
-        thread = threading.Thread(target=run_monitor, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("accc-cases-update-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "ACCC cases update monitor started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
     except Exception as e:
-        logger.error(
-            f"❌ Error starting ACCC cases update monitor: {str(e)}")
+        logger.error(f"Error starting ACCC cases update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -2322,21 +2288,20 @@ def nz_comcom_case_register():
                 nz_comcom_case_register_main()
                 logger.info("✅ NZ ComCom case register completed successfully")
             except Exception as e:
-                logger.error(f"❌ Error in NZ ComCom case register: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in NZ ComCom case register")
 
-        thread = threading.Thread(target=run_register, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("nz-comcom-case-register", run_register)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "NZ ComCom case register started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
     except Exception as e:
-        logger.error(f"❌ Error starting NZ ComCom case register: {str(e)}")
+        logger.error(f"Error starting NZ ComCom case register: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -2367,23 +2332,20 @@ def nz_comcom_case_update_monitor():
                 logger.info(
                     "✅ NZ ComCom case update monitor completed successfully")
             except Exception as e:
-                logger.error(
-                    f"❌ Error in NZ ComCom case update monitor: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in NZ ComCom case update monitor")
 
-        thread = threading.Thread(target=run_monitor, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("nz-comcom-case-update-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "NZ ComCom case update monitor started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
     except Exception as e:
-        logger.error(
-            f"❌ Error starting NZ ComCom case update monitor: {str(e)}")
+        logger.error(f"Error starting NZ ComCom case update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -2406,23 +2368,20 @@ def new_nz_comcom_case_register_to_db_endpoint():
                 logger.info(
                     "✅ NZ ComCom case register → nz_cases completed successfully")
             except Exception as e:
-                logger.error(
-                    f"❌ Error in NZ ComCom case register → nz_cases: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in NZ ComCom case register to nz_cases")
 
-        thread = threading.Thread(target=run_register, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("nz-comcom-case-register-to-db", run_register)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "NZ ComCom case register → nz_cases started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
     except Exception as e:
-        logger.error(
-            f"❌ Error starting NZ ComCom case register → nz_cases: {str(e)}")
+        logger.error(f"Error starting NZ ComCom case register to nz_cases: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -2444,21 +2403,20 @@ def new_nz_cases_update_monitor_endpoint():
                 nz_cases_update_monitor_run()
                 logger.info("✅ nz_cases update monitor completed successfully")
             except Exception as e:
-                logger.error(f"❌ Error in nz_cases update monitor: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                logger.exception("Error in nz_cases update monitor")
 
-        thread = threading.Thread(target=run_monitor, daemon=True)
-        thread.start()
+        submitted, msg = submit_unique_task("nz-cases-update-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
         return jsonify({
             "success": True,
-            "message": "nz_cases update monitor started in background",
+            "message": msg,
             "status": "running"
         }), 200
 
     except Exception as e:
-        logger.error(f"❌ Error starting nz_cases update monitor: {str(e)}")
+        logger.error(f"Error starting nz_cases update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
