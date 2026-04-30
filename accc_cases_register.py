@@ -799,19 +799,16 @@ def run_accc_cases_register(test_mode: bool = False):
         print(
             f"📄 Loading ACCC acquisitions register list page:\n   {LIST_URL}")
 
-        user_agent = (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        )
-        headers = {"User-Agent": user_agent}
-
         max_retries = 3
         items = []
         for attempt in range(1, max_retries + 1):
             try:
-                resp = requests.get(LIST_URL, headers=headers, timeout=30)
-                resp.raise_for_status()
-                items = parse_list_items(resp.text)
+                page.goto(LIST_URL, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(10000)
+                html_content = page.content()
+                items = parse_list_items(html_content)
+                if not items:
+                    raise Exception(f"Page loaded but no .views-row items found (attempt {attempt})")
                 print(
                     f"✅ Found {len(items)} list items from acquisitions register")
                 break
@@ -822,8 +819,7 @@ def run_accc_cases_register(test_mode: bool = False):
                     print("❌ All retries exhausted; exiting")
                     browser.close()
                     return
-                import time
-                time.sleep(5)
+                page.wait_for_timeout(5000)
 
         # Process each list item
         for idx, item in enumerate(items, 1):
