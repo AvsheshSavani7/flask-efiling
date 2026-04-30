@@ -809,6 +809,8 @@ def process_accc_case_updates():
                     current_info = extract_current_detail_page_info(
                         page, detail_url)
 
+                    print("Accc daily monitor: current_info: ", current_info)
+
                     if not current_info:
                         print(f"      ⚠️ Could not fetch current info, skipping")
                         continue
