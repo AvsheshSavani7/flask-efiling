@@ -1050,8 +1050,7 @@ def main(headless=True):
 
         try:
             print(f"📍 Calling BASE_URL: {BASE_URL}")
-            page.goto(BASE_URL, wait_until="domcontentloaded")
-            page.wait_for_timeout(5000)
+            page.goto(BASE_URL, wait_until="networkidle", timeout=60000)
             print(f"   ✅ Loaded\n")
 
             page_num = 1

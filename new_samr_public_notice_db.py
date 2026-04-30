@@ -223,7 +223,7 @@ def extract_page_records(page, page_num=1):
     print(f"📄 PAGE {page_num}: Extracting records...")
     print(f"{'='*60}")
 
-    page.wait_for_selector("div.page-content ul li", timeout=10000)
+    page.wait_for_selector("div.page-content ul li", timeout=60000)
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     listing_html_filename = f"listing_page_{page_num}_{timestamp}.html"
@@ -691,8 +691,7 @@ def main(headless=True):
         try:
             print(f"📍 Step 1: Calling BASE_URL")
             print(f"   URL: {BASE_URL}")
-            page.goto(BASE_URL, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
+            page.goto(BASE_URL, wait_until="networkidle", timeout=60000)
             print(f"   ✅ Loaded\n")
 
             page_num = 1
