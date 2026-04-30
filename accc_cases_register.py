@@ -432,8 +432,8 @@ def extract_detail_page_case(
     """
     try:
         print(f"  📄 Fetching detail page: {url}")
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(2000)
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(5000)
 
         case: Dict[str, Any] = {
             "url": url,
@@ -459,6 +459,11 @@ def extract_detail_page_case(
             case_number_elem = page.query_selector(
                 ".field--name-dynamic-token-fieldnode-acccgov-merger-id .field__item"
             )
+            if not case_number_elem:
+                page.wait_for_timeout(5000)
+                case_number_elem = page.query_selector(
+                    ".field--name-dynamic-token-fieldnode-acccgov-merger-id .field__item"
+                )
             if case_number_elem:
                 case["case_number"] = extract_text(case_number_elem)
 
