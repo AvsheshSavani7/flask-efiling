@@ -1022,6 +1022,8 @@ def process_accc_cases_updates():
                 continue
 
             current_case = fetch_current_case_from_page(page, url)
+            print("Accc daily monitor check: current_case:1 ", current_case)
+
             if not current_case:
                 print("  ⚠️ Could not fetch current case info; skipping")
                 continue
