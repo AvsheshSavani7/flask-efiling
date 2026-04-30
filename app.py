@@ -85,7 +85,7 @@ CORS(app, origins=["http://localhost:8080",
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
 
 # --- Memory-safe background task infrastructure ---
-scraper_pool = ThreadPoolExecutor(max_workers=3)
+scraper_pool = ThreadPoolExecutor(max_workers=20)
 _running_tasks = {}
 _running_lock = Lock()
 
@@ -1028,9 +1028,11 @@ def new_samr_conditional_scraper():
                     logger.warning(
                         f"new SAMR conditional approval scraper completed with errors: {result.get('error', 'Unknown error')}")
             except Exception as e:
-                logger.exception("Error in background new SAMR conditional approval scraper")
+                logger.exception(
+                    "Error in background new SAMR conditional approval scraper")
 
-        submitted, msg = submit_unique_task("samr-conditional-scraper", run_scraper)
+        submitted, msg = submit_unique_task(
+            "samr-conditional-scraper", run_scraper)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -1092,9 +1094,11 @@ def new_samr_unconditional_scraper():
                     logger.warning(
                         f"new SAMR unconditional approval scraper completed with errors: {result.get('error', 'Unknown error')}")
             except Exception as e:
-                logger.exception("Error in background new SAMR unconditional approval scraper")
+                logger.exception(
+                    "Error in background new SAMR unconditional approval scraper")
 
-        submitted, msg = submit_unique_task("samr-unconditional-scraper", run_scraper)
+        submitted, msg = submit_unique_task(
+            "samr-unconditional-scraper", run_scraper)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -1230,9 +1234,11 @@ def new_uk_cma_update_monitor():
                 logger.info(
                     "New UK CMA update monitor completed successfully.")
             except Exception as e:
-                logger.exception("Error in background new UK CMA update monitor")
+                logger.exception(
+                    "Error in background new UK CMA update monitor")
 
-        submitted, msg = submit_unique_task("new-uk-cma-update-monitor", run_monitor)
+        submitted, msg = submit_unique_task(
+            "new-uk-cma-update-monitor", run_monitor)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -1281,9 +1287,11 @@ def bundeskartellamt_scraper():
                     logger.warning(
                         f"Bundeskartellamt scraper completed with errors: {result.get('error', 'Unknown error')}")
             except Exception as e:
-                logger.exception("Error in background Bundeskartellamt scraper")
+                logger.exception(
+                    "Error in background Bundeskartellamt scraper")
 
-        submitted, msg = submit_unique_task("bundeskartellamt-scraper", run_scraper)
+        submitted, msg = submit_unique_task(
+            "bundeskartellamt-scraper", run_scraper)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -1323,9 +1331,11 @@ def bundeskartellamt_initial():
                     logger.warning(
                         f"Bundeskartellamt initial scraper failed: {result.get('error', 'Unknown error')}")
             except Exception as e:
-                logger.exception("Error in background Bundeskartellamt initial scraper")
+                logger.exception(
+                    "Error in background Bundeskartellamt initial scraper")
 
-        submitted, msg = submit_unique_task("bundeskartellamt-initial", run_scraper)
+        submitted, msg = submit_unique_task(
+            "bundeskartellamt-initial", run_scraper)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
         return jsonify({
@@ -1362,9 +1372,11 @@ def bundeskartellamt_update_monitor():
                     logger.warning(
                         f"Bundeskartellamt update monitor failed: {result.get('error', 'Unknown error')}")
             except Exception as e:
-                logger.exception("Error in background Bundeskartellamt update monitor")
+                logger.exception(
+                    "Error in background Bundeskartellamt update monitor")
 
-        submitted, msg = submit_unique_task("bundeskartellamt-update-monitor", run_monitor)
+        submitted, msg = submit_unique_task(
+            "bundeskartellamt-update-monitor", run_monitor)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
         return jsonify({
@@ -1400,9 +1412,11 @@ def bundeskartellamt_press_release():
                     logger.warning(
                         f"Bundeskartellamt press release scraper failed: {result.get('error', 'Unknown error')}")
             except Exception as e:
-                logger.exception("Error in background Bundeskartellamt press release scraper")
+                logger.exception(
+                    "Error in background Bundeskartellamt press release scraper")
 
-        submitted, msg = submit_unique_task("bundeskartellamt-press-release", run_scraper)
+        submitted, msg = submit_unique_task(
+            "bundeskartellamt-press-release", run_scraper)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
         return jsonify({
@@ -1543,7 +1557,8 @@ def new_ec_case_update_monitor():
             except Exception as e:
                 logger.exception("Error in EC case update monitor")
 
-        submitted, msg = submit_unique_task("ec-case-update-monitor", run_monitor)
+        submitted, msg = submit_unique_task(
+            "ec-case-update-monitor", run_monitor)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -1581,7 +1596,8 @@ def ec_cases_html_register():
             except Exception as e:
                 logger.exception("Error in EC cases HTML register")
 
-        submitted, msg = submit_unique_task("ec-cases-html-register", run_register)
+        submitted, msg = submit_unique_task(
+            "ec-cases-html-register", run_register)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -1620,7 +1636,8 @@ def ec_cases_html_update_monitor():
             except Exception as e:
                 logger.exception("Error in EC cases HTML update monitor")
 
-        submitted, msg = submit_unique_task("ec-cases-html-update-monitor", run_monitor)
+        submitted, msg = submit_unique_task(
+            "ec-cases-html-update-monitor", run_monitor)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -1664,7 +1681,8 @@ def new_fs_case_update_monitor_new():
             except Exception as e:
                 logger.exception("Error in FS case update monitor")
 
-        submitted, msg = submit_unique_task("fs-case-update-monitor", run_monitor)
+        submitted, msg = submit_unique_task(
+            "fs-case-update-monitor", run_monitor)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -1702,7 +1720,8 @@ def fs_cases_html_register():
             except Exception as e:
                 logger.exception("Error in FS cases HTML register")
 
-        submitted, msg = submit_unique_task("fs-cases-html-register", run_register)
+        submitted, msg = submit_unique_task(
+            "fs-cases-html-register", run_register)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -1741,7 +1760,8 @@ def fs_cases_html_update_monitor():
             except Exception as e:
                 logger.exception("Error in FS cases HTML update monitor")
 
-        submitted, msg = submit_unique_task("fs-cases-html-update-monitor", run_monitor)
+        submitted, msg = submit_unique_task(
+            "fs-cases-html-update-monitor", run_monitor)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -1784,7 +1804,8 @@ def accc_acquisitions_scraper():
             except Exception as e:
                 logger.exception("Error in ACCC acquisitions scraper")
 
-        submitted, msg = submit_unique_task("accc-acquisitions-scraper", run_scraper)
+        submitted, msg = submit_unique_task(
+            "accc-acquisitions-scraper", run_scraper)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -1828,7 +1849,8 @@ def ftc_early_termination_scraper():
             except Exception as e:
                 logger.exception("Error in FTC early termination scraper")
 
-        submitted, msg = submit_unique_task("ftc-early-termination-scraper", run_scraper)
+        submitted, msg = submit_unique_task(
+            "ftc-early-termination-scraper", run_scraper)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -1875,7 +1897,8 @@ def competition_bureau_canada_scraper():
             except Exception as e:
                 logger.exception("Error in Canada Competition Bureau scraper")
 
-        submitted, msg = submit_unique_task("competition-bureau-canada-scraper", run_scraper)
+        submitted, msg = submit_unique_task(
+            "competition-bureau-canada-scraper", run_scraper)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -1886,7 +1909,8 @@ def competition_bureau_canada_scraper():
         }), 200
 
     except Exception as e:
-        logger.error(f"Error starting Canada Competition Bureau scraper: {str(e)}")
+        logger.error(
+            f"Error starting Canada Competition Bureau scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -1910,9 +1934,11 @@ def canada_competition_bureau_case_update_monitor():
                 logger.info(
                     "✅ Canada Competition Bureau case update monitor completed")
             except Exception as e:
-                logger.exception("Error in Canada Competition Bureau case update monitor")
+                logger.exception(
+                    "Error in Canada Competition Bureau case update monitor")
 
-        submitted, msg = submit_unique_task("canada-competition-bureau-update-monitor", run_monitor)
+        submitted, msg = submit_unique_task(
+            "canada-competition-bureau-update-monitor", run_monitor)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -1923,7 +1949,8 @@ def canada_competition_bureau_case_update_monitor():
         }), 200
 
     except Exception as e:
-        logger.error(f"Error starting Canada Competition Bureau case update monitor: {str(e)}")
+        logger.error(
+            f"Error starting Canada Competition Bureau case update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -1955,7 +1982,8 @@ def canada_cases_register():
             except Exception as e:
                 logger.exception("Error in Canada cases register")
 
-        submitted, msg = submit_unique_task("canada-cases-register", run_register)
+        submitted, msg = submit_unique_task(
+            "canada-cases-register", run_register)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -1998,7 +2026,8 @@ def canada_cases_update_monitor():
             except Exception as e:
                 logger.exception("Error in Canada cases update monitor")
 
-        submitted, msg = submit_unique_task("canada-cases-update-monitor", run_monitor)
+        submitted, msg = submit_unique_task(
+            "canada-cases-update-monitor", run_monitor)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -2046,7 +2075,8 @@ def accc_case_update_monitor():
             except Exception as e:
                 logger.exception("Error in ACCC case update monitor")
 
-        submitted, msg = submit_unique_task("accc-case-update-monitor", run_monitor)
+        submitted, msg = submit_unique_task(
+            "accc-case-update-monitor", run_monitor)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -2089,7 +2119,8 @@ def accc_cases_register_endpoint():
             except Exception as e:
                 logger.exception("Error in ACCC cases register scraper")
 
-        submitted, msg = submit_unique_task("accc-cases-register", run_register)
+        submitted, msg = submit_unique_task(
+            "accc-cases-register", run_register)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -2151,7 +2182,8 @@ def cade_cases_register_endpoint():
             except Exception as e:
                 logger.exception("Error in CADE cases register scraper")
 
-        submitted, msg = submit_unique_task("cade-cases-register", run_register)
+        submitted, msg = submit_unique_task(
+            "cade-cases-register", run_register)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -2204,7 +2236,8 @@ def cade_cases_update_monitor_endpoint():
             except Exception as e:
                 logger.exception("Error in CADE cases update monitor")
 
-        submitted, msg = submit_unique_task("cade-cases-update-monitor", run_monitor)
+        submitted, msg = submit_unique_task(
+            "cade-cases-update-monitor", run_monitor)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -2249,7 +2282,8 @@ def accc_cases_update_monitor_endpoint():
             except Exception as e:
                 logger.exception("Error in ACCC cases update monitor")
 
-        submitted, msg = submit_unique_task("accc-cases-update-monitor", run_monitor)
+        submitted, msg = submit_unique_task(
+            "accc-cases-update-monitor", run_monitor)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -2290,7 +2324,8 @@ def nz_comcom_case_register():
             except Exception as e:
                 logger.exception("Error in NZ ComCom case register")
 
-        submitted, msg = submit_unique_task("nz-comcom-case-register", run_register)
+        submitted, msg = submit_unique_task(
+            "nz-comcom-case-register", run_register)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -2334,7 +2369,8 @@ def nz_comcom_case_update_monitor():
             except Exception as e:
                 logger.exception("Error in NZ ComCom case update monitor")
 
-        submitted, msg = submit_unique_task("nz-comcom-case-update-monitor", run_monitor)
+        submitted, msg = submit_unique_task(
+            "nz-comcom-case-update-monitor", run_monitor)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -2368,9 +2404,11 @@ def new_nz_comcom_case_register_to_db_endpoint():
                 logger.info(
                     "✅ NZ ComCom case register → nz_cases completed successfully")
             except Exception as e:
-                logger.exception("Error in NZ ComCom case register to nz_cases")
+                logger.exception(
+                    "Error in NZ ComCom case register to nz_cases")
 
-        submitted, msg = submit_unique_task("nz-comcom-case-register-to-db", run_register)
+        submitted, msg = submit_unique_task(
+            "nz-comcom-case-register-to-db", run_register)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -2381,7 +2419,8 @@ def new_nz_comcom_case_register_to_db_endpoint():
         }), 200
 
     except Exception as e:
-        logger.error(f"Error starting NZ ComCom case register to nz_cases: {str(e)}")
+        logger.error(
+            f"Error starting NZ ComCom case register to nz_cases: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -2405,7 +2444,8 @@ def new_nz_cases_update_monitor_endpoint():
             except Exception as e:
                 logger.exception("Error in nz_cases update monitor")
 
-        submitted, msg = submit_unique_task("nz-cases-update-monitor", run_monitor)
+        submitted, msg = submit_unique_task(
+            "nz-cases-update-monitor", run_monitor)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
