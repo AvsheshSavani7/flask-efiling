@@ -1,3 +1,10 @@
+from mongodb_connection import (
+    get_database,
+    get_deals_collection,
+    init_mongodb_connection,
+    is_connected,
+)
+from llm_verification_service import verify_usa_relation
 import os
 import json
 import sys
@@ -16,14 +23,6 @@ from openai import OpenAI
 from playwright.sync_api import sync_playwright
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-from llm_verification_service import verify_usa_relation
-from mongodb_connection import (
-    get_database,
-    get_deals_collection,
-    init_mongodb_connection,
-    is_connected,
-)
 
 
 # Load environment variables
@@ -825,10 +824,12 @@ def run_accc_cases_register(test_mode: bool = False):
             items = parse_list_items(resp.text)
             if not items:
                 raise Exception("HTML fetched but no .views-row items found")
-            print(f"✅ Found {len(items)} list items from acquisitions register")
+            print(
+                f"✅ Found {len(items)} list items from acquisitions register")
             break
         except Exception as e:
-            print(f"⚠️ Attempt {attempt}/{max_retries} failed loading list page: {e}")
+            print(
+                f"⚠️ Attempt {attempt}/{max_retries} failed loading list page: {e}")
             if attempt == max_retries:
                 print("❌ All retries exhausted; exiting")
                 return
@@ -847,6 +848,7 @@ def run_accc_cases_register(test_mode: bool = False):
                 "--disable-setuid-sandbox",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
+                f"--proxy-server=http://{PROXY_HOST}:{PROXY_PORT}",
             ],
         )
         context = browser.new_context(
@@ -854,6 +856,11 @@ def run_accc_cases_register(test_mode: bool = False):
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
             ),
+            proxy={
+                "server": f"http://{PROXY_HOST}:{PROXY_PORT}",
+                "username": PROXY_USERNAME,
+                "password": PROXY_PASSWORD,
+            },
         )
         page = context.new_page()
 
@@ -877,6 +884,7 @@ def run_accc_cases_register(test_mode: bool = False):
 
                 # Step 3: fetch and parse detail page into case_info
                 case_info = extract_detail_page_case(page, url)
+                print("Accc daily check: case_info: ", case_info)
                 if not case_info:
                     print("  ⚠️ Could not extract case info; skipping")
                     continue
