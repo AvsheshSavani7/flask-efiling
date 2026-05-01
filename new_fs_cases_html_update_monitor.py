@@ -100,7 +100,7 @@ N8N_WEBHOOK_URL = os.getenv(
 # - _id, is_open, created_at, updated_at: DB-only metadata
 # - deal_id: set by our register/monitor script, never in scraped data
 _EXCLUDE_FROM_COMPARE = frozenset({
-    "_id", "is_open", "created_at", "updated_at", "deal_id",
+    "_id", "is_open", "created_at", "updated_at", "deal_id", "instrument", "case_title"
 })
 
 SPA_CONTENT_INDICATORS = [
@@ -450,10 +450,10 @@ def generate_update_email_html(
         "case_url", f"https://competition-cases.ec.europa.eu/cases/{case_num}")
 
     check_fields = [
-        "companies", "last_decision_date", "case_type", "case_title",
+        "companies", "last_decision_date", "case_type",
         "regulation", "notification_date", "provisional_deadline",
         "economic_activities", "decisions", "other_case_related_information",
-        "status", "instrument",
+        "status",
     ]
     field_status = {}
     changed_names = []
@@ -708,6 +708,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                        wait_until="domcontentloaded", timeout=60000)
         dismiss_cookie_banner(init_page)
         init_page.close()
+        print("old open cases: ", open_cases)
 
         for idx, case_doc in enumerate(open_cases, 1):
             case_number = case_doc.get("case_number", "")
