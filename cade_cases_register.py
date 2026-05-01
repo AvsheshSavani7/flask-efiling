@@ -3,12 +3,12 @@ import sys
 import json
 import time
 import logging
-import builtins
 import re
 import base64
 import datetime
 import traceback
 from datetime import date, timezone, timedelta
+from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
@@ -27,6 +27,7 @@ from mongodb_connection import (
     is_connected,
 )
 from html import escape as escape_html
+from log_utils import cleanup_old_logs
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -65,12 +66,16 @@ N8N_WEBHOOK_URL = os.getenv(
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ---------------------------------------------------------------------------
-# Logging — date-wise log files under /var/data/logs/ (persistent disk)
-# Timestamps in IST (UTC+5:30)
+# Logging — production setup (RotatingFileHandler, IST, env-based settings)
 # ---------------------------------------------------------------------------
 PERSISTENT_LOG_DIR = "/var/data/logs"
 SCRIPT_NAME = "brazil_cases_register"
 IST = timezone(timedelta(hours=5, minutes=30))
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
 
 def _get_log_file() -> str:
@@ -82,9 +87,6 @@ def _get_log_file() -> str:
 
 
 LOG_FILE = _get_log_file()
-
-logger = logging.getLogger("brazil_cases_register")
-logger.setLevel(logging.INFO)
 
 
 class _ISTFormatter(logging.Formatter):
@@ -98,9 +100,18 @@ class _ISTFormatter(logging.Formatter):
         return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
 
 
+logger = logging.getLogger(SCRIPT_NAME)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+
 if not logger.handlers:
     formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+
+    fh = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
     fh.setFormatter(formatter)
     logger.addHandler(fh)
 
@@ -110,23 +121,11 @@ if not logger.handlers:
 
 logger.propagate = False
 
-
-def _logged_print(*args, level: str = "info", **kwargs):
-    msg = " ".join(str(a) for a in args)
-    if level == "error":
-        logger.error(msg)
-    elif level == "warning":
-        logger.warning(msg)
-    else:
-        logger.info(msg)
-    builtins.print(*args, **kwargs)
+cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 
 
-print = _logged_print  # type: ignore
-
-
-def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
-    """Log at ERROR level and fire an error email."""
+def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+    """Immediate error email — use ONLY for critical startup / fatal failures."""
     logger.error(msg)
     send_error_email(
         script_name=SCRIPT_NAME,
@@ -155,10 +154,7 @@ def case_exists_by_url(collection, detail_url: str) -> bool:
     try:
         return collection.count_documents({"detail_url": detail_url}, limit=1) > 0
     except Exception as e:
-        _log_error_and_email(
-            f"Error checking existing case: {e}",
-            {"detail_url": detail_url, "step": "case_exists_by_url"},
-        )
+        logger.exception(f"Error checking existing case: {e}")
         return False
 
 
@@ -170,10 +166,7 @@ def insert_case(collection, case_info: Dict[str, Any]) -> Optional[str]:
         logger.info(f"  [{process}] Inserted into DB (id={inserted_id})")
         return inserted_id
     except Exception as e:
-        _log_error_and_email(
-            f"Error inserting case {process}: {e}",
-            {"process": process, "step": "insert_case"},
-        )
+        logger.exception(f"Error inserting case {process}: {e}")
         return None
 
 
@@ -867,10 +860,7 @@ def extract_detail_page(
             "historico_records": historico_data,
         }
     except Exception as e:
-        _log_error_and_email(
-            f"Failed to extract detail page {url}: {e}",
-            {"url": url, "step": "extract_detail_page"},
-        )
+        logger.exception(f"Failed to extract detail page {url}: {e}")
         if detail_page:
             try:
                 detail_page.close()
@@ -991,11 +981,7 @@ RESPONSE FORMAT:
             logger.warning(f"  LLM match result: malformed response")
             return None
     except Exception as e:
-        _log_error_and_email(
-            f"LLM deal match error: {e}",
-            {"interessados": interessados_text[:100],
-                "step": "match_case_to_deal"},
-        )
+        logger.exception(f"LLM deal match error: {e}")
         return None
 
 
@@ -1016,11 +1002,7 @@ def _post_email_payload(payload: Dict[str, Any]) -> bool:
         logger.info(f"  Email sent successfully (status={resp.status_code})")
         return True
     except Exception as e:
-        _log_error_and_email(
-            f"Error sending email via webhook: {e}",
-            {"subject": payload.get("subject", "N/A"),
-             "step": "_post_email_payload"},
-        )
+        logger.exception(f"Error sending email via webhook: {e}")
         return False
 
 
@@ -1132,32 +1114,30 @@ def run_cade_cases_register(
     - Other: save basic info only, ``are_we_follow=False``, no email
     """
     run_start = time.time()
-    error_count = 0
+    error_items: List[Dict[str, Any]] = []
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"
 
     logger.info("=" * 60)
     logger.info(f"Starting CADE Cases Register ({mode_label})")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
-    print(f"🚀 Starting CADE Cases Register scraper ({mode_label})\n")
 
-    # MongoDB
-    print("🔌 Initializing MongoDB connection...")
+    logger.info("Initializing MongoDB connection...")
     ok, msg = init_mongodb_connection(ENV_PATH)
     if not ok:
-        _log_error_and_email(f"MongoDB connection failed: {msg}", {
+        _log_critical_error_and_email(f"MongoDB connection failed: {msg}", {
                              "step": "mongodb_connect"})
         return
-    print(f"✅ {msg}\n")
+    logger.info(f"MongoDB: {msg}")
 
     if not is_connected():
-        _log_error_and_email("MongoDB not connected after init", {
+        _log_critical_error_and_email("MongoDB not connected after init", {
                              "step": "mongodb_connect"})
         return
 
     collection = get_brazil_cases_collection()
     if collection is None:
-        _log_error_and_email("Could not access 'brazil_cases' collection", {
+        _log_critical_error_and_email("Could not access 'brazil_cases' collection", {
                              "step": "get_collection"})
         return
 
@@ -1189,10 +1169,10 @@ def run_cade_cases_register(
         page = context.new_page()
 
         try:
-            print(
-                f"🔍 Searching {start_date.strftime('%Y-%m-%d')} → "
+            logger.info(
+                f"Searching {start_date.strftime('%Y-%m-%d')} → "
                 f"{end_date.strftime('%Y-%m-%d')} "
-                f"across {len(PROCESS_TYPES)} process types\n"
+                f"across {len(PROCESS_TYPES)} process types"
             )
 
             # Run one search per process type, collect & deduplicate
@@ -1200,20 +1180,18 @@ def run_cade_cases_register(
             seen_urls: set = set()
 
             for type_name, type_id in PROCESS_TYPES.items():
-                print(f"\n{'='*60}")
-                print(f"📋 Searching: {type_name} (id={type_id})")
-                print(f"{'='*60}")
+                logger.info(f"Searching: {type_name} (id={type_id})")
 
                 page.goto(BASE_URL, wait_until="domcontentloaded",
                           timeout=30000)
                 time.sleep(3)
 
                 if not submit_search_form(page, start_date, end_date, process_type_id=type_id):
-                    print(f"❌ Failed to submit form for {type_name}")
+                    logger.warning(f"Failed to submit form for {type_name}")
                     continue
 
                 type_results = collect_all_pages(page)
-                print(f"✅ Found {len(type_results)} results for {type_name}")
+                logger.info(f"Found {len(type_results)} results for {type_name}")
 
                 added = 0
                 for r in type_results:
@@ -1223,25 +1201,24 @@ def run_cade_cases_register(
                         r["process_type_filter"] = type_name
                         all_results.append(r)
                         added += 1
-                print(
-                    f"   ➕ {added} new (after dedup), {len(type_results) - added} duplicates skipped")
+                logger.info(
+                    f"  +{added} new (after dedup), {len(type_results) - added} duplicates skipped")
 
-            print(
-                f"\n✅ Total collected (deduplicated): {len(all_results)} results")
+            logger.info(f"Total collected (deduplicated): {len(all_results)} results")
 
             # Step 3–7: Process each record
             for idx, result in enumerate(all_results, 1):
                 detail_url = result.get("detail_url")
                 title = result.get("title", "N/A")
 
-                print(f"\n[{idx}/{len(all_results)}] {title[:80]}...")
+                logger.info(f"[{idx}/{len(all_results)}] {title[:80]}...")
 
                 if not detail_url:
-                    print("  ⚠️ No detail URL; skipping")
+                    logger.warning("  No detail URL; skipping")
                     continue
 
                 if not test_mode and case_exists_by_url(collection, detail_url):
-                    print("  ⏩ Already in brazil_cases; skipping")
+                    logger.info("  Already in brazil_cases; skipping")
                     continue
 
                 # Single page visit: autuação + tblDocumentos + tblHistorico
@@ -1262,7 +1239,7 @@ def run_cade_cases_register(
                 translated = ""
                 if interessados_text:
                     translated = translate_to_english(interessados_text)
-                    print(f"  🌐 Translated: {translated[:150]}...")
+                    logger.info(f"  Translated: {translated[:150]}...")
 
                 type_en = ""
                 if autuacao.get("type"):
@@ -1304,10 +1281,15 @@ def run_cade_cases_register(
                         matched_deal_id = match_case_to_deal(
                             interessados_text, translated)
                     except Exception as e:
-                        print(f"  ⚠️ Error during deal matching: {e}")
+                        logger.exception(f"  Error during deal matching: {e}")
+                        error_items.append({
+                            "detail_url": detail_url,
+                            "error": str(e),
+                            "step": "match_case_to_deal",
+                        })
 
                 if matched_deal_id:
-                    print(f"  🎯 Deal match found (deal_id={matched_deal_id})")
+                    logger.info(f"  Deal match found (deal_id={matched_deal_id})")
                     case_doc["deal_id"] = matched_deal_id
 
                     if not test_mode:
@@ -1329,27 +1311,31 @@ def run_cade_cases_register(
                                 case_type="BRAZIL",
                             ))
                         except Exception as e:
-                            print(f"  ⚠️ Error verifying USA relation: {e}")
+                            logger.exception(f"  Error verifying USA relation: {e}")
+                            error_items.append({
+                                "detail_url": detail_url,
+                                "error": str(e),
+                                "step": "verify_usa_relation",
+                            })
 
                     if is_usa:
-                        print("  🇺🇸 USA-related (unmatched) — sending email")
+                        logger.info("  USA-related (unmatched) — sending email")
                         if not test_mode:
                             send_usa_related_email(case_doc)
                     else:
-                        print("  ℹ️ No match, not USA-related — saving record only")
+                        logger.info("  No match, not USA-related — saving record only")
 
                 inserted_id = insert_case(collection, case_doc)
                 if inserted_id:
-                    print(f"  ✅ Inserted into brazil_cases (id={inserted_id})")
+                    logger.info(f"  Inserted into brazil_cases (id={inserted_id})")
                     backup = dict(case_doc)
                     backup.pop("_id", None)
                     new_cases.append(backup)
                 else:
-                    print("  ⚠️ Insert failed")
+                    logger.warning("  Insert failed")
 
         except Exception as e:
-            error_count += 1
-            _log_error_and_email(
+            _log_critical_error_and_email(
                 f"Unhandled error in main execution: {e}",
                 {"step": "run_main"},
             )
@@ -1368,21 +1354,37 @@ def run_cade_cases_register(
             with open(BACKUP_JSON, "w", encoding="utf-8") as f:
                 json.dump(serializable, f, indent=2,
                           ensure_ascii=False, default=str)
-            print(f"\n💾 Saved {len(serializable)} cases to {BACKUP_JSON}")
+            logger.info(f"Saved {len(serializable)} cases to {BACKUP_JSON}")
         except Exception as e:
-            print(f"⚠️ Error writing backup JSON: {e}")
+            logger.warning(f"Error writing backup JSON: {e}")
+
+    if error_items:
+        logger.warning(f"{len(error_items)} per-case errors collected — sending summary email")
+        send_error_email(
+            script_name=SCRIPT_NAME,
+            error_message=f"{len(error_items)} errors occurred during run",
+            context={
+                "error_count": len(error_items),
+                "errors": error_items[:20],
+            },
+            traceback_str=None,
+        )
 
     elapsed = round(time.time() - run_start, 1)
     logger.info("")
     logger.info("=" * 60)
     logger.info("SUMMARY")
     logger.info(f"  New cases inserted           : {len(new_cases)}")
-    logger.info(f"  Errors encountered           : {error_count}")
+    logger.info(f"  Errors encountered           : {len(error_items)}")
     logger.info(f"  Total time                   : {elapsed}s")
     logger.info("=" * 60)
 
 
 if __name__ == "__main__":
-    env_flag = os.getenv("CADE_CASES_TEST_MODE", "").lower()
-    test_mode_env = env_flag in ("1", "true", "yes", "y")
-    run_cade_cases_register(test_mode=False, skip_certidao_transitada=True)
+    try:
+        env_flag = os.getenv("CADE_CASES_TEST_MODE", "").lower()
+        test_mode_env = env_flag in ("1", "true", "yes", "y")
+        run_cade_cases_register(test_mode=False, skip_certidao_transitada=True)
+    except Exception as e:
+        _log_critical_error_and_email(f"Unhandled error in __main__: {e}", {"step": "__main__"})
+        raise

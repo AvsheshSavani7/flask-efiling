@@ -12,10 +12,10 @@ Reference: newzeeland_monitor.md, accc_cases_update_monitor.py, nz_comcom_case_u
 import os
 import logging
 import sys
-import builtins
 import time
 import traceback
 from datetime import datetime, timezone, timedelta
+from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
 
@@ -35,15 +35,21 @@ from mongodb_connection import (
     is_connected,
 )
 
+from log_utils import cleanup_old_logs
+
 load_dotenv(".env")
 
 # -----------------------------------------------------------------------------
-# Logging — date-wise log files under /var/data/logs/ (persistent disk)
-# Timestamps in IST (UTC+5:30)
+# Logging — production setup (RotatingFileHandler, IST, env-based settings)
 # -----------------------------------------------------------------------------
 PERSISTENT_LOG_DIR = "/var/data/logs"
 SCRIPT_NAME = "newzealand_cases_update_monitor"
 IST = timezone(timedelta(hours=5, minutes=30))
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
 
 def _get_log_file() -> str:
@@ -55,9 +61,6 @@ def _get_log_file() -> str:
 
 
 LOG_FILE = _get_log_file()
-
-logger = logging.getLogger("nz_cases_update_monitor")
-logger.setLevel(logging.INFO)
 
 
 class _ISTFormatter(logging.Formatter):
@@ -71,9 +74,18 @@ class _ISTFormatter(logging.Formatter):
         return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
 
 
+logger = logging.getLogger(SCRIPT_NAME)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+
 if not logger.handlers:
     formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+
+    fh = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
     fh.setFormatter(formatter)
     logger.addHandler(fh)
 
@@ -83,23 +95,11 @@ if not logger.handlers:
 
 logger.propagate = False
 
-
-def _logged_print(*args, level: str = "info", **kwargs):
-    msg = " ".join(str(a) for a in args)
-    if level == "error":
-        logger.error(msg)
-    elif level == "warning":
-        logger.warning(msg)
-    else:
-        logger.info(msg)
-    builtins.print(*args, **kwargs)
+cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 
 
-print = _logged_print  # type: ignore
-
-
-def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
-    """Log at ERROR level and fire an error email."""
+def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+    """Immediate error email — use ONLY for critical startup / fatal failures."""
     logger.error(msg)
     send_error_email(
         script_name=SCRIPT_NAME,
@@ -162,7 +162,7 @@ def get_open_deals_for_matching() -> List[Dict[str, Any]]:
                 d.pop("_id", None)
         return deals
     except Exception as e:
-        _log_error_and_email(
+        _log_critical_error_and_email(
             f"Error fetching deals: {e}",
             {"step": "get_open_deals_for_matching"},
         )
@@ -293,10 +293,7 @@ def fetch_case_detail_page(page, url: str) -> Optional[Dict[str, Any]]:
             "updates_media": media_section,
         }
     except Exception as e:
-        _log_error_and_email(
-            f"Error fetching detail page: {e}",
-            {"url": url, "step": "fetch_case_detail_page"},
-        )
+        logger.exception(f"Error fetching detail page {url}: {e}")
         return None
 
 
@@ -770,10 +767,7 @@ def send_unmatched_nz_usa_email_via_webhook(case_info: Dict[str, Any], changes: 
                     response.status_code)
         return True
     except Exception as e:
-        _log_error_and_email(
-            f"Error sending USA email via webhook: {e}",
-            {"case_number": case_info.get("case_number", "N/A"), "step": "send_unmatched_nz_usa_email_via_webhook"},
-        )
+        logger.exception(f"Error sending USA email via webhook: {e}")
         return False
 
 
@@ -802,10 +796,7 @@ def update_nz_case_document(collection, doc_id: Any, updated_doc: Dict[str, Any]
             logger.info("Updated nz_cases record")
         return True
     except Exception as e:
-        _log_error_and_email(
-            f"Error updating nz_cases: {e}",
-            {"doc_id": str(doc_id), "step": "update_nz_case_document"},
-        )
+        logger.exception(f"Error updating nz_cases: {e}")
         return False
 
 
@@ -829,22 +820,22 @@ def get_deal_by_id(deal_id: str) -> Optional[Dict[str, Any]]:
 # ---------- Main ----------
 def run():
     run_start = time.time()
-    error_count = 0
+    error_items: List[Dict[str, Any]] = []
 
     logger.info("=" * 60)
-    logger.info(f"Starting NZ Cases Update Monitor")
+    logger.info("Starting NZ Cases Update Monitor")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
 
     success, message = init_mongodb_connection(ENV_PATH)
     if not success:
-        _log_error_and_email(f"MongoDB connection failed: {message}", {"step": "mongodb_connect"})
+        _log_critical_error_and_email(f"MongoDB connection failed: {message}", {"step": "mongodb_connect"})
         return
     logger.info(message)
 
     nz_collection = get_nz_cases_collection()
     if nz_collection is None:
-        _log_error_and_email("nz_cases collection not available", {"step": "get_collection"})
+        _log_critical_error_and_email("nz_cases collection not available", {"step": "get_collection"})
         return
 
     # Step 1: nz_cases with status Open
@@ -1024,16 +1015,32 @@ def run():
         browser.close()
         logger.info("Browser closed")
 
+    if error_items:
+        logger.warning(f"{len(error_items)} per-case errors collected — sending summary email")
+        send_error_email(
+            script_name=SCRIPT_NAME,
+            error_message=f"{len(error_items)} errors occurred during run",
+            context={
+                "error_count": len(error_items),
+                "errors": error_items[:20],
+            },
+            traceback_str=None,
+        )
+
     elapsed = round(time.time() - run_start, 1)
     logger.info("")
     logger.info("=" * 60)
     logger.info("SUMMARY")
     logger.info(f"  Total cases checked          : {total_checked}")
     logger.info(f"  Cases updated                : {total_updated}")
-    logger.info(f"  Errors encountered           : {error_count}")
+    logger.info(f"  Errors encountered           : {len(error_items)}")
     logger.info(f"  Total time                   : {elapsed}s")
     logger.info("=" * 60)
 
 
 if __name__ == "__main__":
-    run()
+    try:
+        run()
+    except Exception as e:
+        _log_critical_error_and_email(f"Unhandled error in __main__: {e}", {"step": "__main__"})
+        raise

@@ -3,12 +3,12 @@ import sys
 import json
 import time
 import logging
-import builtins
 import re
 import base64
 import datetime
 import traceback
 from datetime import timezone, timedelta
+from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
@@ -29,6 +29,7 @@ from mongodb_connection import (
 )
 from cade_cases_register import match_case_to_deal
 from html import escape as escape_html
+from log_utils import cleanup_old_logs
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -52,12 +53,16 @@ N8N_WEBHOOK_URL = os.getenv(
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ---------------------------------------------------------------------------
-# Logging — date-wise log files under /var/data/logs/ (persistent disk)
-# Timestamps in IST (UTC+5:30)
+# Logging — production setup (RotatingFileHandler, IST, env-based settings)
 # ---------------------------------------------------------------------------
 PERSISTENT_LOG_DIR = "/var/data/logs"
 SCRIPT_NAME = "brazil_cases_update_monitor"
 IST = timezone(timedelta(hours=5, minutes=30))
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
 
 def _get_log_file() -> str:
@@ -69,9 +74,6 @@ def _get_log_file() -> str:
 
 
 LOG_FILE = _get_log_file()
-
-logger = logging.getLogger("brazil_cases_update_monitor")
-logger.setLevel(logging.INFO)
 
 
 class _ISTFormatter(logging.Formatter):
@@ -85,9 +87,18 @@ class _ISTFormatter(logging.Formatter):
         return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
 
 
+logger = logging.getLogger(SCRIPT_NAME)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+
 if not logger.handlers:
     formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+
+    fh = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
     fh.setFormatter(formatter)
     logger.addHandler(fh)
 
@@ -97,23 +108,11 @@ if not logger.handlers:
 
 logger.propagate = False
 
-
-def _logged_print(*args, level: str = "info", **kwargs):
-    msg = " ".join(str(a) for a in args)
-    if level == "error":
-        logger.error(msg)
-    elif level == "warning":
-        logger.warning(msg)
-    else:
-        logger.info(msg)
-    builtins.print(*args, **kwargs)
+cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 
 
-print = _logged_print  # type: ignore
-
-
-def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
-    """Log at ERROR level and fire an error email."""
+def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+    """Immediate error email — use ONLY for critical startup / fatal failures."""
     logger.error(msg)
     send_error_email(
         script_name=SCRIPT_NAME,
@@ -432,10 +431,7 @@ def extract_autuacao_info(page, context, url: str) -> Dict[str, str]:
         detail_page.close()
         return info
     except Exception as e:
-        _log_error_and_email(
-            f"Failed to extract Autuação from {url}: {e}",
-            {"url": url, "step": "extract_autuacao_info"},
-        )
+        logger.exception(f"Failed to extract Autuação from {url}: {e}")
         if detail_page:
             try:
                 detail_page.close()
@@ -533,10 +529,7 @@ def extract_tables(page, context, url: str) -> Tuple[List[Dict[str, Any]], List[
         detail_page.close()
         return table_data, hist_data
     except Exception as e:
-        _log_error_and_email(
-            f"Failed to extract tables from {url}: {e}",
-            {"url": url, "step": "extract_tables"},
-        )
+        logger.exception(f"Failed to extract tables from {url}: {e}")
         if detail_page:
             try:
                 detail_page.close()
@@ -686,10 +679,7 @@ def update_case_in_db(
             logger.info(f"    No DB changes (document may be identical)")
         return True
     except Exception as e:
-        _log_error_and_email(
-            f"Error updating case: {e}",
-            {"case_id": str(case_id), "step": "update_case_in_db"},
-        )
+        logger.exception(f"Error updating case: {e}")
         return False
 
 
@@ -710,11 +700,7 @@ def _post_email_payload(payload: Dict[str, Any]) -> bool:
         logger.info(f"    Email sent successfully (status={resp.status_code})")
         return True
     except Exception as e:
-        _log_error_and_email(
-            f"Error sending email via webhook: {e}",
-            {"subject": payload.get("subject", "N/A"),
-             "step": "_post_email_payload"},
-        )
+        logger.exception(f"Error sending email via webhook: {e}")
         return False
 
 
@@ -871,30 +857,29 @@ def process_brazil_cases_updates(headless: bool = True):
     Change-detection fields: type, interessados, table_records, historico_records.
     """
     run_start = time.time()
-    error_count = 0
+    error_items: List[Dict[str, Any]] = []
 
     logger.info("=" * 60)
-    logger.info(f"Starting CADE Brazil Cases Update Monitor")
+    logger.info("Starting CADE Brazil Cases Update Monitor")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
-    print("🚀 Starting CADE Brazil Cases Update Monitor\n")
 
-    print("🔌 Initializing MongoDB connection...")
+    logger.info("Initializing MongoDB connection...")
     ok, msg = init_mongodb_connection(ENV_PATH)
     if not ok:
-        _log_error_and_email(f"MongoDB connection failed: {msg}", {
+        _log_critical_error_and_email(f"MongoDB connection failed: {msg}", {
                              "step": "mongodb_connect"})
         return
-    print(f"✅ {msg}\n")
+    logger.info(f"MongoDB: {msg}")
 
     if not is_connected():
-        _log_error_and_email("MongoDB not connected after init", {
+        _log_critical_error_and_email("MongoDB not connected after init", {
                              "step": "mongodb_connect"})
         return
 
     cases_collection = get_brazil_cases_collection()
     if cases_collection is None:
-        _log_error_and_email("Could not access 'brazil_cases' collection", {
+        _log_critical_error_and_email("Could not access 'brazil_cases' collection", {
                              "step": "get_collection"})
         return
 
@@ -910,10 +895,10 @@ def process_brazil_cases_updates(headless: bool = True):
     # Step 1: fetch open records from brazil_cases
     cases = list(cases_collection.find({"is_open": True}))
     if not cases:
-        print("⚠️ No open records in brazil_cases. Exiting.")
+        logger.info("No open records in brazil_cases. Exiting.")
         return
 
-    print(f"📊 Found {len(cases)} open records in brazil_cases\n")
+    logger.info(f"Found {len(cases)} open records in brazil_cases")
 
     total_checked = 0
     total_changed = 0
@@ -943,10 +928,10 @@ def process_brazil_cases_updates(headless: bool = True):
                 process_num = case_doc.get("process", "N/A")
                 detail_url = case_doc.get("detail_url")
 
-                print(f"[{idx}/{len(cases)}] Process {process_num}")
+                logger.info(f"[{idx}/{len(cases)}] Process {process_num}")
 
                 if not detail_url:
-                    print("  ⚠️ No detail_url; skipping")
+                    logger.warning("  No detail_url; skipping")
                     continue
 
                 # Step 3: extract fresh data from live page
@@ -956,8 +941,8 @@ def process_brazil_cases_updates(headless: bool = True):
 
                 live_table, live_historico = extract_tables(
                     page, context, detail_url)
-                print(f"  📊 Live: type={live_type[:50]}..., "
-                      f"table_records={len(live_table)}, historico={len(live_historico)}")
+                logger.info(f"  Live: type={live_type[:50]}..., "
+                            f"table_records={len(live_table)}, historico={len(live_historico)}")
 
                 should_close = any(
                     rec.get("tipo_documento", "").strip(
@@ -965,8 +950,7 @@ def process_brazil_cases_updates(headless: bool = True):
                     for rec in live_table
                 )
                 if should_close:
-                    print(
-                        "  🔒 'Certidão de Trânsito em Julgado' found — will set is_open=False")
+                    logger.info("  'Certidão de Trânsito em Julgado' found — will set is_open=False")
 
                 # Step 4: detect changes
                 changes = detect_changes(
@@ -974,11 +958,11 @@ def process_brazil_cases_updates(headless: bool = True):
                 )
 
                 if not changes and not should_close:
-                    print("  ✅ No changes detected")
+                    logger.info("  No changes detected")
                     continue
 
                 if not changes and should_close:
-                    print("  🔒 No field changes but closing case (is_open → False)")
+                    logger.info("  No field changes but closing case (is_open → False)")
                     update_case_in_db(
                         cases_collection, case_doc, changes,
                         live_table, live_historico,
@@ -987,13 +971,12 @@ def process_brazil_cases_updates(headless: bool = True):
                     continue
 
                 total_changed += 1
-                print(f"  🔄 {len(changes)} change(s) detected:")
+                logger.info(f"  {len(changes)} change(s) detected:")
                 for field, old_val, new_val, ctype in changes:
                     if ctype == "new_items":
-                        print(f"    • {field}: {len(new_val)} new item(s)")
+                        logger.info(f"    {field}: {len(new_val)} new item(s)")
                     else:
-                        print(
-                            f"    • {field}: {old_val} → {new_val} ({ctype})")
+                        logger.info(f"    {field}: {old_val} → {new_val} ({ctype})")
 
                 # Step 5: branch on deal_id
                 deal = None
@@ -1006,10 +989,11 @@ def process_brazil_cases_updates(headless: bool = True):
                             {"_id": ObjectId(deal_id), **deals_status_filter}
                         )
                     except Exception as e:
-                        print(f"    ⚠️ Invalid deal_id: {e}")
+                        logger.exception(f"    Invalid deal_id: {e}")
+                        error_items.append({"process": process_num, "error": str(e), "step": "resolve_deal"})
 
                     if deal:
-                        print("    🔗 Deal linked — sending email")
+                        logger.info("    Deal linked — sending email")
                         send_update_email(case_doc, changes, deal)
                         update_case_in_db(
                             cases_collection, case_doc, changes,
@@ -1030,11 +1014,11 @@ def process_brazil_cases_updates(headless: bool = True):
                         matched_deal_id = match_case_to_deal(
                             interessados_text, translated_text)
                     except Exception as e:
-                        print(f"    ⚠️ Error during deal matching: {e}")
+                        logger.exception(f"    Error during deal matching: {e}")
+                        error_items.append({"process": process_num, "error": str(e), "step": "match_case_to_deal"})
 
                 if matched_deal_id:
-                    print(
-                        f"    🎯 Deal match found (deal_id={matched_deal_id})")
+                    logger.info(f"    Deal match found (deal_id={matched_deal_id})")
                     matched_deal = None
                     if deals_collection is not None:
                         try:
@@ -1042,7 +1026,8 @@ def process_brazil_cases_updates(headless: bool = True):
                                 {"_id": ObjectId(matched_deal_id)}
                             )
                         except Exception as e:
-                            print(f"    ⚠️ Error resolving matched deal: {e}")
+                            logger.exception(f"    Error resolving matched deal: {e}")
+                            error_items.append({"process": process_num, "error": str(e), "step": "resolve_matched_deal"})
 
                     send_update_email(case_doc, changes, matched_deal)
                     update_case_in_db(
@@ -1069,10 +1054,11 @@ def process_brazil_cases_updates(headless: bool = True):
                                 case_type="BRAZIL",
                             ))
                         except Exception as e:
-                            print(f"    ⚠️ Error verifying USA relation: {e}")
+                            logger.exception(f"    Error verifying USA relation: {e}")
+                            error_items.append({"process": process_num, "error": str(e), "step": "verify_usa_relation"})
 
                     if is_usa:
-                        print("    🇺🇸 USA-related — sending email")
+                        logger.info("    USA-related — sending email")
                         send_update_email(case_doc, changes, None)
 
                     update_case_in_db(
@@ -1084,8 +1070,7 @@ def process_brazil_cases_updates(headless: bool = True):
                 time.sleep(2)
 
         except Exception as e:
-            error_count += 1
-            _log_error_and_email(
+            _log_critical_error_and_email(
                 f"Unhandled error in monitoring: {e}",
                 {"step": "run_main"},
             )
@@ -1093,16 +1078,32 @@ def process_brazil_cases_updates(headless: bool = True):
             browser.close()
             logger.info("Browser closed")
 
+    if error_items:
+        logger.warning(f"{len(error_items)} per-case errors collected — sending summary email")
+        send_error_email(
+            script_name=SCRIPT_NAME,
+            error_message=f"{len(error_items)} errors occurred during run",
+            context={
+                "error_count": len(error_items),
+                "errors": error_items[:20],
+            },
+            traceback_str=None,
+        )
+
     elapsed = round(time.time() - run_start, 1)
     logger.info("")
     logger.info("=" * 60)
     logger.info("SUMMARY")
     logger.info(f"  Total records checked        : {total_checked}")
     logger.info(f"  Records with changes         : {total_changed}")
-    logger.info(f"  Errors encountered           : {error_count}")
+    logger.info(f"  Errors encountered           : {len(error_items)}")
     logger.info(f"  Total time                   : {elapsed}s")
     logger.info("=" * 60)
 
 
 if __name__ == "__main__":
-    process_brazil_cases_updates(headless=True)
+    try:
+        process_brazil_cases_updates(headless=True)
+    except Exception as e:
+        _log_critical_error_and_email(f"Unhandled error in __main__: {e}", {"step": "__main__"})
+        raise

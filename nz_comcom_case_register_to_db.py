@@ -9,10 +9,10 @@ collection. Skips records whose case number already exists in nz_cases.
 import os
 import sys
 import logging
-import builtins
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
+from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
 
@@ -31,15 +31,21 @@ from mongodb_connection import (
     is_connected,
 )
 
+from log_utils import cleanup_old_logs
+
 load_dotenv(".env")
 
 # -----------------------------------------------------------------------------
-# Logging — date-wise log files under /var/data/logs/ (persistent disk)
-# Timestamps in IST (UTC+5:30)
+# Logging — production setup (RotatingFileHandler, IST, env-based settings)
 # -----------------------------------------------------------------------------
 PERSISTENT_LOG_DIR = "/var/data/logs"
 SCRIPT_NAME = "newzealand_cases_register"
 IST = timezone(timedelta(hours=5, minutes=30))
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
 
 def _get_log_file() -> str:
@@ -51,9 +57,6 @@ def _get_log_file() -> str:
 
 
 LOG_FILE = _get_log_file()
-
-logger = logging.getLogger("nz_comcom_case_register_to_db")
-logger.setLevel(logging.INFO)
 
 
 class _ISTFormatter(logging.Formatter):
@@ -67,9 +70,18 @@ class _ISTFormatter(logging.Formatter):
         return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
 
 
+logger = logging.getLogger(SCRIPT_NAME)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+
 if not logger.handlers:
     formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+
+    fh = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
     fh.setFormatter(formatter)
     logger.addHandler(fh)
 
@@ -79,23 +91,11 @@ if not logger.handlers:
 
 logger.propagate = False
 
-
-def _logged_print(*args, level: str = "info", **kwargs):
-    msg = " ".join(str(a) for a in args)
-    if level == "error":
-        logger.error(msg)
-    elif level == "warning":
-        logger.warning(msg)
-    else:
-        logger.info(msg)
-    builtins.print(*args, **kwargs)
+cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 
 
-print = _logged_print  # type: ignore
-
-
-def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
-    """Log at ERROR level and fire an error email."""
+def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+    """Immediate error email — use ONLY for critical startup / fatal failures."""
     logger.error(msg)
     send_error_email(
         script_name=SCRIPT_NAME,
@@ -182,7 +182,7 @@ def get_open_deals_for_matching() -> List[Dict[str, Any]]:
                 d.pop("_id", None)
         return deals
     except Exception as e:
-        _log_error_and_email(
+        _log_critical_error_and_email(
             f"Error fetching deals: {e}",
             {"step": "get_open_deals_for_matching"},
         )
@@ -272,10 +272,7 @@ If no deal satisfies this rule, respond exactly: None"""
             logger.warning(f"   LLM match result: malformed response")
             return None
     except Exception as e:
-        _log_error_and_email(
-            f"LLM match error: {e}",
-            {"title": title[:80], "parties": parties[:80], "step": "match_case_to_deal"},
-        )
+        logger.exception(f"LLM match error: {e}")
         return None
 
 
@@ -292,10 +289,7 @@ def _post_webhook(payload: Dict[str, Any]) -> bool:
         logger.info(f"   Email sent successfully (status={resp.status_code})")
         return True
     except Exception as e:
-        _log_error_and_email(
-            f"Error sending email via webhook: {e}",
-            {"subject": payload.get("subject", "N/A"), "step": "_post_webhook"},
-        )
+        logger.exception(f"Error sending email via webhook: {e}")
         return False
 
 
@@ -565,10 +559,7 @@ def fetch_case_detail_page(page, url: str) -> Optional[Dict[str, Any]]:
             "updates_media": media_section,
         }
     except Exception as e:
-        _log_error_and_email(
-            f"Error fetching detail page: {e}",
-            {"url": url, "step": "fetch_case_detail_page"},
-        )
+        logger.exception(f"Error fetching detail page {url}: {e}")
         return None
 
 
@@ -641,7 +632,7 @@ def build_case_document(list_item: Dict[str, Any], detail: Dict[str, Any]) -> Di
 def run():
     """Main: build list URL, scrape list, for each item fetch detail, check nz_cases by detail_url, insert if new."""
     run_start = time.time()
-    error_count = 0
+    error_items: List[Dict[str, Any]] = []
     env_flag = os.getenv("NZ_CASES_TEST_MODE", "").lower()
     test_mode = env_flag in ("1", "true", "yes", "y")
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"
@@ -650,17 +641,16 @@ def run():
     logger.info(f"Starting NZ Case Register ({mode_label})")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
-    print(f"🚀 NZ Case Register → DB ({mode_label})\n")
 
     success, message = init_mongodb_connection(ENV_PATH)
     if not success:
-        _log_error_and_email(f"MongoDB connection failed: {message}", {"step": "mongodb_connect"})
+        _log_critical_error_and_email(f"MongoDB connection failed: {message}", {"step": "mongodb_connect"})
         return
-    print(f"✅ {message}")
+    logger.info(f"MongoDB: {message}")
 
     collection = get_nz_cases_collection()
     if collection is None:
-        _log_error_and_email("nz_cases collection not available", {"step": "get_collection"})
+        _log_critical_error_and_email("nz_cases collection not available", {"step": "get_collection"})
         return
 
     deals = get_open_deals_for_matching()
@@ -668,7 +658,7 @@ def run():
 
     open_date = get_open_date_one_week_ago()
     list_url = LIST_URL_TEMPLATE.format(open_date=open_date)
-    print(f"📋 List URL (open_date={open_date}): {list_url}\n")
+    logger.info(f"List URL (open_date={open_date}): {list_url}")
 
     inserted = 0
     skipped = 0
@@ -683,28 +673,26 @@ def run():
         page.wait_for_timeout(2000)
         list_html = page.content()
         items = extract_list_items_from_html(list_html)
-        print(
-            f"✅ Found {len(items)} list items from ol.filter__results-list\n")
+        logger.info(f"Found {len(items)} list items from ol.filter__results-list")
 
         for i, list_item in enumerate(items, 1):
             title = list_item.get("title", "?")
             detail_url = list_item.get("detail_url", "")
             if not detail_url:
-                print(f"   [{i}/{len(items)}] No detail URL, skipping: {title}")
+                logger.warning(f"   [{i}/{len(items)}] No detail URL, skipping: {title}")
                 continue
 
-            print(f"   [{i}/{len(items)}] {title}")
+            logger.info(f"   [{i}/{len(items)}] {title}")
 
-            # Check nz_cases by detail_url (dedupe key)
             if not test_mode and detail_url_exists(collection, detail_url):
-                print(f"      ⏭️ detail_url already in nz_cases, skip")
+                logger.info(f"      detail_url already in nz_cases, skip")
                 skipped += 1
                 continue
 
-            # Step 2: fetch detail page
             detail = fetch_case_detail_page(page, detail_url)
             if not detail:
-                print(f"      ⚠️ Could not fetch detail, skipping")
+                logger.warning(f"      Could not fetch detail, skipping")
+                error_items.append({"title": title, "error": "Detail fetch failed", "step": "fetch_case_detail_page"})
                 continue
 
             doc = build_case_document(list_item, detail)
@@ -722,7 +710,7 @@ def run():
 
             if deal_id:
                 doc["deal_id"] = deal_id
-                print(f"      🎯 Deal match found (deal_id={deal_id})")
+                logger.info(f"      Deal match found (deal_id={deal_id})")
                 if not test_mode:
                     send_nz_new_case_matched_email(doc, deal_id)
             else:
@@ -741,12 +729,12 @@ def run():
                             company_details=nz_details, case_type="NZ")
                     )
                 except Exception as e:
-                    print(f"      ⚠️ USA verification error: {e}")
+                    logger.exception(f"      USA verification error: {e}")
+                    error_items.append({"title": title, "error": str(e), "step": "verify_usa_relation"})
                     is_usa = False
 
                 if is_usa:
-                    # doc["usa_related"] = True
-                    print("      🇺🇸 USA-related (unmatched)")
+                    logger.info("      USA-related (unmatched)")
                     if not test_mode:
                         send_unmatched_nz_usa_email_via_webhook(doc)
 
@@ -758,19 +746,31 @@ def run():
                         inserted += 1
                     else:
                         updated += 1
-                    print(f"      🧪 Upserted into nz_cases ({action})")
+                    logger.info(f"      Upserted into nz_cases ({action})")
                 else:
                     collection.insert_one(doc)
                     case_number = (doc.get("case_number") or "").strip()
                     extra = f" case_number={case_number}" if case_number else ""
-                    print(
-                        f"      ✅ Inserted into nz_cases (detail_url){extra}")
+                    logger.info(f"      Inserted into nz_cases (detail_url){extra}")
                     inserted += 1
             except Exception as e:
-                print(f"      ⚠️ Insert failed: {e}")
+                logger.exception(f"      Insert failed: {e}")
+                error_items.append({"title": title, "error": str(e), "step": "insert_case"})
 
         browser.close()
         logger.info("Browser closed")
+
+    if error_items:
+        logger.warning(f"{len(error_items)} per-case errors collected — sending summary email")
+        send_error_email(
+            script_name=SCRIPT_NAME,
+            error_message=f"{len(error_items)} errors occurred during run",
+            context={
+                "error_count": len(error_items),
+                "errors": error_items[:20],
+            },
+            traceback_str=None,
+        )
 
     elapsed = round(time.time() - run_start, 1)
     logger.info("")
@@ -779,10 +779,14 @@ def run():
     logger.info(f"  Inserted                     : {inserted}")
     logger.info(f"  Updated                      : {updated}")
     logger.info(f"  Skipped (already in DB)      : {skipped}")
-    logger.info(f"  Errors encountered           : {error_count}")
+    logger.info(f"  Errors encountered           : {len(error_items)}")
     logger.info(f"  Total time                   : {elapsed}s")
     logger.info("=" * 60)
 
 
 if __name__ == "__main__":
-    run()
+    try:
+        run()
+    except Exception as e:
+        _log_critical_error_and_email(f"Unhandled error in __main__: {e}", {"step": "__main__"})
+        raise
