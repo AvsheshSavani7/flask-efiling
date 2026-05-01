@@ -82,6 +82,7 @@ logger.setLevel(logging.INFO)
 
 class _ISTFormatter(logging.Formatter):
     """Format log timestamps in IST."""
+
     def converter(self, timestamp):
         return datetime.fromtimestamp(timestamp, tz=IST)
 
@@ -125,6 +126,7 @@ def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
         context=context,
         traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
     )
+
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -197,12 +199,14 @@ def scrape_case_page(context, case_number: str) -> Optional[Dict[str, Any]]:
         resp = page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
         http_status = resp.status if resp else "N/A"
-        logger.info(f"  [{case_number}] Page response: status={http_status}, url={resp.url if resp else url}")
+        logger.info(
+            f"  [{case_number}] Page response: status={http_status}, url={resp.url if resp else url}")
 
         if resp and resp.status >= 400:
             _log_error_and_email(
                 f"Detail page returned HTTP {resp.status} for {case_number}",
-                {"case_number": case_number, "url": url, "http_status": resp.status, "step": "scrape_case_page"},
+                {"case_number": case_number, "url": url,
+                    "http_status": resp.status, "step": "scrape_case_page"},
             )
             return None
 
@@ -211,7 +215,8 @@ def scrape_case_page(context, case_number: str) -> Optional[Dict[str, Any]]:
         spa_loaded = wait_for_spa_content(page, timeout_s=15)
         logger.info(f"  [{case_number}] SPA content loaded: {spa_loaded}")
         if not spa_loaded:
-            logger.warning(f"  [{case_number}] SPA not ready, waiting 3s fallback")
+            logger.warning(
+                f"  [{case_number}] SPA not ready, waiting 3s fallback")
             page.wait_for_timeout(3000)
 
         html = page.content()
@@ -219,12 +224,16 @@ def scrape_case_page(context, case_number: str) -> Optional[Dict[str, Any]]:
 
         parsed = parse_case_html(html, case_number)
         if parsed and not parsed.get("error"):
-            logger.info(f"  [{case_number}] Parsed fields: {list(parsed.keys())}")
+            for k, v in parsed.items():
+                display = json.dumps(v, ensure_ascii=False, default=str) if isinstance(v, (dict, list)) else str(v)
+                logger.info(f"  [{case_number}] {k}: {display}")
         else:
-            error_msg = parsed.get("error") if parsed else "parse returned None"
+            error_msg = parsed.get(
+                "error") if parsed else "parse returned None"
             _log_error_and_email(
                 f"HTML parse failed for {case_number}: {error_msg}",
-                {"case_number": case_number, "url": url, "html_length": len(html), "step": "parse_case_html"},
+                {"case_number": case_number, "url": url,
+                    "html_length": len(html), "step": "parse_case_html"},
             )
         return parsed
     except Exception as exc:
@@ -789,7 +798,8 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
             # Step 4: Scrape detail page
             new_data = scrape_case_page(context, case_number)
             if not new_data or new_data.get("error"):
-                logger.warning(f"  [{case_number}] Scrape/parse failed — skipping (error email already sent)")
+                logger.warning(
+                    f"  [{case_number}] Scrape/parse failed — skipping (error email already sent)")
                 continue
 
             # Step 5: Compare all fields

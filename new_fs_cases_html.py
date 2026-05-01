@@ -78,6 +78,7 @@ logger.setLevel(logging.INFO)
 
 class _ISTFormatter(logging.Formatter):
     """Format log timestamps in IST."""
+
     def converter(self, timestamp):
         return datetime.fromtimestamp(timestamp, tz=IST)
 
@@ -121,6 +122,7 @@ def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
         context=context,
         traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
     )
+
 
 # OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -287,7 +289,8 @@ def scrape_case_detail(context, url: str) -> Optional[Dict[str, Any]]:
         spa_loaded = wait_for_spa_content(page, timeout_s=15)
         logger.info(f"  [{case_num}] SPA content loaded: {spa_loaded}")
         if not spa_loaded:
-            logger.warning(f"  [{case_num}] SPA not ready, waiting 3s fallback")
+            logger.warning(
+                f"  [{case_num}] SPA not ready, waiting 3s fallback")
             page.wait_for_timeout(3000)
 
         html = page.content()
@@ -296,7 +299,8 @@ def scrape_case_detail(context, url: str) -> Optional[Dict[str, Any]]:
         if parsed and not parsed.get("error"):
             logger.info(f"  [{case_num}] Parsed fields: {list(parsed.keys())}")
         else:
-            logger.warning(f"  [{case_num}] Parse returned error: {parsed.get('error') if parsed else 'None'}")
+            logger.warning(
+                f"  [{case_num}] Parse returned error: {parsed.get('error') if parsed else 'None'}")
         return parsed
     except Exception as exc:
         _log_error_and_email(
@@ -338,7 +342,8 @@ def get_fs_cases_collection():
 
 def case_exists(collection, case_number: str) -> bool:
     try:
-        exists = collection.count_documents({"case_number": case_number}, limit=1) > 0
+        exists = collection.count_documents(
+            {"case_number": case_number}, limit=1) > 0
         return exists
     except Exception as e:
         _log_error_and_email(
@@ -372,7 +377,8 @@ def fetch_deals() -> List[Dict[str, Any]]:
         if deals:
             sample = deals[:3]
             for d in sample:
-                logger.info(f"  Sample deal: id={d.get('deal_id')} | target={d.get('target') or d.get('target_name','N/A')} | acquirer={d.get('acquirer') or d.get('acquire_name','N/A')}")
+                logger.info(
+                    f"  Sample deal: id={d.get('deal_id')} | target={d.get('target') or d.get('target_name','N/A')} | acquirer={d.get('acquirer') or d.get('acquire_name','N/A')}")
         return deals
     except Exception as e:
         _log_error_and_email(
@@ -476,8 +482,10 @@ RESPONSE FORMAT:
             ],
         )
         content = (res.choices[0].message.content or "").strip()
-        tokens_used = getattr(res.usage, "total_tokens", "N/A") if res.usage else "N/A"
-        logger.info(f"  LLM match raw response: {content} (tokens={tokens_used})")
+        tokens_used = getattr(res.usage, "total_tokens",
+                              "N/A") if res.usage else "N/A"
+        logger.info(
+            f"  LLM match raw response: {content} (tokens={tokens_used})")
 
         if not content.lower().startswith("match:"):
             logger.info(f"  LLM match result: None (no match prefix)")
@@ -485,7 +493,8 @@ RESPONSE FORMAT:
 
         parts = content[6:].strip().split("|")
         if len(parts) < 3:
-            logger.warning(f"  LLM match result: malformed response, parts={parts}")
+            logger.warning(
+                f"  LLM match result: malformed response, parts={parts}")
             return None
 
         deal_id = parts[0].strip()
@@ -493,7 +502,8 @@ RESPONSE FORMAT:
         role_raw = parts[2].strip().lower().replace("(", "").replace(")", "")
         matched_role = role_raw if role_raw in (
             "target", "acquirer") else "acquirer"
-        logger.info(f"  LLM match result: deal_id={deal_id} | company={matched_company} | role={matched_role}")
+        logger.info(
+            f"  LLM match result: deal_id={deal_id} | company={matched_company} | role={matched_role}")
         return (deal_id, matched_company, matched_role)
     except Exception as e:
         _log_error_and_email(
@@ -535,12 +545,14 @@ def send_email_via_webhook(
             timeout=30,
         )
         resp.raise_for_status()
-        logger.info(f"  [{case_number}] Email sent successfully (status={resp.status_code})")
+        logger.info(
+            f"  [{case_number}] Email sent successfully (status={resp.status_code})")
         return True
     except Exception as e:
         _log_error_and_email(
             f"Error sending notification email for {case_number}: {e}",
-            {"case_number": case_number, "subject": subject, "step": "send_email_via_webhook"},
+            {"case_number": case_number, "subject": subject,
+                "step": "send_email_via_webhook"},
         )
         return False
 
@@ -806,13 +818,15 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
         logger.info("[STEP 2] Loading deals from MongoDB...")
         deals = fetch_deals()
         if not deals:
-            logger.warning("[STEP 2] No open/unknown deals found. Will still register cases.")
+            logger.warning(
+                "[STEP 2] No open/unknown deals found. Will still register cases.")
 
         deal_by_id: Dict[str, Dict[str, Any]] = {
             (d.get("deal_id") or str(d.get("_id", ""))): d
             for d in deals if d.get("deal_id") or d.get("_id")
         }
-        logger.info(f"[STEP 2] Deal lookup map built ({len(deal_by_id)} entries)")
+        logger.info(
+            f"[STEP 2] Deal lookup map built ({len(deal_by_id)} entries)")
 
         # --- Step 3: Playwright scraping ---
         logger.info("[STEP 3] Launching Playwright browser...")
@@ -830,10 +844,12 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
 
             current_page = 1
             while True:
-                logger.info(f"\n[Page {current_page}] Collecting case links...")
+                logger.info(
+                    f"\n[Page {current_page}] Collecting case links...")
                 search_page.wait_for_timeout(1000)
                 links = collect_case_links(search_page, selector)
-                logger.info(f"[Page {current_page}] Found {len(links)} case links")
+                logger.info(
+                    f"[Page {current_page}] Found {len(links)} case links")
 
                 for item in links:
                     url = item["url"]
@@ -843,7 +859,8 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
 
                     case_num = extract_case_num(url)
                     if not case_num:
-                        logger.warning(f"  Could not extract case number from {url}")
+                        logger.warning(
+                            f"  Could not extract case number from {url}")
                         continue
 
                     # DB check
@@ -856,7 +873,8 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                     logger.info(f"  [{case_num}] Scraping detail page...")
                     case = scrape_case_detail(context, url)
                     if not case or case.get("error"):
-                        logger.warning(f"  [{case_num}] Parse failed; skipping")
+                        logger.warning(
+                            f"  [{case_num}] Parse failed; skipping")
                         error_count += 1
                         continue
 
@@ -869,17 +887,20 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                     now_iso = utc_now_iso()
 
                     # --- LLM #1: deal match ---
-                    logger.info(f"  [{case_num}] LLM Call #1: deal match (companies={companies})...")
+                    logger.info(
+                        f"  [{case_num}] LLM Call #1: deal match (companies={companies})...")
                     match_result = match_case_to_deal(
                         companies, deals) if deals else None
 
                     if match_result:
                         matched_deal_id, matched_company, matched_role = match_result
-                        logger.info(f"  [{case_num}] LLM returned match: deal_id={matched_deal_id}, company={matched_company}, role={matched_role}")
+                        logger.info(
+                            f"  [{case_num}] LLM returned match: deal_id={matched_deal_id}, company={matched_company}, role={matched_role}")
                         deal = deal_by_id.get(matched_deal_id)
 
                         if not deal:
-                            logger.info(f"  [{case_num}] deal_id={matched_deal_id} not in cache, querying DB...")
+                            logger.info(
+                                f"  [{case_num}] deal_id={matched_deal_id} not in cache, querying DB...")
                             try:
                                 deals_coll = get_deals_collection()
                                 if deals_coll:
@@ -888,20 +909,26 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                                     if raw:
                                         raw["deal_id"] = str(raw["_id"])
                                         deal = raw
-                                        logger.info(f"  [{case_num}] Found deal in DB: target={raw.get('target')}, acquirer={raw.get('acquirer')}")
+                                        logger.info(
+                                            f"  [{case_num}] Found deal in DB: target={raw.get('target')}, acquirer={raw.get('acquirer')}")
                                     else:
-                                        logger.warning(f"  [{case_num}] deal_id={matched_deal_id} not found in DB either")
+                                        logger.warning(
+                                            f"  [{case_num}] deal_id={matched_deal_id} not found in DB either")
                             except Exception as e:
                                 _log_error_and_email(
                                     f"Error looking up deal {matched_deal_id}: {e}",
-                                    {"case_number": case_num, "deal_id": matched_deal_id, "step": "deal_lookup"},
+                                    {"case_number": case_num,
+                                        "deal_id": matched_deal_id, "step": "deal_lookup"},
                                 )
                                 error_count += 1
 
                         if deal:
-                            target = deal.get("target") or deal.get("target_name", "N/A")
-                            acquirer = deal.get("acquirer") or deal.get("acquire_name", "N/A")
-                            logger.info(f"  [{case_num}] Matched deal: target={target} | acquirer={acquirer} | deal_id={matched_deal_id}")
+                            target = deal.get("target") or deal.get(
+                                "target_name", "N/A")
+                            acquirer = deal.get("acquirer") or deal.get(
+                                "acquire_name", "N/A")
+                            logger.info(
+                                f"  [{case_num}] Matched deal: target={target} | acquirer={acquirer} | deal_id={matched_deal_id}")
 
                             subject, html_email = generate_matched_email(
                                 case, deal, companies)
@@ -924,22 +951,27 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                                 f"  [{case_num}] LLM returned deal_id={matched_deal_id} but deal not found anywhere; falling through to USA check")
 
                     # --- LLM #2: USA check ---
-                    logger.info(f"  [{case_num}] LLM Call #2: USA-related check (companies={companies})...")
+                    logger.info(
+                        f"  [{case_num}] LLM Call #2: USA-related check (companies={companies})...")
                     try:
                         is_usa = verify_usa_relation(
                             company_details=companies, case_type="FS")
-                        logger.info(f"  [{case_num}] USA check result: {is_usa}")
+                        logger.info(
+                            f"  [{case_num}] USA check result: {is_usa}")
                     except Exception as e:
                         _log_error_and_email(
                             f"USA check error for {case_num}: {e}",
-                            {"case_number": case_num, "companies": str(companies), "step": "verify_usa_relation"},
+                            {"case_number": case_num, "companies": str(
+                                companies), "step": "verify_usa_relation"},
                         )
                         is_usa = False
                         error_count += 1
 
                     if is_usa:
-                        logger.info(f"  [{case_num}] USA-related case detected — sending email")
-                        subject, html_email = generate_usa_email(case, companies)
+                        logger.info(
+                            f"  [{case_num}] USA-related case detected — sending email")
+                        subject, html_email = generate_usa_email(
+                            case, companies)
                         send_email_via_webhook(
                             subject, html_email, case_num, case_title, usa_related=True)
 
@@ -970,7 +1002,8 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                     break
 
                 if not click_next_page(search_page):
-                    logger.info("No more pages (next button not found or disabled)")
+                    logger.info(
+                        "No more pages (next button not found or disabled)")
                     break
 
                 selector = wait_for_results(search_page)
