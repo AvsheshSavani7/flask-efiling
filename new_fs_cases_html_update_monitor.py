@@ -840,7 +840,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
 
             for idx, case_doc in enumerate(open_cases, 1):
                 case_number = case_doc.get("case_number", "")
-                old_title = case_doc.get("case_title", "N/A")
+                old_title = case_doc.get("case_title") or "N/A"
                 deal_id = case_doc.get("deal_id")
 
                 logger.info(
