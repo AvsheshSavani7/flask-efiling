@@ -7,7 +7,8 @@ import builtins
 import re
 import base64
 import datetime
-from datetime import date
+import traceback
+from datetime import date, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
@@ -18,6 +19,7 @@ from openai import OpenAI
 from playwright.sync_api import sync_playwright
 
 from llm_verification_service import verify_usa_relation
+from error_email_service import send_error_email
 from mongodb_connection import (
     get_database,
     get_deals_collection,
@@ -63,17 +65,49 @@ N8N_WEBHOOK_URL = os.getenv(
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ---------------------------------------------------------------------------
-# Logging (matches accc_cases_register pattern)
+# Logging — date-wise log files under /var/data/logs/ (persistent disk)
+# Timestamps in IST (UTC+5:30)
 # ---------------------------------------------------------------------------
-LOG_LEVEL = (os.getenv("LOG_LEVEL") or "INFO").upper()
-logger = logging.getLogger("cade_cases_register")
-logger.setLevel(LOG_LEVEL)
+PERSISTENT_LOG_DIR = "/var/data/logs"
+SCRIPT_NAME = "brazil_cases_register"
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _get_log_file() -> str:
+    base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
+    log_dir = os.path.join(base, SCRIPT_NAME)
+    os.makedirs(log_dir, exist_ok=True)
+    today = datetime.datetime.now(IST).strftime("%Y-%m-%d")
+    return os.path.join(log_dir, f"{today}.log")
+
+
+LOG_FILE = _get_log_file()
+
+logger = logging.getLogger("brazil_cases_register")
+logger.setLevel(logging.INFO)
+
+
+class _ISTFormatter(logging.Formatter):
+    def converter(self, timestamp):
+        return datetime.datetime.fromtimestamp(timestamp, tz=IST)
+
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            return ct.strftime(datefmt)
+        return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
+
+
 if not logger.handlers:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-    )
-    logger.addHandler(handler)
+    formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
+    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
+
 logger.propagate = False
 
 
@@ -91,8 +125,19 @@ def _logged_print(*args, level: str = "info", **kwargs):
 print = _logged_print  # type: ignore
 
 
+def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+    """Log at ERROR level and fire an error email."""
+    logger.error(msg)
+    send_error_email(
+        script_name=SCRIPT_NAME,
+        error_message=msg,
+        context=context,
+        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
+    )
+
+
 def utc_now_iso() -> str:
-    return datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
@@ -110,16 +155,25 @@ def case_exists_by_url(collection, detail_url: str) -> bool:
     try:
         return collection.count_documents({"detail_url": detail_url}, limit=1) > 0
     except Exception as e:
-        print(f"⚠️ Error checking existing case: {e}")
+        _log_error_and_email(
+            f"Error checking existing case: {e}",
+            {"detail_url": detail_url, "step": "case_exists_by_url"},
+        )
         return False
 
 
 def insert_case(collection, case_info: Dict[str, Any]) -> Optional[str]:
+    process = case_info.get("process", "?")
     try:
         result = collection.insert_one(case_info)
-        return str(result.inserted_id)
+        inserted_id = str(result.inserted_id)
+        logger.info(f"  [{process}] Inserted into DB (id={inserted_id})")
+        return inserted_id
     except Exception as e:
-        print(f"⚠️ Error inserting case: {e}")
+        _log_error_and_email(
+            f"Error inserting case {process}: {e}",
+            {"process": process, "step": "insert_case"},
+        )
         return None
 
 
@@ -813,7 +867,10 @@ def extract_detail_page(
             "historico_records": historico_data,
         }
     except Exception as e:
-        print(f"  ❌ Failed to extract detail page {url}: {e}")
+        _log_error_and_email(
+            f"Failed to extract detail page {url}: {e}",
+            {"url": url, "step": "extract_detail_page"},
+        )
         if detail_page:
             try:
                 detail_page.close()
@@ -916,19 +973,29 @@ RESPONSE FORMAT:
         )
 
         content = (res.choices[0].message.content or "").strip()
-        print(f"🧠 LLM Response: {content}")
+        tokens_used = getattr(res.usage, "total_tokens",
+                              "N/A") if res.usage else "N/A"
+        logger.info(
+            f"  LLM match raw response: {content} (tokens={tokens_used})")
 
         if not content.lower().startswith("match"):
+            logger.info(f"  LLM match result: None (no match prefix)")
             return None
 
         try:
             _prefix, deal_id_raw = content.split(":", 1)
             deal_id = deal_id_raw.strip()
+            logger.info(f"  LLM match result: deal_id={deal_id}")
             return deal_id or None
         except Exception:
+            logger.warning(f"  LLM match result: malformed response")
             return None
     except Exception as e:
-        print(f"⚠️ LLM match error: {e}")
+        _log_error_and_email(
+            f"LLM deal match error: {e}",
+            {"interessados": interessados_text[:100],
+                "step": "match_case_to_deal"},
+        )
         return None
 
 
@@ -937,6 +1004,7 @@ RESPONSE FORMAT:
 # ---------------------------------------------------------------------------
 
 def _post_email_payload(payload: Dict[str, Any]) -> bool:
+    logger.info(f"  Sending email: {payload.get('subject', 'N/A')}")
     try:
         resp = requests.post(
             N8N_WEBHOOK_URL,
@@ -945,10 +1013,14 @@ def _post_email_payload(payload: Dict[str, Any]) -> bool:
             timeout=30,
         )
         resp.raise_for_status()
-        print(f"✅ Email sent successfully! Status: {resp.status_code}")
+        logger.info(f"  Email sent successfully (status={resp.status_code})")
         return True
     except Exception as e:
-        print(f"⚠️ Error sending email via webhook: {e}")
+        _log_error_and_email(
+            f"Error sending email via webhook: {e}",
+            {"subject": payload.get("subject", "N/A"),
+             "step": "_post_email_payload"},
+        )
         return False
 
 
@@ -1059,24 +1131,34 @@ def run_cade_cases_register(
     - USA-related (unmatched): extract table data, ``are_we_follow=True``, send email
     - Other: save basic info only, ``are_we_follow=False``, no email
     """
+    run_start = time.time()
+    error_count = 0
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"
+
+    logger.info("=" * 60)
+    logger.info(f"Starting CADE Cases Register ({mode_label})")
+    logger.info(f"Log file: {LOG_FILE}")
+    logger.info("=" * 60)
     print(f"🚀 Starting CADE Cases Register scraper ({mode_label})\n")
 
     # MongoDB
     print("🔌 Initializing MongoDB connection...")
     ok, msg = init_mongodb_connection(ENV_PATH)
     if not ok:
-        print(f"❌ {msg}")
+        _log_error_and_email(f"MongoDB connection failed: {msg}", {
+                             "step": "mongodb_connect"})
         return
     print(f"✅ {msg}\n")
 
     if not is_connected():
-        print("❌ MongoDB not connected. Exiting.")
+        _log_error_and_email("MongoDB not connected after init", {
+                             "step": "mongodb_connect"})
         return
 
     collection = get_brazil_cases_collection()
     if collection is None:
-        print("❌ Could not access 'brazil_cases' collection. Exiting.")
+        _log_error_and_email("Could not access 'brazil_cases' collection", {
+                             "step": "get_collection"})
         return
 
     # Default date range
@@ -1266,11 +1348,14 @@ def run_cade_cases_register(
                     print("  ⚠️ Insert failed")
 
         except Exception as e:
-            print(f"❌ Error in main execution: {e}")
-            import traceback
-            traceback.print_exc()
+            error_count += 1
+            _log_error_and_email(
+                f"Unhandled error in main execution: {e}",
+                {"step": "run_main"},
+            )
         finally:
             browser.close()
+            logger.info("Browser closed")
 
     # Backup JSON
     if new_cases:
@@ -1287,8 +1372,14 @@ def run_cade_cases_register(
         except Exception as e:
             print(f"⚠️ Error writing backup JSON: {e}")
 
-    print(
-        f"\n🎉 CADE Cases Register scraper finished — {len(new_cases)} new cases")
+    elapsed = round(time.time() - run_start, 1)
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("SUMMARY")
+    logger.info(f"  New cases inserted           : {len(new_cases)}")
+    logger.info(f"  Errors encountered           : {error_count}")
+    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":

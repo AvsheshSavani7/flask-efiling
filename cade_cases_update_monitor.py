@@ -7,6 +7,8 @@ import builtins
 import re
 import base64
 import datetime
+import traceback
+from datetime import timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
@@ -18,6 +20,7 @@ from openai import OpenAI
 from playwright.sync_api import sync_playwright
 
 from llm_verification_service import verify_usa_relation
+from error_email_service import send_error_email
 from mongodb_connection import (
     get_database,
     get_deals_collection,
@@ -49,17 +52,49 @@ N8N_WEBHOOK_URL = os.getenv(
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ---------------------------------------------------------------------------
-# Logging
+# Logging — date-wise log files under /var/data/logs/ (persistent disk)
+# Timestamps in IST (UTC+5:30)
 # ---------------------------------------------------------------------------
-LOG_LEVEL = (os.getenv("LOG_LEVEL") or "INFO").upper()
-logger = logging.getLogger("cade_cases_update_monitor")
-logger.setLevel(LOG_LEVEL)
+PERSISTENT_LOG_DIR = "/var/data/logs"
+SCRIPT_NAME = "brazil_cases_update_monitor"
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _get_log_file() -> str:
+    base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
+    log_dir = os.path.join(base, SCRIPT_NAME)
+    os.makedirs(log_dir, exist_ok=True)
+    today = datetime.datetime.now(IST).strftime("%Y-%m-%d")
+    return os.path.join(log_dir, f"{today}.log")
+
+
+LOG_FILE = _get_log_file()
+
+logger = logging.getLogger("brazil_cases_update_monitor")
+logger.setLevel(logging.INFO)
+
+
+class _ISTFormatter(logging.Formatter):
+    def converter(self, timestamp):
+        return datetime.datetime.fromtimestamp(timestamp, tz=IST)
+
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            return ct.strftime(datefmt)
+        return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
+
+
 if not logger.handlers:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-    )
-    logger.addHandler(handler)
+    formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
+    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
+
 logger.propagate = False
 
 
@@ -77,8 +112,19 @@ def _logged_print(*args, level: str = "info", **kwargs):
 print = _logged_print  # type: ignore
 
 
+def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+    """Log at ERROR level and fire an error email."""
+    logger.error(msg)
+    send_error_email(
+        script_name=SCRIPT_NAME,
+        error_message=msg,
+        context=context,
+        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
+    )
+
+
 def utc_now_iso() -> str:
-    return datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +375,7 @@ def handle_image_captcha_if_present(page) -> bool:
 
 def extract_autuacao_info(page, context, url: str) -> Dict[str, str]:
     """Open detail page and extract Autuação info."""
+    logger.info(f"    Opening detail page for Autuação: {url}")
     detail_page = None
     try:
         detail_page = context.new_page()
@@ -385,7 +432,10 @@ def extract_autuacao_info(page, context, url: str) -> Dict[str, str]:
         detail_page.close()
         return info
     except Exception as e:
-        print(f"❌ Failed to extract Autuação from {url}: {e}")
+        _log_error_and_email(
+            f"Failed to extract Autuação from {url}: {e}",
+            {"url": url, "step": "extract_autuacao_info"},
+        )
         if detail_page:
             try:
                 detail_page.close()
@@ -483,7 +533,10 @@ def extract_tables(page, context, url: str) -> Tuple[List[Dict[str, Any]], List[
         detail_page.close()
         return table_data, hist_data
     except Exception as e:
-        print(f"❌ Failed to extract tables from {url}: {e}")
+        _log_error_and_email(
+            f"Failed to extract tables from {url}: {e}",
+            {"url": url, "step": "extract_tables"},
+        )
         if detail_page:
             try:
                 detail_page.close()
@@ -628,12 +681,15 @@ def update_case_in_db(
         result = collection.update_one(
             {"_id": case_id}, {"$set": update_fields})
         if result.modified_count > 0:
-            print("    ✅ Updated case in brazil_cases")
+            logger.info(f"    Updated case in brazil_cases")
         else:
-            print("    ℹ️ No DB changes (document may be identical)")
+            logger.info(f"    No DB changes (document may be identical)")
         return True
     except Exception as e:
-        print(f"    ❌ Error updating case: {e}")
+        _log_error_and_email(
+            f"Error updating case: {e}",
+            {"case_id": str(case_id), "step": "update_case_in_db"},
+        )
         return False
 
 
@@ -642,6 +698,7 @@ def update_case_in_db(
 # ---------------------------------------------------------------------------
 
 def _post_email_payload(payload: Dict[str, Any]) -> bool:
+    logger.info(f"    Sending email: {payload.get('subject', 'N/A')}")
     try:
         resp = requests.post(
             N8N_WEBHOOK_URL,
@@ -650,10 +707,14 @@ def _post_email_payload(payload: Dict[str, Any]) -> bool:
             timeout=30,
         )
         resp.raise_for_status()
-        print(f"    ✅ Email sent! Status: {resp.status_code}")
+        logger.info(f"    Email sent successfully (status={resp.status_code})")
         return True
     except Exception as e:
-        print(f"    ⚠️ Error sending email: {e}")
+        _log_error_and_email(
+            f"Error sending email via webhook: {e}",
+            {"subject": payload.get("subject", "N/A"),
+             "step": "_post_email_payload"},
+        )
         return False
 
 
@@ -809,22 +870,32 @@ def process_brazil_cases_updates(headless: bool = True):
 
     Change-detection fields: type, interessados, table_records, historico_records.
     """
+    run_start = time.time()
+    error_count = 0
+
+    logger.info("=" * 60)
+    logger.info(f"Starting CADE Brazil Cases Update Monitor")
+    logger.info(f"Log file: {LOG_FILE}")
+    logger.info("=" * 60)
     print("🚀 Starting CADE Brazil Cases Update Monitor\n")
 
     print("🔌 Initializing MongoDB connection...")
     ok, msg = init_mongodb_connection(ENV_PATH)
     if not ok:
-        print(f"❌ {msg}")
+        _log_error_and_email(f"MongoDB connection failed: {msg}", {
+                             "step": "mongodb_connect"})
         return
     print(f"✅ {msg}\n")
 
     if not is_connected():
-        print("❌ MongoDB not connected. Exiting.")
+        _log_error_and_email("MongoDB not connected after init", {
+                             "step": "mongodb_connect"})
         return
 
     cases_collection = get_brazil_cases_collection()
     if cases_collection is None:
-        print("❌ Could not access 'brazil_cases' collection. Exiting.")
+        _log_error_and_email("Could not access 'brazil_cases' collection", {
+                             "step": "get_collection"})
         return
 
     deals_collection = get_deals_collection()
@@ -962,7 +1033,8 @@ def process_brazil_cases_updates(headless: bool = True):
                         print(f"    ⚠️ Error during deal matching: {e}")
 
                 if matched_deal_id:
-                    print(f"    🎯 Deal match found (deal_id={matched_deal_id})")
+                    print(
+                        f"    🎯 Deal match found (deal_id={matched_deal_id})")
                     matched_deal = None
                     if deals_collection is not None:
                         try:
@@ -1012,18 +1084,24 @@ def process_brazil_cases_updates(headless: bool = True):
                 time.sleep(2)
 
         except Exception as e:
-            print(f"❌ Error in monitoring: {e}")
-            import traceback
-            traceback.print_exc()
+            error_count += 1
+            _log_error_and_email(
+                f"Unhandled error in monitoring: {e}",
+                {"step": "run_main"},
+            )
         finally:
             browser.close()
+            logger.info("Browser closed")
 
-    print(f"\n{'=' * 60}")
-    print(f"📊 Summary:")
-    print(f"   Total records checked: {total_checked}")
-    print(f"   Records with changes: {total_changed}")
-    print(f"{'=' * 60}")
-    print("🎉 Done!")
+    elapsed = round(time.time() - run_start, 1)
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("SUMMARY")
+    logger.info(f"  Total records checked        : {total_checked}")
+    logger.info(f"  Records with changes         : {total_changed}")
+    logger.info(f"  Errors encountered           : {error_count}")
+    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":

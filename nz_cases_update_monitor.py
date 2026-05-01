@@ -13,7 +13,9 @@ import os
 import logging
 import sys
 import builtins
-from datetime import datetime, timezone
+import time
+import traceback
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
 
@@ -25,6 +27,7 @@ from playwright.sync_api import sync_playwright
 from nz_comcom_case_register_to_db import match_case_to_deal
 
 from llm_verification_service import verify_usa_relation
+from error_email_service import send_error_email
 from mongodb_connection import (
     get_database,
     get_deals_collection,
@@ -34,22 +37,54 @@ from mongodb_connection import (
 
 load_dotenv(".env")
 
-# Logging
-LOG_LEVEL = (os.getenv("LOG_LEVEL") or "INFO").upper()
+# -----------------------------------------------------------------------------
+# Logging — date-wise log files under /var/data/logs/ (persistent disk)
+# Timestamps in IST (UTC+5:30)
+# -----------------------------------------------------------------------------
+PERSISTENT_LOG_DIR = "/var/data/logs"
+SCRIPT_NAME = "newzealand_cases_update_monitor"
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _get_log_file() -> str:
+    base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
+    log_dir = os.path.join(base, SCRIPT_NAME)
+    os.makedirs(log_dir, exist_ok=True)
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    return os.path.join(log_dir, f"{today}.log")
+
+
+LOG_FILE = _get_log_file()
+
 logger = logging.getLogger("nz_cases_update_monitor")
-logger.setLevel(LOG_LEVEL)
+logger.setLevel(logging.INFO)
+
+
+class _ISTFormatter(logging.Formatter):
+    def converter(self, timestamp):
+        return datetime.fromtimestamp(timestamp, tz=IST)
+
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            return ct.strftime(datefmt)
+        return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
+
+
 if not logger.handlers:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(message)s"))
-    logger.addHandler(handler)
+    formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
+    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
+
 logger.propagate = False
 
 
 def _logged_print(*args, level: str = "info", **kwargs):
-    """
-    Replacement for print that also logs via the module logger.
-    """
     msg = " ".join(str(a) for a in args)
     if level == "error":
         logger.error(msg)
@@ -57,12 +92,21 @@ def _logged_print(*args, level: str = "info", **kwargs):
         logger.warning(msg)
     else:
         logger.info(msg)
-    # Still echo to original stdout for local runs
     builtins.print(*args, **kwargs)
 
 
-# Monkey-patch print in this module so any print() calls are logged.
 print = _logged_print  # type: ignore
+
+
+def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+    """Log at ERROR level and fire an error email."""
+    logger.error(msg)
+    send_error_email(
+        script_name=SCRIPT_NAME,
+        error_message=msg,
+        context=context,
+        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
+    )
 
 # Constants
 BASE_URL = "https://www.comcom.govt.nz"
@@ -118,7 +162,10 @@ def get_open_deals_for_matching() -> List[Dict[str, Any]]:
                 d.pop("_id", None)
         return deals
     except Exception as e:
-        logger.warning("Error fetching deals: %s", e)
+        _log_error_and_email(
+            f"Error fetching deals: {e}",
+            {"step": "get_open_deals_for_matching"},
+        )
         return []
 
 
@@ -246,9 +293,10 @@ def fetch_case_detail_page(page, url: str) -> Optional[Dict[str, Any]]:
             "updates_media": media_section,
         }
     except Exception as e:
-        logger.warning("Error fetching detail page: %s", e)
-        import traceback
-        traceback.print_exc()
+        _log_error_and_email(
+            f"Error fetching detail page: {e}",
+            {"url": url, "step": "fetch_case_detail_page"},
+        )
         return None
 
 
@@ -722,7 +770,10 @@ def send_unmatched_nz_usa_email_via_webhook(case_info: Dict[str, Any], changes: 
                     response.status_code)
         return True
     except Exception as e:
-        logger.warning("Error sending USA email via webhook: %s", e)
+        _log_error_and_email(
+            f"Error sending USA email via webhook: {e}",
+            {"case_number": case_info.get("case_number", "N/A"), "step": "send_unmatched_nz_usa_email_via_webhook"},
+        )
         return False
 
 
@@ -751,7 +802,10 @@ def update_nz_case_document(collection, doc_id: Any, updated_doc: Dict[str, Any]
             logger.info("Updated nz_cases record")
         return True
     except Exception as e:
-        logger.warning("Error updating nz_cases: %s", e)
+        _log_error_and_email(
+            f"Error updating nz_cases: {e}",
+            {"doc_id": str(doc_id), "step": "update_nz_case_document"},
+        )
         return False
 
 
@@ -774,17 +828,23 @@ def get_deal_by_id(deal_id: str) -> Optional[Dict[str, Any]]:
 
 # ---------- Main ----------
 def run():
-    logger.info("NZ Cases Update Monitor started")
+    run_start = time.time()
+    error_count = 0
+
+    logger.info("=" * 60)
+    logger.info(f"Starting NZ Cases Update Monitor")
+    logger.info(f"Log file: {LOG_FILE}")
+    logger.info("=" * 60)
 
     success, message = init_mongodb_connection(ENV_PATH)
     if not success:
-        logger.error(message)
+        _log_error_and_email(f"MongoDB connection failed: {message}", {"step": "mongodb_connect"})
         return
     logger.info(message)
 
     nz_collection = get_nz_cases_collection()
     if nz_collection is None:
-        logger.error("nz_cases collection not available.")
+        _log_error_and_email("nz_cases collection not available", {"step": "get_collection"})
         return
 
     # Step 1: nz_cases with status Open
@@ -962,8 +1022,17 @@ def run():
                 total_updated += 1
 
         browser.close()
+        logger.info("Browser closed")
 
-    logger.info("Done. Checked: %s, Updated: %s", total_checked, total_updated)
+    elapsed = round(time.time() - run_start, 1)
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("SUMMARY")
+    logger.info(f"  Total cases checked          : {total_checked}")
+    logger.info(f"  Cases updated                : {total_updated}")
+    logger.info(f"  Errors encountered           : {error_count}")
+    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":

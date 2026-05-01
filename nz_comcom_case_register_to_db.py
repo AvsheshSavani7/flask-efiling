@@ -10,6 +10,8 @@ import os
 import sys
 import logging
 import builtins
+import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
@@ -21,6 +23,7 @@ from openai import OpenAI
 from playwright.sync_api import sync_playwright
 
 from llm_verification_service import verify_usa_relation
+from error_email_service import send_error_email
 from mongodb_connection import (
     get_database,
     get_deals_collection,
@@ -31,24 +34,53 @@ from mongodb_connection import (
 load_dotenv(".env")
 
 # -----------------------------------------------------------------------------
-# Logging setup (stdout)
+# Logging — date-wise log files under /var/data/logs/ (persistent disk)
+# Timestamps in IST (UTC+5:30)
 # -----------------------------------------------------------------------------
-LOG_LEVEL = (os.getenv("LOG_LEVEL") or "INFO").upper()
+PERSISTENT_LOG_DIR = "/var/data/logs"
+SCRIPT_NAME = "newzealand_cases_register"
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _get_log_file() -> str:
+    base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
+    log_dir = os.path.join(base, SCRIPT_NAME)
+    os.makedirs(log_dir, exist_ok=True)
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    return os.path.join(log_dir, f"{today}.log")
+
+
+LOG_FILE = _get_log_file()
+
 logger = logging.getLogger("nz_comcom_case_register_to_db")
-logger.setLevel(LOG_LEVEL)
+logger.setLevel(logging.INFO)
+
+
+class _ISTFormatter(logging.Formatter):
+    def converter(self, timestamp):
+        return datetime.fromtimestamp(timestamp, tz=IST)
+
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            return ct.strftime(datefmt)
+        return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
+
+
 if not logger.handlers:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-    )
-    logger.addHandler(handler)
+    formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
+    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
+
 logger.propagate = False
 
 
 def _logged_print(*args, level: str = "info", **kwargs):
-    """
-    Replacement for print that also logs via the module logger.
-    """
     msg = " ".join(str(a) for a in args)
     if level == "error":
         logger.error(msg)
@@ -56,12 +88,21 @@ def _logged_print(*args, level: str = "info", **kwargs):
         logger.warning(msg)
     else:
         logger.info(msg)
-    # Still echo to original stdout for local runs
     builtins.print(*args, **kwargs)
 
 
-# Monkey-patch print in this module so existing print() calls are logged.
 print = _logged_print  # type: ignore
+
+
+def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+    """Log at ERROR level and fire an error email."""
+    logger.error(msg)
+    send_error_email(
+        script_name=SCRIPT_NAME,
+        error_message=msg,
+        context=context,
+        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
+    )
 
 # Constants
 BASE_URL = "https://www.comcom.govt.nz"
@@ -141,7 +182,10 @@ def get_open_deals_for_matching() -> List[Dict[str, Any]]:
                 d.pop("_id", None)
         return deals
     except Exception as e:
-        print(f"   ⚠️ Error fetching deals: {e}")
+        _log_error_and_email(
+            f"Error fetching deals: {e}",
+            {"step": "get_open_deals_for_matching"},
+        )
         return []
 
 
@@ -212,22 +256,31 @@ If no deal satisfies this rule, respond exactly: None"""
                 {"role": "user", "content": prompt},
             ]
         )
-        print(f"   ✅ LLM prompt: {prompt[:100]}...")
-        print(f"   ✅ LLM response: {res.choices[0].message.content[:100]}...")
         content = (res.choices[0].message.content or "").strip()
+        tokens_used = getattr(res.usage, "total_tokens", "N/A") if res.usage else "N/A"
+        logger.info(f"   LLM match — input: title={title[:60]}, parties={parties[:60]}")
+        logger.info(f"   LLM match raw response: {content} (tokens={tokens_used})")
         if not content.lower().startswith("match"):
+            logger.info(f"   LLM match result: None")
             return None
         try:
             _prefix, deal_id_raw = content.split(":", 1)
-            return deal_id_raw.strip() or None
+            deal_id = deal_id_raw.strip() or None
+            logger.info(f"   LLM match result: deal_id={deal_id}")
+            return deal_id
         except Exception:
+            logger.warning(f"   LLM match result: malformed response")
             return None
     except Exception as e:
-        print(f"   ⚠️ LLM match error: {e}")
+        _log_error_and_email(
+            f"LLM match error: {e}",
+            {"title": title[:80], "parties": parties[:80], "step": "match_case_to_deal"},
+        )
         return None
 
 
 def _post_webhook(payload: Dict[str, Any]) -> bool:
+    logger.info(f"   Sending email: {payload.get('subject', 'N/A')}")
     try:
         resp = requests.post(
             N8N_WEBHOOK_URL,
@@ -236,9 +289,13 @@ def _post_webhook(payload: Dict[str, Any]) -> bool:
             timeout=30,
         )
         resp.raise_for_status()
+        logger.info(f"   Email sent successfully (status={resp.status_code})")
         return True
     except Exception as e:
-        print(f"   ⚠️ Error sending email via webhook: {e}")
+        _log_error_and_email(
+            f"Error sending email via webhook: {e}",
+            {"subject": payload.get("subject", "N/A"), "step": "_post_webhook"},
+        )
         return False
 
 
@@ -508,9 +565,10 @@ def fetch_case_detail_page(page, url: str) -> Optional[Dict[str, Any]]:
             "updates_media": media_section,
         }
     except Exception as e:
-        print(f"   ⚠️ Error fetching detail page: {e}")
-        import traceback
-        traceback.print_exc()
+        _log_error_and_email(
+            f"Error fetching detail page: {e}",
+            {"url": url, "step": "fetch_case_detail_page"},
+        )
         return None
 
 
@@ -582,24 +640,31 @@ def build_case_document(list_item: Dict[str, Any], detail: Dict[str, Any]) -> Di
 
 def run():
     """Main: build list URL, scrape list, for each item fetch detail, check nz_cases by detail_url, insert if new."""
+    run_start = time.time()
+    error_count = 0
     env_flag = os.getenv("NZ_CASES_TEST_MODE", "").lower()
     test_mode = env_flag in ("1", "true", "yes", "y")
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"
+
+    logger.info("=" * 60)
+    logger.info(f"Starting NZ Case Register ({mode_label})")
+    logger.info(f"Log file: {LOG_FILE}")
+    logger.info("=" * 60)
     print(f"🚀 NZ Case Register → DB ({mode_label})\n")
 
     success, message = init_mongodb_connection(ENV_PATH)
     if not success:
-        print(f"⚠️ {message}")
+        _log_error_and_email(f"MongoDB connection failed: {message}", {"step": "mongodb_connect"})
         return
     print(f"✅ {message}")
 
     collection = get_nz_cases_collection()
     if collection is None:
-        print("⚠️ nz_cases collection not available.")
+        _log_error_and_email("nz_cases collection not available", {"step": "get_collection"})
         return
 
     deals = get_open_deals_for_matching()
-    print(f"📊 Loaded {len(deals)} deals for matching\n")
+    logger.info(f"Loaded {len(deals)} deals for matching")
 
     open_date = get_open_date_one_week_ago()
     list_url = LIST_URL_TEMPLATE.format(open_date=open_date)
@@ -705,9 +770,18 @@ def run():
                 print(f"      ⚠️ Insert failed: {e}")
 
         browser.close()
+        logger.info("Browser closed")
 
-    print(
-        f"\n📊 Done. Inserted: {inserted}, Updated: {updated}, Skipped (already in DB): {skipped}")
+    elapsed = round(time.time() - run_start, 1)
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("SUMMARY")
+    logger.info(f"  Inserted                     : {inserted}")
+    logger.info(f"  Updated                      : {updated}")
+    logger.info(f"  Skipped (already in DB)      : {skipped}")
+    logger.info(f"  Errors encountered           : {error_count}")
+    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":

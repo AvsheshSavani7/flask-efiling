@@ -2626,6 +2626,8 @@ KNOWN_LOG_SCRIPTS = {
     "ec_cases_update_monitor",
     "brazil_cases_register",
     "brazil_cases_update_monitor",
+    "newzealand_cases_register",
+    "newzealand_cases_update_monitor",
 }
 
 
