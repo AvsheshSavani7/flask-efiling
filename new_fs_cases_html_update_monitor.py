@@ -191,20 +191,47 @@ def wait_for_spa_content(page, timeout_s: int = 15) -> bool:
 
 def scrape_case_page(context, case_number: str) -> Optional[Dict[str, Any]]:
     url = f"https://competition-cases.ec.europa.eu/cases/{case_number}"
+    logger.info(f"  [{case_number}] Opening detail page: {url}")
     page = context.new_page()
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+        http_status = resp.status if resp else "N/A"
+        logger.info(f"  [{case_number}] Page response: status={http_status}, url={resp.url if resp else url}")
+
+        if resp and resp.status >= 400:
+            _log_error_and_email(
+                f"Detail page returned HTTP {resp.status} for {case_number}",
+                {"case_number": case_number, "url": url, "http_status": resp.status, "step": "scrape_case_page"},
+            )
+            return None
+
         dismiss_cookie_banner(page)
 
         spa_loaded = wait_for_spa_content(page, timeout_s=15)
+        logger.info(f"  [{case_number}] SPA content loaded: {spa_loaded}")
         if not spa_loaded:
+            logger.warning(f"  [{case_number}] SPA not ready, waiting 3s fallback")
             page.wait_for_timeout(3000)
 
         html = page.content()
-        return parse_case_html(html, case_number)
+        logger.info(f"  [{case_number}] HTML fetched ({len(html)} chars)")
+
+        parsed = parse_case_html(html, case_number)
+        if parsed and not parsed.get("error"):
+            logger.info(f"  [{case_number}] Parsed fields: {list(parsed.keys())}")
+        else:
+            error_msg = parsed.get("error") if parsed else "parse returned None"
+            _log_error_and_email(
+                f"HTML parse failed for {case_number}: {error_msg}",
+                {"case_number": case_number, "url": url, "html_length": len(html), "step": "parse_case_html"},
+            )
+        return parsed
     except Exception as exc:
-        print(
-            f"  [ERROR] Failed to scrape {case_number}: {exc}", level="error")
+        _log_error_and_email(
+            f"Failed to scrape {case_number}: {exc}",
+            {"case_number": case_number, "url": url, "step": "scrape_case_page"},
+        )
         return None
     finally:
         page.close()
@@ -762,7 +789,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
             # Step 4: Scrape detail page
             new_data = scrape_case_page(context, case_number)
             if not new_data or new_data.get("error"):
-                print(f"  Scrape/parse failed; skipping", level="warning")
+                logger.warning(f"  [{case_number}] Scrape/parse failed — skipping (error email already sent)")
                 continue
 
             # Step 5: Compare all fields

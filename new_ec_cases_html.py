@@ -25,6 +25,7 @@ Run:
 """
 
 from llm_verification_service import verify_usa_relation
+from error_email_service import send_error_email
 from mongodb_connection import (
     get_database,
     get_deals_collection,
@@ -37,7 +38,7 @@ from bson import ObjectId
 from playwright.sync_api import sync_playwright
 import requests
 from typing import Any, Dict, List, Optional, Set, Tuple
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import argparse
 import json
 import logging
@@ -46,32 +47,58 @@ import re
 import sys
 import os
 import time
+import traceback
 
 from ec_html_scraper import parse_case_html
 
 load_dotenv(".env")
 
 # ---------------------------------------------------------------------------
-# Logging
+# Logging — date-wise log files under /var/data/logs/ (persistent disk)
+# Timestamps in IST (UTC+5:30)
 # ---------------------------------------------------------------------------
-LOG_LEVEL = (os.getenv("LOG_LEVEL") or "INFO").upper()
-LOG_FILE = "ec_cases_html.log"
+PERSISTENT_LOG_DIR = "/var/data/logs"
+SCRIPT_NAME = "ec_cases_register"
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _get_log_file() -> str:
+    base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
+    log_dir = os.path.join(base, SCRIPT_NAME)
+    os.makedirs(log_dir, exist_ok=True)
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    return os.path.join(log_dir, f"{today}.log")
+
+
+LOG_FILE = _get_log_file()
 
 logger = logging.getLogger("ec_cases_html")
-logger.setLevel(LOG_LEVEL)
+logger.setLevel(logging.INFO)
+
+
+class _ISTFormatter(logging.Formatter):
+    """Format log timestamps in IST."""
+    def converter(self, timestamp):
+        return datetime.fromtimestamp(timestamp, tz=IST)
+
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            return ct.strftime(datefmt)
+        return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
+
 
 if not logger.handlers:
-    formatter = logging.Formatter(
+    formatter = _ISTFormatter(
         fmt="%(asctime)s | %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
     )
-    file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
 
-    stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
 
 logger.propagate = False
 
@@ -83,6 +110,17 @@ def _logged_print(*args, level: str = "info", **kwargs):
 
 
 print = _logged_print  # type: ignore
+
+
+def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+    """Log at ERROR level and fire an error email."""
+    logger.error(msg)
+    send_error_email(
+        script_name=SCRIPT_NAME,
+        error_message=msg,
+        context=context,
+        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
+    )
 
 # OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -160,9 +198,14 @@ def wait_for_results(page, timeout_ms: int = 30000) -> str:
     for selector in WAIT_SELECTORS:
         try:
             page.wait_for_selector(selector, timeout=timeout_ms)
+            logger.info(f"Results loaded with selector: {selector}")
             return selector
         except Exception as exc:
             last_error = exc
+    _log_error_and_email(
+        f"Could not find result links on page. Last error: {last_error}",
+        {"step": "wait_for_results"},
+    )
     raise RuntimeError(
         f"Could not find result links on page. Last error: {last_error}")
 
@@ -229,23 +272,50 @@ def scrape_case_detail(context, url: str) -> Optional[Dict[str, Any]]:
     """Open detail page in a new tab, parse in memory, return structured dict."""
     case_num = extract_case_num(url)
     if not case_num:
-        print(f"[SKIP] Cannot determine case number from {url}")
+        logger.warning(f"[SKIP] Cannot determine case number from {url}")
         return None
 
+    logger.info(f"  [{case_num}] Opening detail page: {url}")
     page = context.new_page()
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+        http_status = resp.status if resp else "N/A"
+        logger.info(f"  [{case_num}] Page response: status={http_status}")
+
+        if resp and resp.status >= 400:
+            _log_error_and_email(
+                f"Detail page returned HTTP {resp.status} for {case_num}",
+                {"case_number": case_num, "url": url, "http_status": resp.status, "step": "scrape_case_detail"},
+            )
+            return None
+
         dismiss_cookie_banner(page)
 
         spa_loaded = wait_for_spa_content(page, timeout_s=15)
+        logger.info(f"  [{case_num}] SPA content loaded: {spa_loaded}")
         if not spa_loaded:
+            logger.warning(f"  [{case_num}] SPA not ready, waiting 3s fallback")
             page.wait_for_timeout(3000)
 
         html = page.content()
+        logger.info(f"  [{case_num}] HTML fetched ({len(html)} chars)")
+
         record = parse_case_html(html, case_num)
+        if record and not record.get("error"):
+            logger.info(f"  [{case_num}] Parsed fields: {list(record.keys())}")
+        else:
+            error_msg = record.get("error") if record else "parse returned None"
+            _log_error_and_email(
+                f"HTML parse failed for {case_num}: {error_msg}",
+                {"case_number": case_num, "url": url, "html_length": len(html), "step": "parse_case_html"},
+            )
         return record
     except Exception as exc:
-        print(f"[ERROR] Failed to scrape {case_num}: {exc}", level="error")
+        _log_error_and_email(
+            f"Failed to scrape {case_num}: {exc}",
+            {"case_number": case_num, "url": url, "step": "scrape_case_detail"},
+        )
         return None
     finally:
         page.close()
@@ -258,7 +328,9 @@ def scrape_case_detail(context, url: str) -> Optional[Dict[str, Any]]:
 def get_ec_cases_collection():
     db = get_database()
     if db is None:
+        logger.error("get_database() returned None")
         return None
+    logger.info(f"Connected to database: {db.name}")
     return db["ec_cases"]
 
 
@@ -266,7 +338,10 @@ def case_exists(collection, case_number: str) -> bool:
     try:
         return collection.count_documents({"case_number": case_number}, limit=1) > 0
     except Exception as e:
-        print(f"  Error checking existing case: {e}", level="warning")
+        _log_error_and_email(
+            f"Error checking existing case {case_number}: {e}",
+            {"case_number": case_number, "step": "case_exists"},
+        )
         return False
 
 
@@ -274,6 +349,7 @@ def fetch_deals() -> List[Dict[str, Any]]:
     try:
         deals_collection = get_deals_collection()
         if deals_collection is None:
+            logger.warning("get_deals_collection() returned None")
             return []
 
         status_filter = {
@@ -289,24 +365,37 @@ def fetch_deals() -> List[Dict[str, Any]]:
             if "_id" in d:
                 d["deal_id"] = str(d["_id"])
 
-        print(f"Fetched {len(deals)} open/unknown deals from MongoDB")
+        logger.info(f"Fetched {len(deals)} open/unknown deals from MongoDB")
+        if deals:
+            sample = deals[:3]
+            for d in sample:
+                logger.info(f"  Sample deal: id={d.get('deal_id')} | target={d.get('target') or d.get('target_name','N/A')} | acquirer={d.get('acquirer') or d.get('acquire_name','N/A')}")
         return deals
     except Exception as e:
-        print(f"Error fetching deals: {e}", level="warning")
+        _log_error_and_email(
+            f"Error fetching deals: {e}",
+            {"step": "fetch_deals"},
+        )
         return []
 
 
 def insert_case(collection, case_doc: Dict[str, Any]) -> Optional[str]:
+    case_num = case_doc.get("case_number", "?")
     try:
         result = collection.insert_one(case_doc)
-        return str(result.inserted_id)
+        inserted_id = str(result.inserted_id)
+        logger.info(f"  [{case_num}] Inserted into DB (id={inserted_id})")
+        return inserted_id
     except Exception as e:
-        print(f"  Error inserting case: {e}", level="error")
+        _log_error_and_email(
+            f"Error inserting case {case_num}: {e}",
+            {"case_number": case_num, "step": "insert_case"},
+        )
         return None
 
 
 def utc_now_iso() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +457,9 @@ RESPONSE FORMAT:
 
 - If no deal satisfies this rule, respond exactly: None"""
 
+    logger.info(f"  LLM deal match — input companies: {companies_str}")
+    logger.info(f"  LLM deal match — checking against {len(deals)} deals")
+
     try:
         res = client.chat.completions.create(
             model="gpt-5.2",
@@ -380,13 +472,16 @@ RESPONSE FORMAT:
             ],
         )
         content = (res.choices[0].message.content or "").strip()
-        print(f"  LLM match response: {content}")
+        tokens_used = getattr(res.usage, "total_tokens", "N/A") if res.usage else "N/A"
+        logger.info(f"  LLM match raw response: {content} (tokens={tokens_used})")
 
         if not content.lower().startswith("match:"):
+            logger.info(f"  LLM match result: None (no match prefix)")
             return None
 
         parts = content[6:].strip().split("|")
         if len(parts) < 3:
+            logger.warning(f"  LLM match result: malformed response, parts={parts}")
             return None
 
         deal_id = parts[0].strip()
@@ -394,9 +489,13 @@ RESPONSE FORMAT:
         role_raw = parts[2].strip().lower().replace("(", "").replace(")", "")
         matched_role = role_raw if role_raw in (
             "target", "acquirer") else "acquirer"
+        logger.info(f"  LLM match result: deal_id={deal_id} | company={matched_company} | role={matched_role}")
         return (deal_id, matched_company, matched_role)
     except Exception as e:
-        print(f"  LLM match error: {e}", level="warning")
+        _log_error_and_email(
+            f"LLM deal match error: {e}",
+            {"companies": companies_str, "step": "match_case_to_deal"},
+        )
         return None
 
 
@@ -412,6 +511,7 @@ def send_email_via_webhook(
     deal_id: Optional[str] = None,
     usa_related: bool = False,
 ) -> bool:
+    logger.info(f"  [{case_number}] Sending email: {subject}")
     try:
         payload = {
             "subject": subject,
@@ -430,10 +530,13 @@ def send_email_via_webhook(
             timeout=30,
         )
         resp.raise_for_status()
-        print(f"  Email sent! Status: {resp.status_code}")
+        logger.info(f"  [{case_number}] Email sent successfully (status={resp.status_code})")
         return True
     except Exception as e:
-        print(f"  Error sending email: {e}", level="warning")
+        _log_error_and_email(
+            f"Error sending notification email for {case_number}: {e}",
+            {"case_number": case_number, "subject": subject, "step": "send_email_via_webhook"},
+        )
         return False
 
 
@@ -670,191 +773,242 @@ def generate_usa_email(case: Dict[str, Any]) -> Tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 def run(start_url: str, max_pages: Optional[int], headed: bool):
-    print("Starting EC Cases HTML Register\n")
-
-    print("Initializing MongoDB connection...")
-    success, message = init_mongodb_connection(ENV_PATH)
-    if not success:
-        print(f"{message}", level="error")
-        return
-    print(f"{message}\n")
-
-    if not is_connected():
-        print("MongoDB not connected. Exiting.", level="error")
-        return
-
-    collection = get_ec_cases_collection()
-    if collection is None:
-        print("Could not access 'ec_cases' collection. Exiting.", level="error")
-        return
-
-    print("Loading deals from MongoDB...")
-    deals = fetch_deals()
-    if not deals:
-        print("No open/unknown deals found. Will still register cases.",
-              level="warning")
-
-    deal_by_id: Dict[str, Dict[str, Any]] = {
-        (d.get("deal_id") or str(d.get("_id", ""))): d
-        for d in deals
-        if d.get("deal_id") or d.get("_id")
-    }
-
-    visited_urls: Set[str] = set()
+    run_start = time.time()
+    error_count = 0
     new_count = 0
     skipped_count = 0
+    visited_urls: Set[str] = set()
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=not headed)
-        context = browser.new_context()
-        search_page = context.new_page()
+    logger.info("=" * 60)
+    logger.info(f"Starting EC Cases HTML Register")
+    logger.info(f"Log file: {LOG_FILE}")
+    logger.info(f"Start URL: {start_url}")
+    logger.info(f"Max pages: {max_pages or 'unlimited'}")
+    logger.info(f"Headed: {headed}")
+    logger.info("=" * 60)
 
-        search_page.goto(
-            start_url, wait_until="domcontentloaded", timeout=60000)
-        search_page.wait_for_timeout(3000)
-        dismiss_cookie_banner(search_page)
-        selector = wait_for_results(search_page)
+    try:
+        # --- Step 1: MongoDB ---
+        logger.info("[STEP 1] Initializing MongoDB connection...")
+        success, message = init_mongodb_connection(ENV_PATH)
+        if not success:
+            _log_error_and_email(
+                f"MongoDB connection failed: {message}",
+                {"step": "mongodb_connect"},
+            )
+            return
+        logger.info(f"[STEP 1] {message}")
 
-        current_page = 1
-        while True:
-            print(f"\n[Page {current_page}] Collecting case links...")
-            search_page.wait_for_timeout(1000)
-            links = collect_case_links(search_page, selector)
-            print(f"[Page {current_page}] Found {len(links)} case links")
+        if not is_connected():
+            _log_error_and_email(
+                "MongoDB not connected after init",
+                {"step": "mongodb_connect"},
+            )
+            return
 
-            for item in links:
-                url = item["url"]
-                if url in visited_urls:
-                    continue
-                visited_urls.add(url)
+        collection = get_ec_cases_collection()
+        if collection is None:
+            _log_error_and_email(
+                "Could not access 'ec_cases' collection",
+                {"step": "get_collection"},
+            )
+            return
+        logger.info("[STEP 1] ec_cases collection ready")
 
-                case_num = extract_case_num(url)
-                if not case_num:
-                    continue
+        # --- Step 2: Fetch deals ---
+        logger.info("[STEP 2] Loading deals from MongoDB...")
+        deals = fetch_deals()
+        if not deals:
+            logger.warning("[STEP 2] No open/unknown deals found. Will still register cases.")
 
-                # --- Step 3: DB check ---
-                if case_exists(collection, case_num):
-                    print(f"  [{case_num}] Already in DB; skipping")
-                    skipped_count += 1
-                    continue
+        deal_by_id: Dict[str, Dict[str, Any]] = {
+            (d.get("deal_id") or str(d.get("_id", ""))): d
+            for d in deals if d.get("deal_id") or d.get("_id")
+        }
+        logger.info(f"[STEP 2] Deal lookup map built ({len(deal_by_id)} entries)")
 
-                # --- Step 4-5: Scrape + parse in memory ---
-                print(f"  [{case_num}] Scraping detail page...")
-                case = scrape_case_detail(context, url)
-                if not case or case.get("error"):
-                    print(f"  [{case_num}] Parse failed; skipping",
-                          level="warning")
-                    continue
+        # --- Step 3: Playwright scraping ---
+        logger.info("[STEP 3] Launching Playwright browser...")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=not headed)
+            context = browser.new_context()
+            search_page = context.new_page()
 
-                case_title = case.get("case_title") or "N/A"
-                companies = case.get("companies") or []
-                print(
-                    f"  [{case_num}] {case_title} | Companies: {', '.join(companies)}")
+            logger.info(f"[STEP 3] Navigating to search page: {start_url}")
+            search_page.goto(
+                start_url, wait_until="domcontentloaded", timeout=60000)
+            search_page.wait_for_timeout(3000)
+            dismiss_cookie_banner(search_page)
+            selector = wait_for_results(search_page)
 
-                now_iso = utc_now_iso()
+            current_page = 1
+            while True:
+                logger.info(f"\n[Page {current_page}] Collecting case links...")
+                search_page.wait_for_timeout(1000)
+                links = collect_case_links(search_page, selector)
+                logger.info(f"[Page {current_page}] Found {len(links)} case links")
 
-                # --- Step 6: LLM deal match ---
-                print(f"  [{case_num}] LLM Call #1: deal match...")
-                match_result = match_case_to_deal(
-                    companies, deals) if deals else None
+                for item in links:
+                    url = item["url"]
+                    if url in visited_urls:
+                        continue
+                    visited_urls.add(url)
 
-                if match_result:
-                    matched_deal_id, matched_company, matched_role = match_result
-                    deal = deal_by_id.get(matched_deal_id)
+                    case_num = extract_case_num(url)
+                    if not case_num:
+                        logger.warning(f"  Could not extract case number from {url}")
+                        continue
 
-                    if not deal:
-                        try:
-                            deals_coll = get_deals_collection()
-                            if deals_coll:
-                                raw = deals_coll.find_one(
-                                    {"_id": ObjectId(matched_deal_id)})
-                                if raw:
-                                    raw["deal_id"] = str(raw["_id"])
-                                    deal = raw
-                        except Exception:
-                            pass
+                    if case_exists(collection, case_num):
+                        logger.info(f"  [{case_num}] Already in DB; skipping")
+                        skipped_count += 1
+                        continue
 
-                    if deal:
-                        print(
-                            f"  [{case_num}] Match: deal_id={matched_deal_id} | {matched_company} ({matched_role})")
+                    logger.info(f"  [{case_num}] Scraping detail page...")
+                    case = scrape_case_detail(context, url)
+                    if not case or case.get("error"):
+                        logger.warning(f"  [{case_num}] Parse failed — skipping (error email already sent)")
+                        error_count += 1
+                        continue
 
-                        subject, html_email = generate_matched_email(
-                            case, deal)
+                    case_title = case.get("case_title") or "N/A"
+                    companies = case.get("companies") or []
+                    logger.info(f"  [{case_num}] Title: {case_title}")
+                    logger.info(f"  [{case_num}] Companies: {companies}")
+                    logger.info(f"  [{case_num}] Parsed data: case_type={case.get('case_type')} | regulation={case.get('regulation')} | notification_date={case.get('notification_date')} | investigation_phase={case.get('investigation_phase')} | status={case.get('status')}")
+
+                    now_iso = utc_now_iso()
+
+                    # --- LLM #1: deal match ---
+                    logger.info(f"  [{case_num}] LLM Call #1: deal match (companies={companies})...")
+                    match_result = match_case_to_deal(
+                        companies, deals) if deals else None
+
+                    if match_result:
+                        matched_deal_id, matched_company, matched_role = match_result
+                        logger.info(f"  [{case_num}] LLM returned match: deal_id={matched_deal_id}, company={matched_company}, role={matched_role}")
+                        deal = deal_by_id.get(matched_deal_id)
+
+                        if not deal:
+                            logger.info(f"  [{case_num}] deal_id={matched_deal_id} not in cache, querying DB...")
+                            try:
+                                deals_coll = get_deals_collection()
+                                if deals_coll:
+                                    raw = deals_coll.find_one(
+                                        {"_id": ObjectId(matched_deal_id)})
+                                    if raw:
+                                        raw["deal_id"] = str(raw["_id"])
+                                        deal = raw
+                                        logger.info(f"  [{case_num}] Found deal in DB: target={raw.get('target')}, acquirer={raw.get('acquirer')}")
+                                    else:
+                                        logger.warning(f"  [{case_num}] deal_id={matched_deal_id} not found in DB either")
+                            except Exception as e:
+                                _log_error_and_email(
+                                    f"Error looking up deal {matched_deal_id}: {e}",
+                                    {"case_number": case_num, "deal_id": matched_deal_id, "step": "deal_lookup"},
+                                )
+                                error_count += 1
+
+                        if deal:
+                            target = deal.get("target") or deal.get("target_name", "N/A")
+                            acquirer = deal.get("acquirer") or deal.get("acquire_name", "N/A")
+                            logger.info(f"  [{case_num}] Matched deal: target={target} | acquirer={acquirer} | deal_id={matched_deal_id}")
+
+                            subject, html_email = generate_matched_email(
+                                case, deal)
+                            send_email_via_webhook(
+                                subject, html_email, case_num, case_title, deal_id=matched_deal_id)
+
+                            case_doc = {
+                                **case,
+                                "deal_id": matched_deal_id,
+                                "is_open": True,
+                                "created_at": now_iso,
+                                "updated_at": now_iso,
+                            }
+                            inserted_id = insert_case(collection, case_doc)
+                            if inserted_id:
+                                new_count += 1
+                            continue
+                        else:
+                            logger.warning(
+                                f"  [{case_num}] LLM returned deal_id={matched_deal_id} but deal not found anywhere; falling through to USA check")
+
+                    # --- LLM #2: USA check ---
+                    logger.info(f"  [{case_num}] LLM Call #2: USA-related check (companies={companies})...")
+                    try:
+                        is_usa = verify_usa_relation(
+                            company_details=companies, case_type="EC")
+                        logger.info(f"  [{case_num}] USA check result: {is_usa}")
+                    except Exception as e:
+                        _log_error_and_email(
+                            f"USA check error for {case_num}: {e}",
+                            {"case_number": case_num, "companies": str(companies), "step": "verify_usa_relation"},
+                        )
+                        is_usa = False
+                        error_count += 1
+
+                    if is_usa:
+                        logger.info(f"  [{case_num}] USA-related case detected — sending email")
+                        subject, html_email = generate_usa_email(case)
                         send_email_via_webhook(
-                            subject, html_email, case_num, case_title, deal_id=matched_deal_id)
+                            subject, html_email, case_num, case_title, usa_related=True)
 
                         case_doc = {
                             **case,
-                            "deal_id": matched_deal_id,
                             "is_open": True,
                             "created_at": now_iso,
                             "updated_at": now_iso,
                         }
                         inserted_id = insert_case(collection, case_doc)
                         if inserted_id:
-                            print(
-                                f"  [{case_num}] Inserted (id={inserted_id})")
                             new_count += 1
-                        continue
                     else:
-                        print(
-                            f"  [{case_num}] LLM returned deal_id={matched_deal_id} but deal not found; checking USA")
+                        logger.info(
+                            f"  [{case_num}] No match, not USA-related — saving to DB (no email)")
+                        case_doc = {
+                            **case,
+                            "is_open": True,
+                            "created_at": now_iso,
+                            "updated_at": now_iso,
+                        }
+                        inserted_id = insert_case(collection, case_doc)
+                        if inserted_id:
+                            new_count += 1
 
-                # --- Step 7: USA check ---
-                print(f"  [{case_num}] LLM Call #2: USA-related check...")
-                try:
-                    is_usa = verify_usa_relation(
-                        company_details=companies, case_type="EC")
-                except Exception as e:
-                    print(f"  [{case_num}] USA check error: {e}",
-                          level="warning")
-                    is_usa = False
+                if max_pages is not None and current_page >= max_pages:
+                    logger.info(f"Reached max pages limit ({max_pages})")
+                    break
 
-                if is_usa:
-                    print(f"  [{case_num}] USA-related case detected")
-                    subject, html_email = generate_usa_email(case)
-                    send_email_via_webhook(
-                        subject, html_email, case_num, case_title, usa_related=True)
+                if not click_next_page(search_page):
+                    logger.info("No more pages (next button not found or disabled)")
+                    break
 
-                    case_doc = {
-                        **case,
-                        "is_open": True,
-                        "created_at": now_iso,
-                        "updated_at": now_iso,
-                    }
-                    inserted_id = insert_case(collection, case_doc)
-                    if inserted_id:
-                        print(f"  [{case_num}] Inserted (id={inserted_id})")
-                        new_count += 1
-                else:
-                    # --- Step 8: Not matched, not USA — still save ---
-                    print(
-                        f"  [{case_num}] No match, not USA-related; saving to DB")
-                    case_doc = {
-                        **case,
-                        "is_open": True,
-                        "created_at": now_iso,
-                        "updated_at": now_iso,
-                    }
-                    inserted_id = insert_case(collection, case_doc)
-                    if inserted_id:
-                        print(f"  [{case_num}] Inserted (id={inserted_id})")
-                        new_count += 1
+                selector = wait_for_results(search_page)
+                current_page += 1
 
-            if max_pages is not None and current_page >= max_pages:
-                break
+            context.close()
+            browser.close()
+            logger.info("Browser closed")
 
-            if not click_next_page(search_page):
-                break
+    except Exception as e:
+        error_count += 1
+        _log_error_and_email(
+            f"Unhandled error in run(): {e}",
+            {"step": "run_main", "start_url": start_url},
+        )
 
-            selector = wait_for_results(search_page)
-            current_page += 1
-
-        context.close()
-        browser.close()
-
-    print(
-        f"\nFinished — {new_count} new case(s) inserted, {skipped_count} skipped (already in DB)")
+    finally:
+        elapsed = round(time.time() - run_start, 1)
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("SUMMARY")
+        logger.info(f"  Total URLs visited           : {len(visited_urls)}")
+        logger.info(f"  New cases inserted           : {new_count}")
+        logger.info(f"  Skipped (already in DB)      : {skipped_count}")
+        logger.info(f"  Errors encountered           : {error_count}")
+        logger.info(f"  Total time                   : {elapsed}s")
+        logger.info("=" * 60)
 
 
 def main() -> int:
