@@ -52,9 +52,21 @@ from fs_html_scraper import parse_case_html
 load_dotenv(".env")
 
 # ---------------------------------------------------------------------------
-# Logging
+# Logging — date-wise log files under /var/data/logs/ (persistent disk)
 # ---------------------------------------------------------------------------
-LOG_FILE = "new_fs_cases_html.log"
+PERSISTENT_LOG_DIR = "/var/data/logs"
+SCRIPT_LOG_NAME = "fs_cases_register"
+
+
+def _get_log_file() -> str:
+    base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
+    log_dir = os.path.join(base, SCRIPT_LOG_NAME)
+    os.makedirs(log_dir, exist_ok=True)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return os.path.join(log_dir, f"{today}.log")
+
+
+LOG_FILE = _get_log_file()
 
 logger = logging.getLogger("new_fs_cases_html")
 logger.setLevel(logging.INFO)

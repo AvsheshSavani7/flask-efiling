@@ -2613,6 +2613,85 @@ def sd_puc_scraper_endpoint():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+# ---------------------------------------------------------------------------
+# Log viewer endpoints — date-wise logs from /var/data/logs/
+# ---------------------------------------------------------------------------
+PERSISTENT_LOG_DIR = "/var/data/logs"
+_LOG_BASE = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
+
+KNOWN_LOG_SCRIPTS = {
+    "fs_cases_register",
+    "fs_cases_update_monitor",
+}
+
+
+@app.route('/logs/list', methods=['GET'])
+def list_log_dates():
+    """List available log dates for a script.
+    GET /logs/list?script=fs_cases_register
+    """
+    script = request.args.get("script", "").strip()
+    if script not in KNOWN_LOG_SCRIPTS:
+        return jsonify({
+            "success": False,
+            "error": f"Unknown script. Available: {sorted(KNOWN_LOG_SCRIPTS)}"
+        }), 400
+
+    log_dir = os.path.join(_LOG_BASE, script)
+    if not os.path.isdir(log_dir):
+        return jsonify({"success": True, "script": script, "dates": []}), 200
+
+    dates = sorted(
+        f.replace(".log", "")
+        for f in os.listdir(log_dir)
+        if f.endswith(".log")
+    )
+    return jsonify({"success": True, "script": script, "dates": dates}), 200
+
+
+@app.route('/logs', methods=['GET'])
+def get_log_content():
+    """Return log content for a script + date.
+    GET /logs?script=fs_cases_register&date=2026-05-01
+    Omit date to get today's log. Use tail=N to get last N lines.
+    """
+    script = request.args.get("script", "").strip()
+    if script not in KNOWN_LOG_SCRIPTS:
+        return jsonify({
+            "success": False,
+            "error": f"Unknown script. Available: {sorted(KNOWN_LOG_SCRIPTS)}"
+        }), 400
+
+    date_str = request.args.get("date", "").strip()
+    if not date_str:
+        date_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+
+    log_path = os.path.join(_LOG_BASE, script, f"{date_str}.log")
+    if not os.path.isfile(log_path):
+        return jsonify({
+            "success": False,
+            "error": f"No log found for {script} on {date_str}"
+        }), 404
+
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        tail = request.args.get("tail", type=int)
+        if tail and tail > 0:
+            lines = lines[-tail:]
+
+        return jsonify({
+            "success": True,
+            "script": script,
+            "date": date_str,
+            "total_lines": len(lines),
+            "content": "".join(lines),
+        }), 200
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5050))
     debug = os.environ.get('FLASK_ENV') != 'production'
