@@ -5,12 +5,14 @@ from mongodb_connection import (
     is_connected,
 )
 from llm_verification_service import verify_usa_relation
+from error_email_service import send_error_email
 import os
 import json
 import sys
 import logging
 import builtins
-from datetime import datetime
+import traceback
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 import time
@@ -29,17 +31,46 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv(".env")
 
 # -----------------------------------------------------------------------------
-# Logging setup (stdout)
+# Logging — date-wise log files under /var/data/logs/ (persistent disk)
+# Timestamps in IST (UTC+5:30)
 # -----------------------------------------------------------------------------
-LOG_LEVEL = (os.getenv("LOG_LEVEL") or "INFO").upper()
+PERSISTENT_LOG_DIR = "/var/data/logs"
+SCRIPT_NAME = "australia_cases_register"
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _get_log_file() -> str:
+    base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
+    log_dir = os.path.join(base, SCRIPT_NAME)
+    os.makedirs(log_dir, exist_ok=True)
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    return os.path.join(log_dir, f"{today}.log")
+
+
+LOG_FILE = _get_log_file()
 logger = logging.getLogger("accc_cases_register")
-logger.setLevel(LOG_LEVEL)
+logger.setLevel(logging.INFO)
+
+
+class _ISTFormatter(logging.Formatter):
+    def converter(self, timestamp):
+        return datetime.fromtimestamp(timestamp, tz=IST)
+
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            return ct.strftime(datefmt)
+        return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
+
+
 if not logger.handlers:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-    )
-    logger.addHandler(handler)
+    formatter = _ISTFormatter("%(asctime)s | %(levelname)s | %(message)s")
+    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
 logger.propagate = False
 
 
@@ -60,6 +91,16 @@ def _logged_print(*args, level: str = "info", **kwargs):
 
 # Monkey-patch print in this module so existing print() calls are logged.
 print = _logged_print  # type: ignore
+
+
+def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+    logger.error(msg)
+    send_error_email(
+        script_name=SCRIPT_NAME,
+        error_message=msg,
+        context=context,
+        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
+    )
 
 # OpenAI client for deal matching
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -92,7 +133,7 @@ N8N_WEBHOOK_URL = os.getenv(
 
 def utc_now_iso() -> str:
     """UTC timestamp in ISO-8601 with Z suffix."""
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def get_accc_cases_collection():
@@ -774,7 +815,13 @@ def run_accc_cases_register(test_mode: bool = False):
     Main entrypoint for scraping the ACCC acquisitions register (under assessment)
     and inserting new cases into the 'accc_cases' collection.
     """
+    run_start = time.time()
+    error_count = 0
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"
+    logger.info("=" * 60)
+    logger.info(f"Starting ACCC Cases Register ({mode_label})")
+    logger.info(f"Log file: {LOG_FILE}")
+    logger.info("=" * 60)
     print(f"🚀 Starting ACCC Cases Register scraper ({mode_label})\n")
 
     # Initialize MongoDB (still connect in test mode so we exercise full path,
@@ -782,18 +829,20 @@ def run_accc_cases_register(test_mode: bool = False):
     print("🔌 Initializing MongoDB connection...")
     success, message = init_mongodb_connection(ENV_PATH)
     if not success:
-        print(f"❌ {message}")
-        print("   MongoDB connection is required. Exiting.")
+        _log_error_and_email(
+            f"MongoDB connection failed: {message}",
+            {"step": "mongodb_connect"},
+        )
         return
     print(f"✅ {message}\n")
 
     if not is_connected():
-        print("❌ MongoDB not connected. Exiting.")
+        _log_error_and_email("MongoDB not connected. Exiting.", {"step": "mongodb_connect"})
         return
 
     collection = get_accc_cases_collection()
     if collection is None:
-        print("❌ Could not access 'accc_cases' collection. Exiting.")
+        _log_error_and_email("Could not access 'accc_cases' collection. Exiting.", {"step": "get_collection"})
         return
 
     new_cases: List[Dict[str, Any]] = []
@@ -925,6 +974,11 @@ def run_accc_cases_register(test_mode: bool = False):
                         )
                     except Exception as e:
                         print(f"  ⚠️ Error during deal matching: {e}")
+                        _log_error_and_email(
+                            f"Error during deal matching: {e}",
+                            {"case_number": case_number, "step": "match_case_to_deal"},
+                        )
+                        error_count += 1
                         matched_deal_id = None
 
                     if matched_deal_id:
@@ -969,6 +1023,11 @@ def run_accc_cases_register(test_mode: bool = False):
                             )
                         except Exception as e:
                             print(f"  ⚠️ Error verifying USA relation: {e}")
+                            _log_error_and_email(
+                                f"Error verifying USA relation: {e}",
+                                {"case_number": case_number, "step": "verify_usa_relation"},
+                            )
+                            error_count += 1
                             is_usa = False
 
                         if is_usa:
@@ -990,6 +1049,11 @@ def run_accc_cases_register(test_mode: bool = False):
                         print("  ⚠️ Insert failed")
             except Exception as e:
                 print(f"❌ Error processing list item #{idx}: {e}")
+                _log_error_and_email(
+                    f"Error processing list item #{idx}: {e}",
+                    {"index": idx, "step": "process_list_item"},
+                )
+                error_count += 1
                 continue
 
         browser.close()
@@ -1014,6 +1078,13 @@ def run_accc_cases_register(test_mode: bool = False):
             print(f"⚠️ Error writing backup JSON: {e}")
 
     print("\n🎉 ACCC Cases Register scraper finished")
+    elapsed = round(time.time() - run_start, 1)
+    logger.info("=" * 60)
+    logger.info("SUMMARY")
+    logger.info(f"  New cases inserted           : {len(new_cases)}")
+    logger.info(f"  Errors encountered           : {error_count}")
+    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,9 @@ import datetime
 import json
 import os
 import re
+import sys
+import logging
+import builtins
 import requests
 import traceback
 import xml.etree.ElementTree as ET
@@ -12,6 +15,7 @@ from html import escape as escape_html
 from openai import OpenAI
 from pymongo import MongoClient
 from typing import Optional, Tuple
+from error_email_service import send_error_email
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -19,6 +23,69 @@ from typing import Optional, Tuple
 ATOM_FEED_URL = "https://www.gov.uk/cma-cases.atom?case_type%5B%5D=mergers&case_state%5B%5D=open"
 PROMPT_LOG_PATH = "cma_gpt_prompts.log"
 ENV_PATH = ".env"
+PERSISTENT_LOG_DIR = "/var/data/logs"
+SCRIPT_NAME = "uk_cases_register"
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+
+def _get_log_file() -> str:
+    base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
+    log_dir = os.path.join(base, SCRIPT_NAME)
+    os.makedirs(log_dir, exist_ok=True)
+    today = datetime.datetime.now(IST).strftime("%Y-%m-%d")
+    return os.path.join(log_dir, f"{today}.log")
+
+
+LOG_FILE = _get_log_file()
+
+logger = logging.getLogger("new_uk_cma_mergers_scraper_atom")
+logger.setLevel(logging.INFO)
+
+
+class _ISTFormatter(logging.Formatter):
+    def converter(self, timestamp):
+        return datetime.datetime.fromtimestamp(timestamp, tz=IST)
+
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            return ct.strftime(datefmt)
+        return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
+
+
+if not logger.handlers:
+    formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
+    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
+logger.propagate = False
+
+
+def _logged_print(*args, level: str = "info", **kwargs):
+    msg = " ".join(str(a) for a in args)
+    if level == "error":
+        logger.error(msg)
+    elif level == "warning":
+        logger.warning(msg)
+    else:
+        logger.info(msg)
+    builtins.print(*args, **kwargs)
+
+
+print = _logged_print  # type: ignore
+
+
+def _log_error_and_email(msg: str, context: Optional[dict] = None):
+    logger.error(msg)
+    send_error_email(
+        script_name=SCRIPT_NAME,
+        error_message=msg,
+        context=context or {},
+        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
+    )
 
 # ---------------------------------------------------------------------------
 # Environment & clients
@@ -788,6 +855,11 @@ def process_record(record, existing_urls):
                 print(f"  ℹ️ Not USA-related - no email")
         except Exception as e:
             print(f"  ⚠️ Error checking USA relation: {e}")
+            logger.exception("Error checking USA relation")
+            _log_error_and_email(
+                f"Error checking USA relation: {e}",
+                {"title": case_record.get("title", "N/A"), "step": "verify_usa_relation"},
+            )
 
     # Insert into uk_cma_cases collection
     insert_uk_cma_case(case_record)
@@ -799,6 +871,11 @@ def process_record(record, existing_urls):
 # ===================================================================
 
 def main():
+    run_start = datetime.datetime.now()
+    logger.info("=" * 60)
+    logger.info("Starting UK CMA Cases Register")
+    logger.info(f"Log file: {LOG_FILE}")
+    logger.info("=" * 60)
     print(f"\n{'='*60}")
     print(f"🚀 UK CMA Open Mergers Scraper (new_uk_cma_mergers_scraper_atom)")
     print(f"{'='*60}\n")
@@ -809,8 +886,10 @@ def main():
     if success:
         print(f"✅ {msg}\n")
     else:
-        print(f"❌ {msg}")
-        print("Exiting - MongoDB is required.\n")
+        _log_error_and_email(
+            f"MongoDB connection failed: {msg}",
+            {"step": "mongodb_connect"},
+        )
         return
 
     # Step 2: Load deals
@@ -827,7 +906,7 @@ def main():
     print(f"{'='*60}\n")
     xml_content = fetch_atom_feed()
     if not xml_content:
-        print("❌ Failed to fetch Atom feed. Exiting.")
+        _log_error_and_email("Failed to fetch Atom feed. Exiting.", {"step": "fetch_atom_feed"})
         return
 
     atom_records = parse_atom_feed(xml_content)
@@ -860,7 +939,19 @@ def main():
     print(f"🆕 New records processed: {new_count}")
     print(f"⏩ Skipped (already in DB): {skipped_count}")
     print(f"{'='*60}\n")
+    elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
+    logger.info("=" * 60)
+    logger.info("SUMMARY")
+    logger.info(f"  Total feed entries           : {len(atom_records)}")
+    logger.info(f"  New records processed        : {new_count}")
+    logger.info(f"  Skipped                      : {skipped_count}")
+    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        _log_error_and_email(f"Unhandled error in main: {e}", {"step": "main"})
+        raise

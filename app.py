@@ -2624,10 +2624,21 @@ KNOWN_LOG_SCRIPTS = {
     "fs_cases_update_monitor",
     "ec_cases_register",
     "ec_cases_update_monitor",
+    "canada_cases_register",
+    "canada_cases_update_monitor",
     "brazil_cases_register",
     "brazil_cases_update_monitor",
     "newzealand_cases_register",
     "newzealand_cases_update_monitor",
+    "australia_cases_register",
+    "australia_cases_update_monitor",
+    "uk_cases_register",
+    "uk_cases_update_monitor",
+    "germany_cases_register",
+    "germany_cases_update_monitor",
+    "samr-cases-public",
+    "samr-cases-conditional",
+    "samr-cases-unconditional",
 }
 
 

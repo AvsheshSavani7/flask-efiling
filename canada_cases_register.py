@@ -24,9 +24,11 @@ from mongodb_connection import (
     is_connected,
 )
 from llm_verification_service import verify_usa_relation
+from error_email_service import send_error_email
 import logging
 import builtins
-from datetime import datetime, timedelta
+import traceback
+from datetime import datetime, timedelta, timezone
 from html import escape as escape_html
 from typing import Any, Dict, List, Optional, Tuple
 import requests
@@ -41,18 +43,38 @@ import sys
 load_dotenv(".env")
 
 # -----------------------------------------------------------------------------
-# Logging setup (stdout + file)
+# Logging — date-wise log files under /var/data/logs/ (persistent disk)
+# Timestamps in IST (UTC+5:30)
 # -----------------------------------------------------------------------------
-LOG_LEVEL = (os.getenv("LOG_LEVEL") or "INFO").upper()
-LOG_FILE = "canada_cases_register.log"
+PERSISTENT_LOG_DIR = "/var/data/logs"
+SCRIPT_NAME = "canada_cases_register"
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _get_log_file() -> str:
+    base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
+    log_dir = os.path.join(base, SCRIPT_NAME)
+    os.makedirs(log_dir, exist_ok=True)
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    return os.path.join(log_dir, f"{today}.log")
+
+
+LOG_FILE = _get_log_file()
 logger = logging.getLogger("canada_cases_register")
-logger.setLevel(LOG_LEVEL)
+logger.setLevel(logging.INFO)
 
 if not logger.handlers:
-    formatter = logging.Formatter(
-        fmt="%(asctime)s | %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    class _ISTFormatter(logging.Formatter):
+        def converter(self, timestamp):
+            return datetime.fromtimestamp(timestamp, tz=IST)
+
+        def formatTime(self, record, datefmt=None):
+            ct = self.converter(record.created)
+            if datefmt:
+                return ct.strftime(datefmt)
+            return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
+
+    formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
     file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
@@ -77,6 +99,16 @@ def _logged_print(*args, level: str = "info", **kwargs):
 
 
 print = _logged_print  # type: ignore
+
+
+def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+    logger.error(msg)
+    send_error_email(
+        script_name=SCRIPT_NAME,
+        error_message=msg,
+        context=context,
+        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
+    )
 
 # OpenAI client for LLM matching
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -104,7 +136,7 @@ CUTOFF_DATE = datetime.now() - timedelta(days=3)
 
 def utc_now_iso() -> str:
     """UTC timestamp in ISO-8601 with Z suffix."""
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def get_canada_cases_collection():
@@ -498,23 +530,31 @@ def insert_case(collection, case_info: Dict[str, Any]) -> Optional[str]:
 
 def run_canada_cases_register():
     """Main entrypoint for Canada cases registration."""
+    run_start = datetime.now()
+    error_count = 0
+    logger.info("=" * 60)
+    logger.info("Starting Canada Cases Register")
+    logger.info(f"Log file: {LOG_FILE}")
+    logger.info("=" * 60)
     print("🚀 Starting Canada Cases Register\n")
 
     print("🔌 Initializing MongoDB connection...")
     success, message = init_mongodb_connection(ENV_PATH)
     if not success:
-        print(f"❌ {message}", level="error")
-        print("   MongoDB connection is required. Exiting.")
+        _log_error_and_email(
+            f"MongoDB connection failed: {message}",
+            {"step": "mongodb_connect"},
+        )
         return
     print(f"✅ {message}\n")
 
     if not is_connected():
-        print("❌ MongoDB not connected. Exiting.", level="error")
+        _log_error_and_email("MongoDB not connected. Exiting.", {"step": "mongodb_connect"})
         return
 
     collection = get_canada_cases_collection()
     if collection is None:
-        print("❌ Could not access 'canada_cases' collection. Exiting.", level="error")
+        _log_error_and_email("Could not access 'canada_cases' collection. Exiting.", {"step": "get_collection"})
         return
 
     print(f"📅 CUTOFF_DATE: {CUTOFF_DATE.strftime('%Y-%m-%d')} (3 days ago)\n")
@@ -596,6 +636,11 @@ def run_canada_cases_register():
                         {"_id": ObjectId(matched_deal_id)})
                 except Exception as e:
                     print(f"  ⚠️ Could not fetch deal: {e}", level="warning")
+                    _log_error_and_email(
+                        f"Could not fetch deal: {e}",
+                        {"deal_id": matched_deal_id, "step": "fetch_deal_for_email"},
+                    )
+                    error_count += 1
 
             if deal:
                 target = deal.get("target") or deal.get("target_name", "N/A")
@@ -622,6 +667,11 @@ def run_canada_cases_register():
                 )
             except Exception as e:
                 print(f"  ⚠️ USA relation check error: {e}", level="warning")
+                _log_error_and_email(
+                    f"USA relation check error: {e}",
+                    {"parties": parties[:120], "step": "verify_usa_relation"},
+                )
+                error_count += 1
                 is_usa = False
 
             if is_usa:
@@ -651,8 +701,20 @@ def run_canada_cases_register():
                 f"\n💾 Saved {len(new_cases)} new cases to backup JSON: {BACKUP_JSON}")
         except Exception as e:
             print(f"⚠️ Error writing backup JSON: {e}", level="warning")
+            _log_error_and_email(
+                f"Error writing backup JSON: {e}",
+                {"step": "backup_json_write"},
+            )
+            error_count += 1
 
     print("\n🎉 Canada Cases Register finished")
+    elapsed = round((datetime.now() - run_start).total_seconds(), 1)
+    logger.info("=" * 60)
+    logger.info("SUMMARY")
+    logger.info(f"  New cases inserted           : {len(new_cases)}")
+    logger.info(f"  Errors encountered           : {error_count}")
+    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":

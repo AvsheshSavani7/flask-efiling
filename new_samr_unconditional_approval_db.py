@@ -2,9 +2,13 @@ from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 import datetime
 import time
+import logging
 import requests
 import json
 import os
+import sys
+import traceback
+import builtins
 from openai import OpenAI
 from bs4 import BeautifulSoup
 import re
@@ -17,6 +21,7 @@ from mongodb_connection import (
 )
 from html import escape as escape_html
 from llm_verification_service import verify_usa_relation
+from error_email_service import send_error_email
 
 # Configuration
 CUTOFF_DATE = (datetime.datetime.now() - datetime.timedelta(days=6)).replace(
@@ -24,6 +29,69 @@ CUTOFF_DATE = (datetime.datetime.now() - datetime.timedelta(days=6)).replace(
 BASE_URL = "https://www.samr.gov.cn/fldes/ajgs/wtjjz/"
 ENV_PATH = ".env"
 HTML_OUTPUT_DIR = "samr_unconditional_html_pages"
+PERSISTENT_LOG_DIR = "/var/data/logs"
+SCRIPT_NAME = "samr-cases-unconditional"
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+
+def _get_log_file() -> str:
+    base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
+    log_dir = os.path.join(base, SCRIPT_NAME)
+    os.makedirs(log_dir, exist_ok=True)
+    today = datetime.datetime.now(IST).strftime("%Y-%m-%d")
+    return os.path.join(log_dir, f"{today}.log")
+
+
+LOG_FILE = _get_log_file()
+
+logger = logging.getLogger("new_samr_unconditional_approval_db")
+logger.setLevel(logging.INFO)
+
+
+class _ISTFormatter(logging.Formatter):
+    def converter(self, timestamp):
+        return datetime.datetime.fromtimestamp(timestamp, tz=IST)
+
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            return ct.strftime(datefmt)
+        return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
+
+
+if not logger.handlers:
+    formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
+    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
+logger.propagate = False
+
+
+def _logged_print(*args, level: str = "info", **kwargs):
+    msg = " ".join(str(a) for a in args)
+    if level == "error":
+        logger.error(msg)
+    elif level == "warning":
+        logger.warning(msg)
+    else:
+        logger.info(msg)
+    builtins.print(*args, **kwargs)
+
+
+print = _logged_print  # type: ignore
+
+
+def _log_error_and_email(msg: str, context: dict | None = None):
+    logger.error(msg)
+    send_error_email(
+        script_name=SCRIPT_NAME,
+        error_message=msg,
+        context=context or {},
+        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
+    )
 
 os.makedirs(HTML_OUTPUT_DIR, exist_ok=True)
 
@@ -1008,8 +1076,10 @@ Operators (CN): {table_row['operators_cn']}
                     print(f"  ℹ️ Not USA-related – no email")
             except Exception as e:
                 print(f"  ⚠️ Error verifying USA relation: {e}")
-                import traceback
-                traceback.print_exc()
+                _log_error_and_email(
+                    f"Error verifying USA relation: {e}",
+                    {"step": "verify_usa_relation", "url": listing_record.get("url", "")},
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -1018,16 +1088,21 @@ Operators (CN): {table_row['operators_cn']}
 
 def main(headless=True):
     global all_extracted_records, matched_data, deals
+    run_start = datetime.datetime.now()
 
     all_extracted_records = []
     matched_data = []
+    logger.info("=" * 60)
+    logger.info("Starting SAMR Unconditional Cases Register")
+    logger.info(f"Log file: {LOG_FILE}")
+    logger.info("=" * 60)
 
     # Initialize MongoDB
     ok, msg = init_mongodb_connection(ENV_PATH)
     if ok:
         print(f"✅ {msg}")
     else:
-        print(f"⚠️ {msg}")
+        _log_error_and_email(f"MongoDB initialization failed: {msg}", {"step": "init_mongodb_connection"})
 
     # Load deals and samr_cases
     print("📊 Loading deals from MongoDB...")
@@ -1075,11 +1150,17 @@ def main(headless=True):
                     page_num += 1
                 except Exception as e:
                     print(f"\n⚠️ Pagination error: {e}")
+                    _log_error_and_email(
+                        f"Pagination error: {e}",
+                        {"step": "paginate_listing", "page_num": page_num},
+                    )
                     break
         except Exception as e:
             print(f"\n❌ Scraping error: {e}")
-            import traceback
-            traceback.print_exc()
+            _log_error_and_email(
+                f"Scraping error: {e}",
+                {"step": "scrape_listing", "base_url": BASE_URL},
+            )
         finally:
             browser.close()
 
@@ -1156,6 +1237,14 @@ def main(headless=True):
     print(f"🆕 New listings processed: {len(new_records)}")
     print(f"🎯 Total matches found: {len(matched_data)}")
     print(f"{'='*60}\n")
+    elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
+    logger.info("=" * 60)
+    logger.info("SUMMARY")
+    logger.info(f"  Total listings extracted     : {len(all_extracted_records)}")
+    logger.info(f"  New listings processed       : {len(new_records)}")
+    logger.info(f"  Total matches found          : {len(matched_data)}")
+    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info("=" * 60)
 
     return {
         "success": True,
@@ -1186,4 +1275,8 @@ if __name__ == "__main__":
             sys.exit(0)
 
     print("🌐 Mode: Scrape SAMR unconditional approval pages")
-    main(headless=headless_mode)
+    try:
+        main(headless=headless_mode)
+    except Exception as e:
+        _log_error_and_email(f"Unhandled error in main: {e}", {"step": "main"})
+        raise

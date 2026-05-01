@@ -23,12 +23,16 @@ If diploma changes from '-'/empty to a real value → set is_open=False.
 import json
 import os
 import re
+import sys
 import time
+import traceback
+import logging
+import builtins
 import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
 from dotenv import load_dotenv
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
 from typing import List, Dict, Any, Optional, Tuple, Set
 from bson import ObjectId
 from mongodb_connection import (
@@ -37,6 +41,7 @@ from mongodb_connection import (
 from html import escape as escape_html
 from llm_verification_service import verify_country_relation
 from bundeskartellamt_initial_proxy import match_deal_with_llm
+from error_email_service import send_error_email
 
 load_dotenv(".env")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -45,12 +50,75 @@ BASE_URL = "https://www.bundeskartellamt.de/SiteGlobals/Forms/Suche/LaufendeVerf
 LAUFENDE_VERFAHREN_URL = f"{BASE_URL}?resultsPerPage=50"
 
 COMPARED_FIELDS = ["date", "pursue", "product_area", "diploma"]
+PERSISTENT_LOG_DIR = "/var/data/logs"
+SCRIPT_NAME = "germany_cases_update_monitor"
+IST = timezone(timedelta(hours=5, minutes=30))
 FIELD_LABELS = {
     "date": "Datum (Date)",
     "pursue": "Unternehmen (Companies)",
     "product_area": "Produktbereich (Product Area)",
     "diploma": "Abschluss (Conclusion)",
 }
+
+
+def _get_log_file() -> str:
+    base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
+    log_dir = os.path.join(base, SCRIPT_NAME)
+    os.makedirs(log_dir, exist_ok=True)
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    return os.path.join(log_dir, f"{today}.log")
+
+
+LOG_FILE = _get_log_file()
+
+logger = logging.getLogger("bundeskartellamt_update_monitor")
+logger.setLevel(logging.INFO)
+
+
+class _ISTFormatter(logging.Formatter):
+    def converter(self, timestamp):
+        return datetime.fromtimestamp(timestamp, tz=IST)
+
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            return ct.strftime(datefmt)
+        return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
+
+
+if not logger.handlers:
+    formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
+    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
+logger.propagate = False
+
+
+def _logged_print(*args, level: str = "info", **kwargs):
+    msg = " ".join(str(a) for a in args)
+    if level == "error":
+        logger.error(msg)
+    elif level == "warning":
+        logger.warning(msg)
+    else:
+        logger.info(msg)
+    builtins.print(*args, **kwargs)
+
+
+print = _logged_print  # type: ignore
+
+
+def _log_error_and_email(msg: str, context: Optional[dict] = None):
+    logger.error(msg)
+    send_error_email(
+        script_name=SCRIPT_NAME,
+        error_message=msg,
+        context=context or {},
+        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -451,11 +519,16 @@ def send_email_via_webhook(subject: str, html: str, file_number: str = "",
 # ---------------------------------------------------------------------------
 
 def main():
+    run_start = time.time()
+    logger.info("=" * 60)
+    logger.info("Starting Germany Cases Update Monitor")
+    logger.info(f"Log file: {LOG_FILE}")
+    logger.info("=" * 60)
     print(f"\n{'='*60}\n🔄 BUNDESKARTELLAMT UPDATE MONITOR\n{'='*60}\n")
 
     success, message = init_mongodb_connection(".env")
     if not success:
-        print(f"❌ {message}")
+        _log_error_and_email(f"MongoDB init failed: {message}", {"step": "init_mongodb_connection"})
         return {"success": False, "error": message}
 
     # 1. Fetch deals
@@ -465,7 +538,7 @@ def main():
     # 2. Fetch german_cases (is_open=True)
     gc_collection = get_german_cases_collection()
     if gc_collection is None:
-        print("❌ german_cases collection not available")
+        _log_error_and_email("german_cases collection not available", {"step": "get_german_cases_collection"})
         return {"success": False, "error": "german_cases collection unavailable"}
 
     open_cases = fetch_open_german_cases(gc_collection)
@@ -591,6 +664,10 @@ def main():
                     )
                 except Exception as e:
                     print(f"  ⚠️ USA check failed: {e}")
+                    _log_error_and_email(
+                        f"USA check failed: {e}",
+                        {"step": "verify_country_relation", "file_number": fn},
+                    )
                     is_usa = False
 
                 if is_usa:
@@ -624,6 +701,18 @@ def main():
     print(f"📧 Emails sent: {stats['email_sent']}")
     print(f"🎯 New deal matches: {stats['matched_new']}")
     print(f"🇺🇸 USA-related: {stats['usa_related']}\n")
+    elapsed = round(time.time() - run_start, 1)
+    logger.info("=" * 60)
+    logger.info("SUMMARY")
+    logger.info(f"  Checked                      : {stats['checked']}")
+    logger.info(f"  Unchanged                    : {stats['unchanged']}")
+    logger.info(f"  Not found in listing         : {stats['not_found']}")
+    logger.info(f"  Updated                      : {stats['updated']}")
+    logger.info(f"  Emails sent                  : {stats['email_sent']}")
+    logger.info(f"  New deal matches             : {stats['matched_new']}")
+    logger.info(f"  USA-related                  : {stats['usa_related']}")
+    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info("=" * 60)
 
     return {
         "success": True,
@@ -635,4 +724,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        _log_error_and_email(f"Unhandled error in main: {e}", {"step": "main"})
+        raise

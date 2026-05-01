@@ -1,9 +1,13 @@
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 import datetime
+import logging
 import requests
 import json
 import os
+import sys
+import traceback
+import builtins
 from openai import OpenAI
 from bs4 import BeautifulSoup
 import re
@@ -14,6 +18,7 @@ from mongodb_connection import (
 )
 from html import escape as escape_html
 from llm_verification_service import verify_usa_relation
+from error_email_service import send_error_email
 
 # Configuration
 # CUTOFF_DATE = datetime.datetime.now().replace(
@@ -31,6 +36,69 @@ ONE_TIME_END_DATE = None
 BASE_URL = "https://www.samr.gov.cn/fldes/ajgs/jyaj/"
 ENV_PATH = ".env"
 HTML_OUTPUT_DIR = "samr_html_pages"
+PERSISTENT_LOG_DIR = "/var/data/logs"
+SCRIPT_NAME = "samr-cases-public"
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+
+def _get_log_file() -> str:
+    base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
+    log_dir = os.path.join(base, SCRIPT_NAME)
+    os.makedirs(log_dir, exist_ok=True)
+    today = datetime.datetime.now(IST).strftime("%Y-%m-%d")
+    return os.path.join(log_dir, f"{today}.log")
+
+
+LOG_FILE = _get_log_file()
+
+logger = logging.getLogger("new_samr_public_notice_db")
+logger.setLevel(logging.INFO)
+
+
+class _ISTFormatter(logging.Formatter):
+    def converter(self, timestamp):
+        return datetime.datetime.fromtimestamp(timestamp, tz=IST)
+
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            return ct.strftime(datefmt)
+        return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
+
+
+if not logger.handlers:
+    formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
+    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
+logger.propagate = False
+
+
+def _logged_print(*args, level: str = "info", **kwargs):
+    msg = " ".join(str(a) for a in args)
+    if level == "error":
+        logger.error(msg)
+    elif level == "warning":
+        logger.warning(msg)
+    else:
+        logger.info(msg)
+    builtins.print(*args, **kwargs)
+
+
+print = _logged_print  # type: ignore
+
+
+def _log_error_and_email(msg: str, context: dict | None = None):
+    logger.error(msg)
+    send_error_email(
+        script_name=SCRIPT_NAME,
+        error_message=msg,
+        context=context or {},
+        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
+    )
 
 os.makedirs(HTML_OUTPUT_DIR, exist_ok=True)
 
@@ -662,15 +730,20 @@ def main(headless=True):
         dict with success, extraction_date, total_extracted, total_matched, etc.
     """
     global all_extracted_records, matched_data, deals
+    run_start = datetime.datetime.now()
     all_extracted_records = []
     matched_data = []
+    logger.info("=" * 60)
+    logger.info("Starting SAMR Public Notice Register")
+    logger.info(f"Log file: {LOG_FILE}")
+    logger.info("=" * 60)
 
     # Initialize MongoDB connection
     success, msg = init_mongodb_connection(ENV_PATH)
     if success:
         print(f"✅ {msg}")
     else:
-        print(f"⚠️ {msg}")
+        _log_error_and_email(f"MongoDB initialization failed: {msg}", {"step": "init_mongodb_connection"})
 
     print("📊 Loading deals from MongoDB...")
     load_deals()
@@ -719,12 +792,18 @@ def main(headless=True):
 
                 except Exception as e:
                     print(f"\n⚠️ Pagination error: {e}")
+                    _log_error_and_email(
+                        f"Pagination error: {e}",
+                        {"step": "paginate_listing", "page_num": page_num},
+                    )
                     break
 
         except Exception as e:
             print(f"\n❌ Scraping error: {e}")
-            import traceback
-            traceback.print_exc()
+            _log_error_and_email(
+                f"Scraping error: {e}",
+                {"step": "scrape_listing", "base_url": BASE_URL},
+            )
         finally:
             browser.close()
 
@@ -816,14 +895,20 @@ def main(headless=True):
                         send_samr_email_via_webhook(samr_data, deal_match)
                     except Exception as e:
                         print(f"  ⚠️ Error sending email notification: {e}")
+                        _log_error_and_email(
+                            f"Error sending matched email: {e}",
+                            {"step": "send_samr_email_via_webhook", "url": url},
+                        )
                 else:
                     print(
                         f"  ⚠️ LLM found match but deal not found in loaded deals: {deal_id}")
 
             except Exception as e:
                 print(f"  ⚠️ Error processing match: {e}")
-                import traceback
-                traceback.print_exc()
+                _log_error_and_email(
+                    f"Error processing LLM match: {e}",
+                    {"step": "process_match", "url": url},
+                )
         else:
             print(f"  ➖ No match")
             try:
@@ -840,8 +925,10 @@ def main(headless=True):
                     print(f"   ℹ️ Not USA-related - no action taken")
             except Exception as e:
                 print(f"   ⚠️ Error verifying USA relation: {e}")
-                import traceback
-                traceback.print_exc()
+                _log_error_and_email(
+                    f"Error verifying USA relation: {e}",
+                    {"step": "verify_usa_relation", "url": url},
+                )
 
         # Always persist the record to samr_cases
         save_to_samr_cases(samr_case_doc)
@@ -867,6 +954,14 @@ def main(headless=True):
     print(f"🆕 New records processed: {len(new_records)}")
     print(f"🎯 Total matches found: {len(matched_data)}")
     print(f"{'='*60}\n")
+    elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
+    logger.info("=" * 60)
+    logger.info("SUMMARY")
+    logger.info(f"  Total records extracted      : {len(all_extracted_records)}")
+    logger.info(f"  New records processed        : {len(new_records)}")
+    logger.info(f"  Total matches found          : {len(matched_data)}")
+    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info("=" * 60)
 
     return matched_output
 
@@ -889,4 +984,8 @@ if __name__ == "__main__":
             sys.exit(0)
 
     print("🌐 Mode: Scrape new pages from SAMR website")
-    main(headless=headless_mode)
+    try:
+        main(headless=headless_mode)
+    except Exception as e:
+        _log_error_and_email(f"Unhandled error in main: {e}", {"step": "main"})
+        raise

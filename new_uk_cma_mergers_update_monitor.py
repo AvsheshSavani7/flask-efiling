@@ -2,6 +2,9 @@ from dotenv import load_dotenv
 import datetime
 import os
 import re
+import sys
+import logging
+import builtins
 import requests
 import traceback
 from bson import ObjectId
@@ -10,12 +13,76 @@ from html import escape as escape_html
 from openai import OpenAI
 from pymongo import MongoClient
 from typing import Optional, Tuple
+from error_email_service import send_error_email
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 PROMPT_LOG_PATH = "cma_gpt_prompts.log"
 ENV_PATH = ".env"
+PERSISTENT_LOG_DIR = "/var/data/logs"
+SCRIPT_NAME = "uk_cases_update_monitor"
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+
+def _get_log_file() -> str:
+    base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
+    log_dir = os.path.join(base, SCRIPT_NAME)
+    os.makedirs(log_dir, exist_ok=True)
+    today = datetime.datetime.now(IST).strftime("%Y-%m-%d")
+    return os.path.join(log_dir, f"{today}.log")
+
+
+LOG_FILE = _get_log_file()
+
+logger = logging.getLogger("new_uk_cma_mergers_update_monitor")
+logger.setLevel(logging.INFO)
+
+
+class _ISTFormatter(logging.Formatter):
+    def converter(self, timestamp):
+        return datetime.datetime.fromtimestamp(timestamp, tz=IST)
+
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            return ct.strftime(datefmt)
+        return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
+
+
+if not logger.handlers:
+    formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
+    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
+logger.propagate = False
+
+
+def _logged_print(*args, level: str = "info", **kwargs):
+    msg = " ".join(str(a) for a in args)
+    if level == "error":
+        logger.error(msg)
+    elif level == "warning":
+        logger.warning(msg)
+    else:
+        logger.info(msg)
+    builtins.print(*args, **kwargs)
+
+
+print = _logged_print  # type: ignore
+
+
+def _log_error_and_email(msg: str, context: Optional[dict] = None):
+    logger.error(msg)
+    send_error_email(
+        script_name=SCRIPT_NAME,
+        error_message=msg,
+        context=context or {},
+        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
+    )
 
 FIELDS_TO_COMPARE = [
     "title",
@@ -122,7 +189,10 @@ def get_deals_from_mongodb():
         return all_deals
     except Exception as e:
         print(f"⚠️ Error fetching deals from MongoDB: {e}")
-        traceback.print_exc()
+        _log_error_and_email(
+            f"Error fetching deals from MongoDB: {e}",
+            {"step": "get_deals_from_mongodb"},
+        )
         return []
 
 
@@ -849,6 +919,10 @@ def process_case(db_record):
                     print(f"  ℹ️ Not USA-related - no email, updating DB only")
             except Exception as e:
                 print(f"  ⚠️ Error checking USA relation: {e}")
+                _log_error_and_email(
+                    f"Error checking USA relation: {e}",
+                    {"title": case_info.get("title", "N/A"), "step": "verify_usa_relation"},
+                )
 
     # Update the DB record with all scraped fields
     update_fields = {
@@ -876,6 +950,11 @@ def process_case(db_record):
 # ===================================================================
 
 def main():
+    run_start = datetime.datetime.now()
+    logger.info("=" * 60)
+    logger.info("Starting UK CMA Cases Update Monitor")
+    logger.info(f"Log file: {LOG_FILE}")
+    logger.info("=" * 60)
     print(f"\n{'='*60}")
     print("🔄 UK CMA Open Mergers Update Monitor")
     print(f"{'='*60}\n")
@@ -886,8 +965,10 @@ def main():
     if success:
         print(f"✅ {msg}\n")
     else:
-        print(f"❌ {msg}")
-        print("Exiting - MongoDB is required.\n")
+        _log_error_and_email(
+            f"MongoDB connection failed: {msg}",
+            {"step": "mongodb_connect"},
+        )
         return
 
     # Step 2: Load deals
@@ -927,7 +1008,19 @@ def main():
     print(f"📝 Cases with updates: {updated_count}")
     print(f"✅ Cases unchanged: {unchanged_count}")
     print(f"{'='*60}\n")
+    elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
+    logger.info("=" * 60)
+    logger.info("SUMMARY")
+    logger.info(f"  Total open cases checked     : {len(open_cases)}")
+    logger.info(f"  Cases with updates           : {updated_count}")
+    logger.info(f"  Cases unchanged              : {unchanged_count}")
+    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        _log_error_and_email(f"Unhandled error in main: {e}", {"step": "main"})
+        raise
