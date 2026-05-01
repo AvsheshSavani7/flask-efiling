@@ -452,8 +452,7 @@ def generate_update_email_html(
     check_fields = [
         "companies", "last_decision_date", "case_type",
         "regulation", "notification_date", "provisional_deadline",
-        "economic_activities", "decisions", "other_case_related_information",
-        "status",
+        "economic_activities", "decisions", "other_case_related_information"
     ]
     field_status = {}
     changed_names = []
