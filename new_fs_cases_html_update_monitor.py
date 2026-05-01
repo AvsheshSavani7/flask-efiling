@@ -224,7 +224,8 @@ def scrape_case_page(context, case_number: str) -> Optional[Dict[str, Any]]:
         parsed = parse_case_html(html, case_number)
         if parsed and not parsed.get("error"):
             for k, v in parsed.items():
-                display = json.dumps(v, ensure_ascii=False, default=str) if isinstance(v, (dict, list)) else str(v)
+                display = json.dumps(v, ensure_ascii=False, default=str) if isinstance(
+                    v, (dict, list)) else str(v)
                 logger.info(f"  [{case_number}] {k}: {display}")
         else:
             error_msg = parsed.get(
@@ -248,21 +249,25 @@ def get_companies_from_title(case: Dict[str, Any]) -> List[str]:
     case_number = case.get("case_number", "?")
     companies = case.get("companies")
     if companies:
-        logger.info(f"get_companies_from_title({case_number}) -> from field: {companies}")
+        logger.info(
+            f"get_companies_from_title({case_number}) -> from field: {companies}")
         return companies
     title = case.get("case_title") or ""
     if not title:
-        logger.info(f"get_companies_from_title({case_number}) -> no title, returning []")
+        logger.info(
+            f"get_companies_from_title({case_number}) -> no title, returning []")
         return []
     result = [c.strip() for c in title.split(" / ") if c.strip()]
-    logger.info(f"get_companies_from_title({case_number}) -> parsed from title: {result}")
+    logger.info(
+        f"get_companies_from_title({case_number}) -> parsed from title: {result}")
     return result
 
 
 def has_real_decision_date(case: Dict[str, Any]) -> bool:
     """Check if last_decision_date is a real date (not 'none'/null/empty)."""
     val = case.get("last_decision_date")
-    result = bool(val) and str(val).strip().lower() not in ("none", "null", "n/a", "")
+    result = bool(val) and str(val).strip(
+    ).lower() not in ("none", "null", "n/a", "")
     logger.info(
         f"has_real_decision_date({case.get('case_number', '?')}) -> "
         f"raw_value={val!r} | result={result}"
@@ -371,7 +376,8 @@ def fetch_open_cases(collection) -> List[Dict[str, Any]]:
     try:
         cases = list(collection.find({"is_open": True}))
         case_numbers = [c.get("case_number", "?") for c in cases[:5]]
-        logger.info(f"fetch_open_cases() -> {len(cases)} cases (first 5: {case_numbers})")
+        logger.info(
+            f"fetch_open_cases() -> {len(cases)} cases (first 5: {case_numbers})")
         return cases
     except Exception as e:
         _log_critical_error_and_email(
@@ -382,7 +388,8 @@ def fetch_open_cases(collection) -> List[Dict[str, Any]]:
 
 
 def fetch_deals() -> List[Dict[str, Any]]:
-    logger.info("fetch_deals() called | filter: Open/Unknown/None/missing status")
+    logger.info(
+        "fetch_deals() called | filter: Open/Unknown/None/missing status")
     try:
         deals_coll = get_deals_collection()
         if deals_coll is None:
@@ -400,7 +407,8 @@ def fetch_deals() -> List[Dict[str, Any]]:
             if "_id" in d:
                 d["deal_id"] = str(d["_id"])
         sample_ids = [d.get("deal_id", "?") for d in deals[:3]]
-        logger.info(f"fetch_deals() -> {len(deals)} deals (sample IDs: {sample_ids})")
+        logger.info(
+            f"fetch_deals() -> {len(deals)} deals (sample IDs: {sample_ids})")
         return deals
     except Exception as e:
         _log_critical_error_and_email(
@@ -417,11 +425,13 @@ def update_case_document(
     extra_fields: Optional[Dict[str, Any]] = None,
 ) -> bool:
     case_number = case_doc.get("case_number", "?")
-    logger.info(f"update_case_document() called | case_number={case_number} | extra_fields={extra_fields}")
+    logger.info(
+        f"update_case_document() called | case_number={case_number} | extra_fields={extra_fields}")
     try:
         _id = case_doc.get("_id")
         if not _id:
-            logger.warning(f"update_case_document() -> _id missing for {case_number}")
+            logger.warning(
+                f"update_case_document() -> _id missing for {case_number}")
             return False
 
         updated = {**new_data}
@@ -446,7 +456,8 @@ def update_case_document(
         if result.modified_count > 0:
             logger.info(f"    [{case_number}] Updated case document in DB")
         else:
-            logger.info(f"    [{case_number}] No DB changes (already up to date)")
+            logger.info(
+                f"    [{case_number}] No DB changes (already up to date)")
         return True
     except Exception as e:
         logger.exception(f"Error updating case {case_number}: {e}")
@@ -491,7 +502,8 @@ def send_email_via_webhook(
             timeout=30,
         )
         resp.raise_for_status()
-        logger.info(f"send_email_via_webhook() -> success | status={resp.status_code}")
+        logger.info(
+            f"send_email_via_webhook() -> success | status={resp.status_code}")
         return True
     except Exception as e:
         logger.exception(f"Error sending email for {case_number}: {e}")
@@ -839,6 +851,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
             logger.info("Cookie banner dismissed on init page")
 
             for idx, case_doc in enumerate(open_cases, 1):
+                logger.info(f"case_doc: {case_doc}")
                 case_number = case_doc.get("case_number", "")
                 old_title = case_doc.get("case_title") or "N/A"
                 deal_id = case_doc.get("deal_id")
@@ -848,7 +861,8 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                 )
 
                 if not case_number:
-                    logger.warning(f"  [{idx}/{total}] No case_number; skipping")
+                    logger.warning(
+                        f"  [{idx}/{total}] No case_number; skipping")
                     continue
 
                 # Step 4: Scrape detail page
@@ -872,10 +886,12 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                     if not any(tf in d[0] for tf in _EXCLUDE_FROM_COMPARE)
                 ]
 
-                logger.info(f"  [{case_number}] deep_compare() -> {len(differences)} differences")
+                logger.info(
+                    f"  [{case_number}] deep_compare() -> {len(differences)} differences")
 
                 if not differences:
-                    logger.info(f"  [{case_number}] No changes detected — skipping")
+                    logger.info(
+                        f"  [{case_number}] No changes detected — skipping")
                     continue
 
                 changed_count += 1
@@ -884,29 +900,34 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                     name = path.split(".")[0].split("[")[0]
                     if name not in changed_names:
                         changed_names.append(name)
-                logger.info(f"  [{case_number}] Changed fields: {changed_names}")
+                logger.info(
+                    f"  [{case_number}] Changed fields: {changed_names}")
                 for diff_path, old_val, new_val in differences:
                     old_display = json.dumps(old_val, ensure_ascii=False) if isinstance(
                         old_val, (dict, list)) else str(old_val) if old_val is not None else "(empty)"
                     new_display = json.dumps(new_val, ensure_ascii=False) if isinstance(
                         new_val, (dict, list)) else str(new_val) if new_val is not None else "(empty)"
-                    logger.info(f"    {diff_path}: {old_display} -> {new_display}")
+                    logger.info(
+                        f"    {diff_path}: {old_display} -> {new_display}")
 
                 # Check last_decision_date for is_open
                 extra_fields: Dict[str, Any] = {}
                 if has_real_decision_date(new_data):
                     extra_fields["is_open"] = False
                     closed_count += 1
-                    logger.info(f"  [{case_number}] last_decision_date present -> is_open=False")
+                    logger.info(
+                        f"  [{case_number}] last_decision_date present -> is_open=False")
 
                 companies = get_companies_from_title(new_data)
 
                 # Step 6: Email logic
                 if deal_id:
-                    logger.info(f"  [{case_number}] Path A: existing deal_id={deal_id}")
+                    logger.info(
+                        f"  [{case_number}] Path A: existing deal_id={deal_id}")
                     deal = deal_by_id.get(deal_id)
                     if not deal:
-                        logger.info(f"  [{case_number}] deal_id not in cache, querying DB...")
+                        logger.info(
+                            f"  [{case_number}] deal_id not in cache, querying DB...")
                         try:
                             deals_coll = get_deals_collection()
                             if deals_coll:
@@ -915,11 +936,14 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                                 if raw:
                                     raw["deal_id"] = str(raw["_id"])
                                     deal = raw
-                                    logger.info(f"  [{case_number}] Resolved deal from DB: {deal_id}")
+                                    logger.info(
+                                        f"  [{case_number}] Resolved deal from DB: {deal_id}")
                                 else:
-                                    logger.warning(f"  [{case_number}] Deal {deal_id} not found in DB")
+                                    logger.warning(
+                                        f"  [{case_number}] Deal {deal_id} not found in DB")
                         except Exception as e:
-                            logger.exception(f"  [{case_number}] Error resolving deal {deal_id}: {e}")
+                            logger.exception(
+                                f"  [{case_number}] Error resolving deal {deal_id}: {e}")
                             error_items.append({
                                 "case_number": case_number,
                                 "error": str(e),
@@ -941,17 +965,20 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                         banner = ""
                         subject = f"[FRMD] EC FS Case (Updated) \u2013 {case_number}: {case_title}"
 
-                    email_html = email_html.replace("{BANNER_PLACEHOLDER}", banner)
+                    email_html = email_html.replace(
+                        "{BANNER_PLACEHOLDER}", banner)
                     send_email_via_webhook(subject, email_html, case_number,
                                            case_title, deal_id=deal_id, changed_fields=changed_names)
 
                 else:
                     case_title = new_data.get("case_title", "N/A")
 
-                    logger.info(f"  [{case_number}] Path B: no deal_id -> LLM deal match | companies={companies}")
+                    logger.info(
+                        f"  [{case_number}] Path B: no deal_id -> LLM deal match | companies={companies}")
                     match_result = match_case_to_deal(
                         companies, deals) if deals else None
-                    logger.info(f"  [{case_number}] match_case_to_deal() -> {match_result}")
+                    logger.info(
+                        f"  [{case_number}] match_case_to_deal() -> {match_result}")
 
                     deal = None
                     if match_result:
@@ -962,7 +989,8 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                         )
                         deal = deal_by_id.get(matched_deal_id)
                         if not deal:
-                            logger.info(f"  [{case_number}] Matched deal not in cache, querying DB...")
+                            logger.info(
+                                f"  [{case_number}] Matched deal not in cache, querying DB...")
                             try:
                                 deals_coll = get_deals_collection()
                                 if deals_coll:
@@ -971,11 +999,14 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                                     if raw:
                                         raw["deal_id"] = str(raw["_id"])
                                         deal = raw
-                                        logger.info(f"  [{case_number}] Resolved matched deal from DB")
+                                        logger.info(
+                                            f"  [{case_number}] Resolved matched deal from DB")
                                     else:
-                                        logger.warning(f"  [{case_number}] Matched deal {matched_deal_id} not found in DB")
+                                        logger.warning(
+                                            f"  [{case_number}] Matched deal {matched_deal_id} not found in DB")
                             except Exception as e:
-                                logger.exception(f"  [{case_number}] Error resolving matched deal {matched_deal_id}: {e}")
+                                logger.exception(
+                                    f"  [{case_number}] Error resolving matched deal {matched_deal_id}: {e}")
                                 error_items.append({
                                     "case_number": case_number,
                                     "error": str(e),
@@ -984,7 +1015,8 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
 
                     if deal:
                         matched_deal_id = deal.get("deal_id", matched_deal_id)
-                        logger.info(f"  [{case_number}] Deal resolved -> sending [FRMD] email, deal_id={matched_deal_id}")
+                        logger.info(
+                            f"  [{case_number}] Deal resolved -> sending [FRMD] email, deal_id={matched_deal_id}")
                         extra_fields["deal_id"] = matched_deal_id
 
                         email_html = generate_update_email_html(
@@ -1001,13 +1033,16 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                         send_email_via_webhook(subject, email_html, case_number, case_title,
                                                deal_id=matched_deal_id, changed_fields=changed_names)
                     else:
-                        logger.info(f"  [{case_number}] No deal match -> LLM USA check | companies={companies}")
+                        logger.info(
+                            f"  [{case_number}] No deal match -> LLM USA check | companies={companies}")
                         try:
                             is_usa = verify_usa_relation(
                                 company_details=companies, case_type="FS")
-                            logger.info(f"  [{case_number}] verify_usa_relation() -> {is_usa}")
+                            logger.info(
+                                f"  [{case_number}] verify_usa_relation() -> {is_usa}")
                         except Exception as e:
-                            logger.exception(f"  [{case_number}] USA check error: {e}")
+                            logger.exception(
+                                f"  [{case_number}] USA check error: {e}")
                             error_items.append({
                                 "case_number": case_number,
                                 "error": str(e),
@@ -1016,7 +1051,8 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                             is_usa = False
 
                         if is_usa:
-                            logger.info(f"  [{case_number}] USA-related -> sending [FRUD] email")
+                            logger.info(
+                                f"  [{case_number}] USA-related -> sending [FRUD] email")
                             email_html = generate_update_email_html(
                                 new_data, differences, companies)
                             banner = _build_usa_banner(case_number)
@@ -1029,7 +1065,8 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                             send_email_via_webhook(
                                 subject, email_html, case_number, case_title, changed_fields=changed_names)
                         else:
-                            logger.info(f"  [{case_number}] Not matched, not USA-related -> no email")
+                            logger.info(
+                                f"  [{case_number}] Not matched, not USA-related -> no email")
 
                 # Always update DB
                 update_case_document(collection, case_doc,
@@ -1045,7 +1082,8 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
 
     # Send one summary error email if any per-case errors occurred
     if error_items:
-        logger.warning(f"{len(error_items)} per-case errors collected — sending summary email")
+        logger.warning(
+            f"{len(error_items)} per-case errors collected — sending summary email")
         send_error_email(
             script_name=SCRIPT_NAME,
             error_message=f"{len(error_items)} errors occurred during run",
@@ -1085,5 +1123,6 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception as e:
-        _log_critical_error_and_email(f"Unhandled error in __main__: {e}", {"step": "__main__"})
+        _log_critical_error_and_email(
+            f"Unhandled error in __main__: {e}", {"step": "__main__"})
         raise
