@@ -28,6 +28,7 @@ Run:
 """
 
 from llm_verification_service import verify_usa_relation
+from error_email_service import send_error_email
 from mongodb_connection import (
     get_database,
     get_deals_collection,
@@ -40,7 +41,7 @@ from bson import ObjectId
 from playwright.sync_api import sync_playwright
 import requests
 from typing import Any, Dict, List, Optional, Set, Tuple
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import argparse
 import json
 import logging
@@ -49,6 +50,7 @@ import re
 import sys
 import os
 import time
+import traceback
 
 from fs_html_scraper import parse_case_html
 from new_fs_cases_html import match_case_to_deal
@@ -57,16 +59,18 @@ load_dotenv(".env")
 
 # ---------------------------------------------------------------------------
 # Logging — date-wise log files under /var/data/logs/ (persistent disk)
+# Timestamps in IST (UTC+5:30)
 # ---------------------------------------------------------------------------
 PERSISTENT_LOG_DIR = "/var/data/logs"
-SCRIPT_LOG_NAME = "fs_cases_update_monitor"
+SCRIPT_NAME = "fs_cases_update_monitor"
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
-    log_dir = os.path.join(base, SCRIPT_LOG_NAME)
+    log_dir = os.path.join(base, SCRIPT_NAME)
     os.makedirs(log_dir, exist_ok=True)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(IST).strftime("%Y-%m-%d")
     return os.path.join(log_dir, f"{today}.log")
 
 
@@ -75,10 +79,22 @@ LOG_FILE = _get_log_file()
 logger = logging.getLogger("new_fs_cases_html_update_monitor")
 logger.setLevel(logging.INFO)
 
+
+class _ISTFormatter(logging.Formatter):
+    """Format log timestamps in IST."""
+    def converter(self, timestamp):
+        return datetime.fromtimestamp(timestamp, tz=IST)
+
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            return ct.strftime(datefmt)
+        return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
+
+
 if not logger.handlers:
-    formatter = logging.Formatter(
+    formatter = _ISTFormatter(
         fmt="%(asctime)s | %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
     )
     fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
     fh.setFormatter(formatter)
@@ -98,6 +114,17 @@ def _logged_print(*args, level: str = "info", **kwargs):
 
 
 print = _logged_print  # type: ignore
+
+
+def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+    """Log at ERROR level and fire an error email."""
+    logger.error(msg)
+    send_error_email(
+        script_name=SCRIPT_NAME,
+        error_message=msg,
+        context=context,
+        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
+    )
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
