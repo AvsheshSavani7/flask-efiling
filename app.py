@@ -2622,6 +2622,10 @@ _LOG_BASE = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
 KNOWN_LOG_SCRIPTS = {
     "fs_cases_register",
     "fs_cases_update_monitor",
+    "ec_cases_register",
+    "ec_cases_update_monitor",
+    "brazil_cases_register",
+    "brazil_cases_update_monitor",
 }
 
 
@@ -2664,7 +2668,8 @@ def get_log_content():
 
     date_str = request.args.get("date", "").strip()
     if not date_str:
-        date_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        date_str = datetime.datetime.now(
+            datetime.timezone.utc).strftime("%Y-%m-%d")
 
     log_path = os.path.join(_LOG_BASE, script, f"{date_str}.log")
     if not os.path.isfile(log_path):
