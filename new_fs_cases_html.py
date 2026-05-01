@@ -37,12 +37,12 @@ from dotenv import load_dotenv
 from bson import ObjectId
 from playwright.sync_api import sync_playwright
 import requests
+from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Set, Tuple
 from datetime import datetime, timezone, timedelta
 import argparse
 import json
 import logging
-import builtins
 import re
 import sys
 import os
@@ -50,16 +50,21 @@ import time
 import traceback
 
 from fs_html_scraper import parse_case_html
+from log_utils import cleanup_old_logs
 
 load_dotenv(".env")
 
 # ---------------------------------------------------------------------------
-# Logging — date-wise log files under /var/data/logs/ (persistent disk)
-# Timestamps in IST (UTC+5:30)
+# Logging — production setup (RotatingFileHandler, IST, env-based settings)
 # ---------------------------------------------------------------------------
 PERSISTENT_LOG_DIR = "/var/data/logs"
 SCRIPT_NAME = "fs_cases_register"
 IST = timezone(timedelta(hours=5, minutes=30))
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
 
 def _get_log_file() -> str:
@@ -71,9 +76,6 @@ def _get_log_file() -> str:
 
 
 LOG_FILE = _get_log_file()
-
-logger = logging.getLogger("new_fs_cases_html")
-logger.setLevel(logging.INFO)
 
 
 class _ISTFormatter(logging.Formatter):
@@ -89,11 +91,18 @@ class _ISTFormatter(logging.Formatter):
         return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
 
 
+logger = logging.getLogger(SCRIPT_NAME)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+
 if not logger.handlers:
-    formatter = _ISTFormatter(
-        fmt="%(asctime)s | %(levelname)s | %(message)s",
+    formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
+
+    fh = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
     )
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
     fh.setFormatter(formatter)
     logger.addHandler(fh)
 
@@ -103,18 +112,11 @@ if not logger.handlers:
 
 logger.propagate = False
 
-
-def _logged_print(*args, level: str = "info", **kwargs):
-    msg = " ".join(str(a) for a in args)
-    getattr(logger, level if level in ("error", "warning") else "info")(msg)
-    builtins.print(*args, **kwargs)
+cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 
 
-print = _logged_print  # type: ignore
-
-
-def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
-    """Log at ERROR level and fire an error email."""
+def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+    """Immediate error email — use ONLY for critical startup / fatal failures."""
     logger.error(msg)
     send_error_email(
         script_name=SCRIPT_NAME,
@@ -207,7 +209,7 @@ def wait_for_results(page, timeout_ms: int = 30000) -> str:
             return selector
         except Exception as exc:
             last_error = exc
-    _log_error_and_email(
+    _log_critical_error_and_email(
         f"Could not find result links on page. Last error: {last_error}",
         {"step": "wait_for_results"},
     )
@@ -295,7 +297,9 @@ def scrape_case_detail(context, url: str) -> Optional[Dict[str, Any]]:
 
         html = page.content()
         logger.info(f"  [{case_num}] HTML fetched ({len(html)} chars)")
+        logger.info(f"  [{case_num}] HTML: {html[:1500]}...")
         parsed = parse_case_html(html, case_num)
+        logger.info(f"  [{case_num}] Parsed: {parsed}")
         if parsed and not parsed.get("error"):
             logger.info(f"  [{case_num}] Parsed fields: {list(parsed.keys())}")
         else:
@@ -303,10 +307,7 @@ def scrape_case_detail(context, url: str) -> Optional[Dict[str, Any]]:
                 f"  [{case_num}] Parse returned error: {parsed.get('error') if parsed else 'None'}")
         return parsed
     except Exception as exc:
-        _log_error_and_email(
-            f"Failed to scrape {case_num}: {exc}",
-            {"case_number": case_num, "url": url, "step": "scrape_case_detail"},
-        )
+        logger.exception(f"  [{case_num}] Failed to scrape: {exc}")
         return None
     finally:
         page.close()
@@ -346,10 +347,7 @@ def case_exists(collection, case_number: str) -> bool:
             {"case_number": case_number}, limit=1) > 0
         return exists
     except Exception as e:
-        _log_error_and_email(
-            f"Error checking existing case {case_number}: {e}",
-            {"case_number": case_number, "step": "case_exists"},
-        )
+        logger.exception(f"Error checking existing case {case_number}: {e}")
         return False
 
 
@@ -381,7 +379,7 @@ def fetch_deals() -> List[Dict[str, Any]]:
                     f"  Sample deal: id={d.get('deal_id')} | target={d.get('target') or d.get('target_name','N/A')} | acquirer={d.get('acquirer') or d.get('acquire_name','N/A')}")
         return deals
     except Exception as e:
-        _log_error_and_email(
+        _log_critical_error_and_email(
             f"Error fetching deals: {e}",
             {"step": "fetch_deals"},
         )
@@ -396,10 +394,7 @@ def insert_case(collection, case_doc: Dict[str, Any]) -> Optional[str]:
         logger.info(f"  [{case_num}] Inserted into DB (id={inserted_id})")
         return inserted_id
     except Exception as e:
-        _log_error_and_email(
-            f"Error inserting case {case_num}: {e}",
-            {"case_number": case_num, "step": "insert_case"},
-        )
+        logger.exception(f"Error inserting case {case_num}: {e}")
         return None
 
 
@@ -506,10 +501,7 @@ RESPONSE FORMAT:
             f"  LLM match result: deal_id={deal_id} | company={matched_company} | role={matched_role}")
         return (deal_id, matched_company, matched_role)
     except Exception as e:
-        _log_error_and_email(
-            f"LLM deal match error: {e}",
-            {"companies": companies_str, "step": "match_case_to_deal"},
-        )
+        logger.exception(f"LLM deal match error: {e}")
         return None
 
 
@@ -549,11 +541,8 @@ def send_email_via_webhook(
             f"  [{case_number}] Email sent successfully (status={resp.status_code})")
         return True
     except Exception as e:
-        _log_error_and_email(
-            f"Error sending notification email for {case_number}: {e}",
-            {"case_number": case_number, "subject": subject,
-                "step": "send_email_via_webhook"},
-        )
+        logger.exception(
+            f"Error sending notification email for {case_number}: {e}")
         return False
 
 
@@ -773,7 +762,7 @@ def generate_usa_email(case: Dict[str, Any], companies: List[str]) -> Tuple[str,
 
 def run(start_url: str, max_pages: Optional[int], headed: bool):
     run_start = time.time()
-    error_count = 0
+    error_items: List[Dict[str, Any]] = []
     new_count = 0
     skipped_count = 0
     visited_urls: Set[str] = set()
@@ -791,7 +780,7 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
         logger.info("[STEP 1] Initializing MongoDB connection...")
         success, message = init_mongodb_connection(ENV_PATH)
         if not success:
-            _log_error_and_email(
+            _log_critical_error_and_email(
                 f"MongoDB connection failed: {message}",
                 {"step": "mongodb_connect"},
             )
@@ -799,7 +788,7 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
         logger.info(f"[STEP 1] {message}")
 
         if not is_connected():
-            _log_error_and_email(
+            _log_critical_error_and_email(
                 "MongoDB not connected after init",
                 {"step": "mongodb_connect"},
             )
@@ -807,7 +796,7 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
 
         collection = get_fs_cases_collection()
         if collection is None:
-            _log_error_and_email(
+            _log_critical_error_and_email(
                 "Could not access 'fs_cases' collection",
                 {"step": "get_collection"},
             )
@@ -850,6 +839,7 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                 links = collect_case_links(search_page, selector)
                 logger.info(
                     f"[Page {current_page}] Found {len(links)} case links")
+                logger.info(f"links: {links}")
 
                 for item in links:
                     url = item["url"]
@@ -870,12 +860,19 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                         continue
 
                     # Scrape + parse in memory
-                    logger.info(f"  [{case_num}] Scraping detail page...")
+                    logger.info(
+                        f"links=>  [{case_num}] Scraping detail page...")
                     case = scrape_case_detail(context, url)
+
+                    logger.info(f"  [{case_num}] Case: {case}")
                     if not case or case.get("error"):
                         logger.warning(
                             f"  [{case_num}] Parse failed; skipping")
-                        error_count += 1
+                        error_items.append({
+                            "case_number": case_num,
+                            "error": "Scrape/parse failed",
+                            "step": "scrape_case_detail",
+                        })
                         continue
 
                     case_title = case.get("case_title") or "N/A"
@@ -915,12 +912,13 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                                         logger.warning(
                                             f"  [{case_num}] deal_id={matched_deal_id} not found in DB either")
                             except Exception as e:
-                                _log_error_and_email(
-                                    f"Error looking up deal {matched_deal_id}: {e}",
-                                    {"case_number": case_num,
-                                        "deal_id": matched_deal_id, "step": "deal_lookup"},
-                                )
-                                error_count += 1
+                                logger.exception(
+                                    f"  [{case_num}] Error looking up deal {matched_deal_id}: {e}")
+                                error_items.append({
+                                    "case_number": case_num,
+                                    "error": str(e),
+                                    "step": "deal_lookup",
+                                })
 
                         if deal:
                             target = deal.get("target") or deal.get(
@@ -959,13 +957,14 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                         logger.info(
                             f"  [{case_num}] USA check result: {is_usa}")
                     except Exception as e:
-                        _log_error_and_email(
-                            f"USA check error for {case_num}: {e}",
-                            {"case_number": case_num, "companies": str(
-                                companies), "step": "verify_usa_relation"},
-                        )
+                        logger.exception(
+                            f"  [{case_num}] USA check error: {e}")
+                        error_items.append({
+                            "case_number": case_num,
+                            "error": str(e),
+                            "step": "verify_usa_relation",
+                        })
                         is_usa = False
-                        error_count += 1
 
                     if is_usa:
                         logger.info(
@@ -1014,13 +1013,25 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
             logger.info("Browser closed")
 
     except Exception as e:
-        error_count += 1
-        _log_error_and_email(
+        _log_critical_error_and_email(
             f"Unhandled error in run(): {e}",
             {"step": "run_main", "start_url": start_url},
         )
 
     finally:
+        if error_items:
+            logger.warning(
+                f"{len(error_items)} per-case errors collected — sending summary email")
+            send_error_email(
+                script_name=SCRIPT_NAME,
+                error_message=f"{len(error_items)} errors occurred during run",
+                context={
+                    "error_count": len(error_items),
+                    "errors": error_items[:20],
+                },
+                traceback_str=None,
+            )
+
         elapsed = round(time.time() - run_start, 1)
         logger.info("")
         logger.info("=" * 60)
@@ -1028,7 +1039,7 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
         logger.info(f"  Total URLs visited           : {len(visited_urls)}")
         logger.info(f"  New cases inserted           : {new_count}")
         logger.info(f"  Skipped (already in DB)      : {skipped_count}")
-        logger.info(f"  Errors encountered           : {error_count}")
+        logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")
         logger.info("=" * 60)
 
@@ -1046,4 +1057,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception as e:
+        _log_critical_error_and_email(
+            f"Unhandled error in __main__: {e}", {"step": "__main__"})
+        raise

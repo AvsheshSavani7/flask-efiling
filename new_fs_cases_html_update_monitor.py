@@ -40,12 +40,12 @@ from dotenv import load_dotenv
 from bson import ObjectId
 from playwright.sync_api import sync_playwright
 import requests
+from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Set, Tuple
 from datetime import datetime, timezone, timedelta
 import argparse
 import json
 import logging
-import builtins
 import re
 import sys
 import os
@@ -54,16 +54,21 @@ import traceback
 
 from fs_html_scraper import parse_case_html
 from new_fs_cases_html import match_case_to_deal
+from log_utils import cleanup_old_logs
 
 load_dotenv(".env")
 
 # ---------------------------------------------------------------------------
-# Logging — date-wise log files under /var/data/logs/ (persistent disk)
-# Timestamps in IST (UTC+5:30)
+# Logging — production setup (RotatingFileHandler, IST, env-based settings)
 # ---------------------------------------------------------------------------
 PERSISTENT_LOG_DIR = "/var/data/logs"
 SCRIPT_NAME = "fs_cases_update_monitor"
 IST = timezone(timedelta(hours=5, minutes=30))
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
 
 def _get_log_file() -> str:
@@ -75,9 +80,6 @@ def _get_log_file() -> str:
 
 
 LOG_FILE = _get_log_file()
-
-logger = logging.getLogger("new_fs_cases_html_update_monitor")
-logger.setLevel(logging.INFO)
 
 
 class _ISTFormatter(logging.Formatter):
@@ -93,11 +95,18 @@ class _ISTFormatter(logging.Formatter):
         return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
 
 
+logger = logging.getLogger(SCRIPT_NAME)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+
 if not logger.handlers:
-    formatter = _ISTFormatter(
-        fmt="%(asctime)s | %(levelname)s | %(message)s",
+    formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
+
+    fh = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
     )
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
     fh.setFormatter(formatter)
     logger.addHandler(fh)
 
@@ -107,18 +116,11 @@ if not logger.handlers:
 
 logger.propagate = False
 
-
-def _logged_print(*args, level: str = "info", **kwargs):
-    msg = " ".join(str(a) for a in args)
-    getattr(logger, level if level in ("error", "warning") else "info")(msg)
-    builtins.print(*args, **kwargs)
+cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 
 
-print = _logged_print  # type: ignore
-
-
-def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
-    """Log at ERROR level and fire an error email."""
+def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+    """Immediate error email — use ONLY for critical startup / fatal failures."""
     logger.error(msg)
     send_error_email(
         script_name=SCRIPT_NAME,
@@ -203,11 +205,8 @@ def scrape_case_page(context, case_number: str) -> Optional[Dict[str, Any]]:
             f"  [{case_number}] Page response: status={http_status}, url={resp.url if resp else url}")
 
         if resp and resp.status >= 400:
-            _log_error_and_email(
-                f"Detail page returned HTTP {resp.status} for {case_number}",
-                {"case_number": case_number, "url": url,
-                    "http_status": resp.status, "step": "scrape_case_page"},
-            )
+            logger.error(
+                f"  [{case_number}] Detail page returned HTTP {resp.status}")
             return None
 
         dismiss_cookie_banner(page)
@@ -230,17 +229,12 @@ def scrape_case_page(context, case_number: str) -> Optional[Dict[str, Any]]:
         else:
             error_msg = parsed.get(
                 "error") if parsed else "parse returned None"
-            _log_error_and_email(
-                f"HTML parse failed for {case_number}: {error_msg}",
-                {"case_number": case_number, "url": url,
-                    "html_length": len(html), "step": "parse_case_html"},
+            logger.error(
+                f"  [{case_number}] HTML parse failed: {error_msg} | html_length={len(html)}"
             )
         return parsed
     except Exception as exc:
-        _log_error_and_email(
-            f"Failed to scrape {case_number}: {exc}",
-            {"case_number": case_number, "url": url, "step": "scrape_case_page"},
-        )
+        logger.exception(f"  [{case_number}] Failed to scrape: {exc}")
         return None
     finally:
         page.close()
@@ -251,21 +245,29 @@ def scrape_case_page(context, case_number: str) -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def get_companies_from_title(case: Dict[str, Any]) -> List[str]:
+    case_number = case.get("case_number", "?")
     companies = case.get("companies")
     if companies:
+        logger.info(f"get_companies_from_title({case_number}) -> from field: {companies}")
         return companies
     title = case.get("case_title") or ""
     if not title:
+        logger.info(f"get_companies_from_title({case_number}) -> no title, returning []")
         return []
-    return [c.strip() for c in title.split(" / ") if c.strip()]
+    result = [c.strip() for c in title.split(" / ") if c.strip()]
+    logger.info(f"get_companies_from_title({case_number}) -> parsed from title: {result}")
+    return result
 
 
 def has_real_decision_date(case: Dict[str, Any]) -> bool:
     """Check if last_decision_date is a real date (not 'none'/null/empty)."""
     val = case.get("last_decision_date")
-    if not val:
-        return False
-    return str(val).strip().lower() not in ("none", "null", "n/a", "")
+    result = bool(val) and str(val).strip().lower() not in ("none", "null", "n/a", "")
+    logger.info(
+        f"has_real_decision_date({case.get('case_number', '?')}) -> "
+        f"raw_value={val!r} | result={result}"
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -355,26 +357,36 @@ def get_field_change_status(field_path: str, differences: List[Tuple[str, Any, A
 # ---------------------------------------------------------------------------
 
 def get_fs_cases_collection():
+    logger.info("get_fs_cases_collection() called")
     db = get_database()
     if db is not None:
+        logger.info("get_fs_cases_collection() -> fs_cases collection ready")
         return db["fs_cases"]
+    logger.error("get_fs_cases_collection() -> database is None")
     return None
 
 
 def fetch_open_cases(collection) -> List[Dict[str, Any]]:
+    logger.info("fetch_open_cases() called | filter: is_open=True")
     try:
         cases = list(collection.find({"is_open": True}))
-        print(f"Fetched {len(cases)} open cases from fs_cases")
+        case_numbers = [c.get("case_number", "?") for c in cases[:5]]
+        logger.info(f"fetch_open_cases() -> {len(cases)} cases (first 5: {case_numbers})")
         return cases
     except Exception as e:
-        print(f"Error fetching open cases: {e}", level="error")
+        _log_critical_error_and_email(
+            f"Error fetching open cases: {e}",
+            {"step": "fetch_open_cases"},
+        )
         return []
 
 
 def fetch_deals() -> List[Dict[str, Any]]:
+    logger.info("fetch_deals() called | filter: Open/Unknown/None/missing status")
     try:
         deals_coll = get_deals_collection()
         if deals_coll is None:
+            logger.warning("fetch_deals() -> deals collection is None")
             return []
         status_filter = {
             "$or": [
@@ -387,10 +399,14 @@ def fetch_deals() -> List[Dict[str, Any]]:
         for d in deals:
             if "_id" in d:
                 d["deal_id"] = str(d["_id"])
-        print(f"Fetched {len(deals)} open/unknown deals")
+        sample_ids = [d.get("deal_id", "?") for d in deals[:3]]
+        logger.info(f"fetch_deals() -> {len(deals)} deals (sample IDs: {sample_ids})")
         return deals
     except Exception as e:
-        print(f"Error fetching deals: {e}", level="warning")
+        _log_critical_error_and_email(
+            f"Error fetching deals: {e}",
+            {"step": "fetch_deals"},
+        )
         return []
 
 
@@ -400,9 +416,12 @@ def update_case_document(
     new_data: Dict[str, Any],
     extra_fields: Optional[Dict[str, Any]] = None,
 ) -> bool:
+    case_number = case_doc.get("case_number", "?")
+    logger.info(f"update_case_document() called | case_number={case_number} | extra_fields={extra_fields}")
     try:
         _id = case_doc.get("_id")
         if not _id:
+            logger.warning(f"update_case_document() -> _id missing for {case_number}")
             return False
 
         updated = {**new_data}
@@ -420,13 +439,17 @@ def update_case_document(
             updated["is_open"] = case_doc.get("is_open", True)
 
         result = collection.update_one({"_id": _id}, {"$set": updated})
+        logger.info(
+            f"update_case_document() -> case_number={case_number} | "
+            f"modified_count={result.modified_count} | is_open={updated.get('is_open')}"
+        )
         if result.modified_count > 0:
-            print("    Updated case document in DB")
+            logger.info(f"    [{case_number}] Updated case document in DB")
         else:
-            print("    No DB changes (already up to date)")
+            logger.info(f"    [{case_number}] No DB changes (already up to date)")
         return True
     except Exception as e:
-        print(f"    Error updating case: {e}", level="error")
+        logger.exception(f"Error updating case {case_number}: {e}")
         return False
 
 
@@ -446,6 +469,10 @@ def send_email_via_webhook(
     deal_id: Optional[str] = None,
     changed_fields: Optional[List[str]] = None,
 ) -> bool:
+    logger.info(
+        f"send_email_via_webhook() called | case_number={case_number} | "
+        f"deal_id={deal_id} | changed_fields={changed_fields} | subject={subject[:120]}"
+    )
     try:
         payload = {
             "subject": subject,
@@ -464,10 +491,10 @@ def send_email_via_webhook(
             timeout=30,
         )
         resp.raise_for_status()
-        print(f"    Email sent! Status: {resp.status_code}")
+        logger.info(f"send_email_via_webhook() -> success | status={resp.status_code}")
         return True
     except Exception as e:
-        print(f"    Error sending email: {e}", level="warning")
+        logger.exception(f"Error sending email for {case_number}: {e}")
         return False
 
 
@@ -518,6 +545,10 @@ def generate_update_email_html(
     companies: List[str],
 ) -> str:
     case_num = case.get("case_number", "N/A")
+    logger.info(
+        f"generate_update_email_html() called | case_number={case_num} | "
+        f"differences_count={len(differences)} | companies={companies}"
+    )
     case_title = case.get("case_title", "N/A")
     instrument = case.get("instrument", "Foreign Subsidies")
     status = case.get("status", "")
@@ -693,6 +724,10 @@ def _build_deal_banner(deal: Dict[str, Any], case_number: str) -> str:
     target = deal.get("target") or deal.get("target_name", "N/A")
     acquirer = deal.get("acquirer") or deal.get("acquire_name", "N/A")
     deal_id = deal.get("deal_id") or str(deal.get("_id", "N/A"))
+    logger.info(
+        f"_build_deal_banner() | case_number={case_number} | "
+        f"deal_id={deal_id} | acquirer={acquirer} | target={target}"
+    )
     case_url = f"https://competition-cases.ec.europa.eu/cases/{case_number}"
     return (
         '<div style="background:#dbeafe;border-radius:6px;padding:16px 22px;'
@@ -713,6 +748,7 @@ def _build_deal_banner(deal: Dict[str, Any], case_number: str) -> str:
 
 
 def _build_usa_banner(case_number: str) -> str:
+    logger.info(f"_build_usa_banner() | case_number={case_number}")
     case_url = f"https://competition-cases.ec.europa.eu/cases/{case_number}"
     return (
         '<div style="background:#fef3c7;border-radius:6px;padding:16px 22px;'
@@ -731,228 +767,304 @@ def _build_usa_banner(case_number: str) -> str:
 # ---------------------------------------------------------------------------
 
 def run(headed: bool = False, max_cases: Optional[int] = None):
-    print("Starting New FS Cases Update Monitor\n")
+    run_start = time.time()
+    error_items: List[Dict[str, Any]] = []
+    logger.info("=" * 60)
+    logger.info("Starting FS Cases Update Monitor")
+    logger.info(f"Log file: {LOG_FILE}")
+    logger.info(f"Parameters: headed={headed}, max_cases={max_cases}")
+    logger.info("=" * 60)
 
-    print("Initializing MongoDB connection...")
+    logger.info("Initializing MongoDB connection...")
     success, message = init_mongodb_connection(ENV_PATH)
     if not success:
-        print(f"{message}", level="error")
+        _log_critical_error_and_email(
+            f"MongoDB init failed: {message}",
+            {"step": "init_mongodb_connection"},
+        )
         return
-    print(f"{message}\n")
+    logger.info(f"MongoDB init result: success={success} | msg={message}")
 
     if not is_connected():
-        print("MongoDB not connected. Exiting.", level="error")
+        _log_critical_error_and_email(
+            "MongoDB not connected after init",
+            {"step": "is_connected"},
+        )
         return
 
     collection = get_fs_cases_collection()
     if collection is None:
-        print("Could not access 'fs_cases' collection. Exiting.", level="error")
+        _log_critical_error_and_email(
+            "Could not access 'fs_cases' collection",
+            {"step": "get_fs_cases_collection"},
+        )
         return
 
     # Step 1: Fetch deals
-    print("Loading deals from MongoDB...")
+    logger.info("Loading deals from MongoDB...")
     deals = fetch_deals()
     deal_by_id: Dict[str, Dict[str, Any]] = {
         (d.get("deal_id") or str(d.get("_id", ""))): d
         for d in deals if d.get("deal_id") or d.get("_id")
     }
+    logger.info(f"deal_by_id lookup built: {len(deal_by_id)} entries")
 
     # Step 2: Fetch open FS cases
     open_cases = fetch_open_cases(collection)
     if not open_cases:
-        print("No open FS cases found. Exiting.")
+        logger.info("No open FS cases found. Exiting.")
         return
 
     if max_cases:
         open_cases = open_cases[:max_cases]
-        print(f"Limited to first {max_cases} cases")
+        logger.info(f"Limited to first {max_cases} cases")
 
     total = len(open_cases)
     changed_count = 0
     closed_count = 0
 
     # Step 3: Iterate with Playwright
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=not headed)
-        context = browser.new_context()
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=not headed)
+            context = browser.new_context()
+            logger.info(f"Playwright browser launched (headless={not headed})")
 
-        # Dismiss cookie banner once
-        init_page = context.new_page()
-        init_page.goto("https://competition-cases.ec.europa.eu/cases/FS.100189",
-                       wait_until="domcontentloaded", timeout=60000)
-        dismiss_cookie_banner(init_page)
-        init_page.close()
-        print("old open cases: ", open_cases)
+            # Dismiss cookie banner once
+            init_page = context.new_page()
+            init_page.goto("https://competition-cases.ec.europa.eu/cases/FS.100189",
+                           wait_until="domcontentloaded", timeout=60000)
+            dismiss_cookie_banner(init_page)
+            init_page.close()
+            logger.info("Cookie banner dismissed on init page")
 
-        for idx, case_doc in enumerate(open_cases, 1):
-            case_number = case_doc.get("case_number", "")
-            old_title = case_doc.get("case_title", "N/A")
-            deal_id = case_doc.get("deal_id")
+            for idx, case_doc in enumerate(open_cases, 1):
+                case_number = case_doc.get("case_number", "")
+                old_title = case_doc.get("case_title", "N/A")
+                deal_id = case_doc.get("deal_id")
 
-            print(f"\n[{idx}/{total}] {case_number}: {old_title}")
+                logger.info(
+                    f"[{idx}/{total}] Processing {case_number} | title={old_title[:60]} | deal_id={deal_id}"
+                )
 
-            if not case_number:
-                print("  No case_number; skipping")
-                continue
+                if not case_number:
+                    logger.warning(f"  [{idx}/{total}] No case_number; skipping")
+                    continue
 
-            # Step 4: Scrape detail page
-            new_data = scrape_case_page(context, case_number)
-            if not new_data or new_data.get("error"):
-                logger.warning(
-                    f"  [{case_number}] Scrape/parse failed — skipping (error email already sent)")
-                continue
+                # Step 4: Scrape detail page
+                new_data = scrape_case_page(context, case_number)
+                if not new_data or new_data.get("error"):
+                    error_items.append({
+                        "case_number": case_number,
+                        "error": "Scrape/parse failed",
+                        "step": "scrape_case_page",
+                    })
+                    logger.warning(
+                        f"  [{case_number}] Scrape/parse failed — skipping")
+                    continue
 
-            # Step 5: Compare all fields
-            old_data = strip_tracking_fields(case_doc)
-            differences = deep_compare(old_data, new_data)
+                # Step 5: Compare all fields
+                old_data = strip_tracking_fields(case_doc)
+                differences = deep_compare(old_data, new_data)
 
-            differences = [
-                d for d in differences
-                if not any(tf in d[0] for tf in _EXCLUDE_FROM_COMPARE)
-            ]
+                differences = [
+                    d for d in differences
+                    if not any(tf in d[0] for tf in _EXCLUDE_FROM_COMPARE)
+                ]
 
-            if not differences:
-                print("  No changes detected")
-                continue
+                logger.info(f"  [{case_number}] deep_compare() -> {len(differences)} differences")
 
-            changed_count += 1
-            changed_names = []
-            for path, _, _ in differences:
-                name = path.split(".")[0].split("[")[0]
-                if name not in changed_names:
-                    changed_names.append(name)
-            print(f"  Changes detected: {', '.join(changed_names)}")
-            for diff_path, old_val, new_val in differences:
-                old_display = json.dumps(old_val, ensure_ascii=False) if isinstance(
-                    old_val, (dict, list)) else str(old_val) if old_val is not None else "(empty)"
-                new_display = json.dumps(new_val, ensure_ascii=False) if isinstance(
-                    new_val, (dict, list)) else str(new_val) if new_val is not None else "(empty)"
-                print(f"    {diff_path}: {old_display} -> {new_display}")
+                if not differences:
+                    logger.info(f"  [{case_number}] No changes detected — skipping")
+                    continue
 
-            # Check last_decision_date for is_open
-            extra_fields: Dict[str, Any] = {}
-            if has_real_decision_date(new_data):
-                extra_fields["is_open"] = False
-                closed_count += 1
-                print(f"  last_decision_date is present -> setting is_open: false")
+                changed_count += 1
+                changed_names = []
+                for path, _, _ in differences:
+                    name = path.split(".")[0].split("[")[0]
+                    if name not in changed_names:
+                        changed_names.append(name)
+                logger.info(f"  [{case_number}] Changed fields: {changed_names}")
+                for diff_path, old_val, new_val in differences:
+                    old_display = json.dumps(old_val, ensure_ascii=False) if isinstance(
+                        old_val, (dict, list)) else str(old_val) if old_val is not None else "(empty)"
+                    new_display = json.dumps(new_val, ensure_ascii=False) if isinstance(
+                        new_val, (dict, list)) else str(new_val) if new_val is not None else "(empty)"
+                    logger.info(f"    {diff_path}: {old_display} -> {new_display}")
 
-            companies = get_companies_from_title(new_data)
+                # Check last_decision_date for is_open
+                extra_fields: Dict[str, Any] = {}
+                if has_real_decision_date(new_data):
+                    extra_fields["is_open"] = False
+                    closed_count += 1
+                    logger.info(f"  [{case_number}] last_decision_date present -> is_open=False")
 
-            # Step 6: Email logic
-            if deal_id:
-                print(f"  Linked to deal_id={deal_id}")
-                deal = deal_by_id.get(deal_id)
-                if not deal:
-                    try:
-                        deals_coll = get_deals_collection()
-                        if deals_coll:
-                            raw = deals_coll.find_one(
-                                {"_id": ObjectId(deal_id)})
-                            if raw:
-                                raw["deal_id"] = str(raw["_id"])
-                                deal = raw
-                    except Exception:
-                        pass
+                companies = get_companies_from_title(new_data)
 
-                case_title = new_data.get("case_title", "N/A")
-                email_html = generate_update_email_html(
-                    new_data, differences, companies)
-
-                if deal:
-                    banner = _build_deal_banner(deal, case_number)
-                    target = deal.get("target") or deal.get(
-                        "target_name", "N/A")
-                    acquirer = deal.get("acquirer") or deal.get(
-                        "acquire_name", "N/A")
-                    subject = f"[FRMD] EC FS Case (Updated) \u2013 {target} / {acquirer}"
-                else:
-                    banner = ""
-                    subject = f"[FRMD] EC FS Case (Updated) \u2013 {case_number}: {case_title}"
-
-                email_html = email_html.replace("{BANNER_PLACEHOLDER}", banner)
-                send_email_via_webhook(subject, email_html, case_number,
-                                       case_title, deal_id=deal_id, changed_fields=changed_names)
-
-            else:
-                case_title = new_data.get("case_title", "N/A")
-
-                print(f"  No deal_id -> LLM Call #1: deal match...")
-                match_result = match_case_to_deal(
-                    companies, deals) if deals else None
-
-                deal = None
-                if match_result:
-                    matched_deal_id, matched_company, matched_role = match_result
-                    deal = deal_by_id.get(matched_deal_id)
+                # Step 6: Email logic
+                if deal_id:
+                    logger.info(f"  [{case_number}] Path A: existing deal_id={deal_id}")
+                    deal = deal_by_id.get(deal_id)
                     if not deal:
+                        logger.info(f"  [{case_number}] deal_id not in cache, querying DB...")
                         try:
                             deals_coll = get_deals_collection()
                             if deals_coll:
                                 raw = deals_coll.find_one(
-                                    {"_id": ObjectId(matched_deal_id)})
+                                    {"_id": ObjectId(deal_id)})
                                 if raw:
                                     raw["deal_id"] = str(raw["_id"])
                                     deal = raw
-                        except Exception:
-                            pass
+                                    logger.info(f"  [{case_number}] Resolved deal from DB: {deal_id}")
+                                else:
+                                    logger.warning(f"  [{case_number}] Deal {deal_id} not found in DB")
+                        except Exception as e:
+                            logger.exception(f"  [{case_number}] Error resolving deal {deal_id}: {e}")
+                            error_items.append({
+                                "case_number": case_number,
+                                "error": str(e),
+                                "step": "resolve_deal",
+                            })
 
-                if deal:
-                    matched_deal_id = deal.get("deal_id", matched_deal_id)
-                    print(f"  Match found: deal_id={matched_deal_id}")
-                    extra_fields["deal_id"] = matched_deal_id
-
+                    case_title = new_data.get("case_title", "N/A")
                     email_html = generate_update_email_html(
                         new_data, differences, companies)
-                    banner = _build_deal_banner(deal, case_number)
-                    email_html = email_html.replace(
-                        "{BANNER_PLACEHOLDER}", banner)
 
-                    target = deal.get("target") or deal.get(
-                        "target_name", "N/A")
-                    acquirer = deal.get("acquirer") or deal.get(
-                        "acquire_name", "N/A")
-                    subject = f"[FRMD] EC FS Case (Updated) \u2013 {target} / {acquirer}"
-                    send_email_via_webhook(subject, email_html, case_number, case_title,
-                                           deal_id=matched_deal_id, changed_fields=changed_names)
+                    if deal:
+                        banner = _build_deal_banner(deal, case_number)
+                        target = deal.get("target") or deal.get(
+                            "target_name", "N/A")
+                        acquirer = deal.get("acquirer") or deal.get(
+                            "acquire_name", "N/A")
+                        subject = f"[FRMD] EC FS Case (Updated) \u2013 {target} / {acquirer}"
+                    else:
+                        banner = ""
+                        subject = f"[FRMD] EC FS Case (Updated) \u2013 {case_number}: {case_title}"
+
+                    email_html = email_html.replace("{BANNER_PLACEHOLDER}", banner)
+                    send_email_via_webhook(subject, email_html, case_number,
+                                           case_title, deal_id=deal_id, changed_fields=changed_names)
+
                 else:
-                    print(f"  No match -> LLM Call #2: USA check...")
-                    try:
-                        is_usa = verify_usa_relation(
-                            company_details=companies, case_type="FS")
-                    except Exception as e:
-                        print(f"  USA check error: {e}", level="warning")
-                        is_usa = False
+                    case_title = new_data.get("case_title", "N/A")
 
-                    if is_usa:
-                        print(f"  USA-related case detected")
+                    logger.info(f"  [{case_number}] Path B: no deal_id -> LLM deal match | companies={companies}")
+                    match_result = match_case_to_deal(
+                        companies, deals) if deals else None
+                    logger.info(f"  [{case_number}] match_case_to_deal() -> {match_result}")
+
+                    deal = None
+                    if match_result:
+                        matched_deal_id, matched_company, matched_role = match_result
+                        logger.info(
+                            f"  [{case_number}] LLM matched: deal_id={matched_deal_id} | "
+                            f"company={matched_company} | role={matched_role}"
+                        )
+                        deal = deal_by_id.get(matched_deal_id)
+                        if not deal:
+                            logger.info(f"  [{case_number}] Matched deal not in cache, querying DB...")
+                            try:
+                                deals_coll = get_deals_collection()
+                                if deals_coll:
+                                    raw = deals_coll.find_one(
+                                        {"_id": ObjectId(matched_deal_id)})
+                                    if raw:
+                                        raw["deal_id"] = str(raw["_id"])
+                                        deal = raw
+                                        logger.info(f"  [{case_number}] Resolved matched deal from DB")
+                                    else:
+                                        logger.warning(f"  [{case_number}] Matched deal {matched_deal_id} not found in DB")
+                            except Exception as e:
+                                logger.exception(f"  [{case_number}] Error resolving matched deal {matched_deal_id}: {e}")
+                                error_items.append({
+                                    "case_number": case_number,
+                                    "error": str(e),
+                                    "step": "resolve_matched_deal",
+                                })
+
+                    if deal:
+                        matched_deal_id = deal.get("deal_id", matched_deal_id)
+                        logger.info(f"  [{case_number}] Deal resolved -> sending [FRMD] email, deal_id={matched_deal_id}")
+                        extra_fields["deal_id"] = matched_deal_id
+
                         email_html = generate_update_email_html(
                             new_data, differences, companies)
-                        banner = _build_usa_banner(case_number)
+                        banner = _build_deal_banner(deal, case_number)
                         email_html = email_html.replace(
                             "{BANNER_PLACEHOLDER}", banner)
 
-                        companies_str = " / ".join(
-                            companies) if companies else "N/A"
-                        subject = f"[FRUD] EC FS Case (USA-Related Update) \u2013 {case_number}: {companies_str}"
-                        send_email_via_webhook(
-                            subject, email_html, case_number, case_title, changed_fields=changed_names)
+                        target = deal.get("target") or deal.get(
+                            "target_name", "N/A")
+                        acquirer = deal.get("acquirer") or deal.get(
+                            "acquire_name", "N/A")
+                        subject = f"[FRMD] EC FS Case (Updated) \u2013 {target} / {acquirer}"
+                        send_email_via_webhook(subject, email_html, case_number, case_title,
+                                               deal_id=matched_deal_id, changed_fields=changed_names)
                     else:
-                        print(f"  Not matched, not USA-related -> no email")
+                        logger.info(f"  [{case_number}] No deal match -> LLM USA check | companies={companies}")
+                        try:
+                            is_usa = verify_usa_relation(
+                                company_details=companies, case_type="FS")
+                            logger.info(f"  [{case_number}] verify_usa_relation() -> {is_usa}")
+                        except Exception as e:
+                            logger.exception(f"  [{case_number}] USA check error: {e}")
+                            error_items.append({
+                                "case_number": case_number,
+                                "error": str(e),
+                                "step": "verify_usa_relation",
+                            })
+                            is_usa = False
 
-            # Always update DB
-            update_case_document(collection, case_doc,
-                                 new_data, extra_fields or None)
+                        if is_usa:
+                            logger.info(f"  [{case_number}] USA-related -> sending [FRUD] email")
+                            email_html = generate_update_email_html(
+                                new_data, differences, companies)
+                            banner = _build_usa_banner(case_number)
+                            email_html = email_html.replace(
+                                "{BANNER_PLACEHOLDER}", banner)
 
-        context.close()
-        browser.close()
+                            companies_str = " / ".join(
+                                companies) if companies else "N/A"
+                            subject = f"[FRUD] EC FS Case (USA-Related Update) \u2013 {case_number}: {companies_str}"
+                            send_email_via_webhook(
+                                subject, email_html, case_number, case_title, changed_fields=changed_names)
+                        else:
+                            logger.info(f"  [{case_number}] Not matched, not USA-related -> no email")
 
-    print(f"\n{'=' * 60}")
-    print(f"Summary:")
-    print(f"  Total open FS cases checked   : {total}")
-    print(f"  Cases with changes             : {changed_count}")
-    print(f"  Cases closed (is_open=false)   : {closed_count}")
-    print(f"{'=' * 60}")
-    print("Done!")
+                # Always update DB
+                update_case_document(collection, case_doc,
+                                     new_data, extra_fields or None)
+
+            context.close()
+            browser.close()
+    except Exception as e:
+        _log_critical_error_and_email(
+            f"Unhandled error in run(): {e}",
+            {"step": "run"},
+        )
+
+    # Send one summary error email if any per-case errors occurred
+    if error_items:
+        logger.warning(f"{len(error_items)} per-case errors collected — sending summary email")
+        send_error_email(
+            script_name=SCRIPT_NAME,
+            error_message=f"{len(error_items)} errors occurred during run",
+            context={
+                "error_count": len(error_items),
+                "errors": error_items[:20],
+            },
+            traceback_str=None,
+        )
+
+    elapsed = round(time.time() - run_start, 1)
+    logger.info("=" * 60)
+    logger.info("SUMMARY")
+    logger.info(f"  Total open FS cases checked  : {total}")
+    logger.info(f"  Cases with changes           : {changed_count}")
+    logger.info(f"  Cases closed (is_open=false)  : {closed_count}")
+    logger.info(f"  Errors encountered           : {len(error_items)}")
+    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info("=" * 60)
 
 
 def main() -> int:
@@ -968,4 +1080,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception as e:
+        _log_critical_error_and_email(f"Unhandled error in __main__: {e}", {"step": "__main__"})
+        raise

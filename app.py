@@ -2671,6 +2671,9 @@ def get_log_content():
     """Return log content for a script + date.
     GET /logs?script=fs_cases_register&date=2026-05-01
     Omit date to get today's log. Use tail=N to get last N lines.
+
+    Reads the active log file *and* any RotatingFileHandler backups
+    (.log.1, .log.2, .log.3) so the full day's output is returned.
     """
     script = request.args.get("script", "").strip()
     if script not in KNOWN_LOG_SCRIPTS:
@@ -2684,16 +2687,32 @@ def get_log_content():
         date_str = datetime.datetime.now(
             datetime.timezone.utc).strftime("%Y-%m-%d")
 
-    log_path = os.path.join(_LOG_BASE, script, f"{date_str}.log")
-    if not os.path.isfile(log_path):
+    script_log_dir = os.path.join(_LOG_BASE, script)
+    base_name = f"{date_str}.log"
+    active_path = os.path.join(script_log_dir, base_name)
+
+    backup_paths = []
+    if os.path.isdir(script_log_dir):
+        for fname in os.listdir(script_log_dir):
+            if fname.startswith(base_name + ".") and fname[len(base_name) + 1:].isdigit():
+                backup_paths.append(os.path.join(script_log_dir, fname))
+        backup_paths.sort(reverse=True)
+
+    all_paths = backup_paths + ([active_path] if os.path.isfile(active_path) else [])
+
+    if not all_paths:
         return jsonify({
             "success": False,
             "error": f"No log found for {script} on {date_str}"
         }), 404
 
     try:
-        with open(log_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+        lines = []
+        files_read = []
+        for p in all_paths:
+            with open(p, "r", encoding="utf-8") as f:
+                lines.extend(f.readlines())
+            files_read.append(os.path.basename(p))
 
         tail = request.args.get("tail", type=int)
         if tail and tail > 0:
@@ -2703,6 +2722,7 @@ def get_log_content():
             "success": True,
             "script": script,
             "date": date_str,
+            "files": files_read,
             "total_lines": len(lines),
             "content": "".join(lines),
         }), 200
