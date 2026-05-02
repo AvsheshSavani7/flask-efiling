@@ -4,9 +4,9 @@ import os
 import re
 import sys
 import logging
-import builtins
 import requests
 import traceback
+from logging.handlers import RotatingFileHandler
 from bson import ObjectId
 from bs4 import BeautifulSoup
 from html import escape as escape_html
@@ -14,6 +14,7 @@ from openai import OpenAI
 from pymongo import MongoClient
 from typing import Optional, Tuple
 from error_email_service import send_error_email
+from log_utils import cleanup_old_logs
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -23,6 +24,11 @@ ENV_PATH = ".env"
 PERSISTENT_LOG_DIR = "/var/data/logs"
 SCRIPT_NAME = "uk_cases_update_monitor"
 IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
 
 def _get_log_file() -> str:
@@ -34,9 +40,6 @@ def _get_log_file() -> str:
 
 
 LOG_FILE = _get_log_file()
-
-logger = logging.getLogger("new_uk_cma_mergers_update_monitor")
-logger.setLevel(logging.INFO)
 
 
 class _ISTFormatter(logging.Formatter):
@@ -50,9 +53,13 @@ class _ISTFormatter(logging.Formatter):
         return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
 
 
+logger = logging.getLogger(SCRIPT_NAME)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+
 if not logger.handlers:
     formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES,
+                             backupCount=LOG_BACKUP_COUNT, encoding="utf-8")
     fh.setFormatter(formatter)
     logger.addHandler(fh)
     sh = logging.StreamHandler(sys.stdout)
@@ -60,22 +67,11 @@ if not logger.handlers:
     logger.addHandler(sh)
 logger.propagate = False
 
-
-def _logged_print(*args, level: str = "info", **kwargs):
-    msg = " ".join(str(a) for a in args)
-    if level == "error":
-        logger.error(msg)
-    elif level == "warning":
-        logger.warning(msg)
-    else:
-        logger.info(msg)
-    builtins.print(*args, **kwargs)
+cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 
 
-print = _logged_print  # type: ignore
-
-
-def _log_error_and_email(msg: str, context: Optional[dict] = None):
+def _log_critical_error_and_email(msg: str, context: Optional[dict] = None):
+    """Immediate error email — use ONLY for critical startup / fatal failures."""
     logger.error(msg)
     send_error_email(
         script_name=SCRIPT_NAME,
@@ -83,6 +79,7 @@ def _log_error_and_email(msg: str, context: Optional[dict] = None):
         context=context or {},
         traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
     )
+
 
 FIELDS_TO_COMPARE = [
     "title",
@@ -188,11 +185,7 @@ def get_deals_from_mongodb():
         print(f"✅ Fetched {len(all_deals)} deals from MongoDB")
         return all_deals
     except Exception as e:
-        print(f"⚠️ Error fetching deals from MongoDB: {e}")
-        _log_error_and_email(
-            f"Error fetching deals from MongoDB: {e}",
-            {"step": "get_deals_from_mongodb"},
-        )
+        logger.exception(f"Error fetching deals from MongoDB: {e}")
         return []
 
 
@@ -508,7 +501,7 @@ If no deal satisfies this rule, respond exactly: None"""
 
 
 def find_deal_by_id(deal_id):
-    deal_by_id = {str(d.get("deal_id", ""))                  : d for d in deals if d.get("deal_id")}
+    deal_by_id = {str(d.get("deal_id", "")): d for d in deals if d.get("deal_id")}
     return deal_by_id.get(deal_id)
 
 
@@ -918,11 +911,7 @@ def process_case(db_record):
                 else:
                     print(f"  ℹ️ Not USA-related - no email, updating DB only")
             except Exception as e:
-                print(f"  ⚠️ Error checking USA relation: {e}")
-                _log_error_and_email(
-                    f"Error checking USA relation: {e}",
-                    {"title": case_info.get("title", "N/A"), "step": "verify_usa_relation"},
-                )
+                logger.exception(f"  Error checking USA relation: {e}")
 
     # Update the DB record with all scraped fields
     update_fields = {
@@ -1022,5 +1011,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        _log_error_and_email(f"Unhandled error in main: {e}", {"step": "main"})
+        _log_critical_error_and_email(
+            f"Unhandled error in main: {e}", {"step": "main"})
         raise

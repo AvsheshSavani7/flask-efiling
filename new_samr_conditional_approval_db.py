@@ -1,13 +1,14 @@
 from playwright.sync_api import sync_playwright
 from dotenv import load_dotenv
 import datetime
+import time
 import logging
 import requests
 import json
 import os
 import sys
 import traceback
-import builtins
+from logging.handlers import RotatingFileHandler
 from openai import OpenAI
 from bs4 import BeautifulSoup
 import re
@@ -21,6 +22,7 @@ from mongodb_connection import (
 from html import escape as escape_html
 from llm_verification_service import verify_usa_relation
 from error_email_service import send_error_email
+from log_utils import cleanup_old_logs
 
 # Configuration
 CUTOFF_DATE = (datetime.datetime.now() - datetime.timedelta(days=15)).replace(
@@ -34,6 +36,11 @@ PERSISTENT_LOG_DIR = "/var/data/logs"
 SCRIPT_NAME = "samr-cases-conditional"
 IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
+
 
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
@@ -44,9 +51,6 @@ def _get_log_file() -> str:
 
 
 LOG_FILE = _get_log_file()
-
-logger = logging.getLogger("new_samr_conditional_approval_db")
-logger.setLevel(logging.INFO)
 
 
 class _ISTFormatter(logging.Formatter):
@@ -60,9 +64,12 @@ class _ISTFormatter(logging.Formatter):
         return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
 
 
+logger = logging.getLogger(SCRIPT_NAME)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+
 if not logger.handlers:
     formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8")
     fh.setFormatter(formatter)
     logger.addHandler(fh)
     sh = logging.StreamHandler(sys.stdout)
@@ -70,22 +77,11 @@ if not logger.handlers:
     logger.addHandler(sh)
 logger.propagate = False
 
-
-def _logged_print(*args, level: str = "info", **kwargs):
-    msg = " ".join(str(a) for a in args)
-    if level == "error":
-        logger.error(msg)
-    elif level == "warning":
-        logger.warning(msg)
-    else:
-        logger.info(msg)
-    builtins.print(*args, **kwargs)
+cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 
 
-print = _logged_print  # type: ignore
-
-
-def _log_error_and_email(msg: str, context: dict | None = None):
+def _log_critical_error_and_email(msg: str, context: dict | None = None):
+    """Immediate error email — use ONLY for critical startup / fatal failures."""
     logger.error(msg)
     send_error_email(
         script_name=SCRIPT_NAME,
@@ -93,6 +89,29 @@ def _log_error_and_email(msg: str, context: dict | None = None):
         context=context or {},
         traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
     )
+
+def _goto_with_retry(page, url, max_retries=3):
+    """Navigate to a URL with retries and fallback wait strategies."""
+    strategies = [
+        ("networkidle", 60000),
+        ("domcontentloaded", 60000),
+        ("domcontentloaded", 90000),
+    ]
+    for attempt in range(max_retries):
+        wait_until, timeout = strategies[min(attempt, len(strategies) - 1)]
+        try:
+            print(f"   Attempt {attempt + 1}/{max_retries} (wait_until={wait_until}, timeout={timeout}ms)")
+            page.goto(url, wait_until=wait_until, timeout=timeout)
+            return
+        except Exception as e:
+            print(f"   ⚠️ Attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                delay = 5 * (attempt + 1)
+                print(f"   ⏳ Waiting {delay}s before retry...")
+                time.sleep(delay)
+            else:
+                raise
+
 
 os.makedirs(HTML_OUTPUT_DIR, exist_ok=True)
 
@@ -991,11 +1010,7 @@ def process_record(record, samr_cases_list):
                 else:
                     print(f"  ℹ️ Not USA-related – no email")
             except Exception as e:
-                print(f"  ⚠️ Error verifying USA relation: {e}")
-                _log_error_and_email(
-                    f"Error verifying USA relation: {e}",
-                    {"step": "verify_usa_relation", "url": record.get("url", "")},
-                )
+                logger.exception(f"  Error verifying USA relation: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -1018,7 +1033,7 @@ def main(headless=True):
     if ok:
         print(f"✅ {msg}")
     else:
-        _log_error_and_email(f"MongoDB initialization failed: {msg}", {"step": "init_mongodb_connection"})
+        _log_critical_error_and_email(f"MongoDB initialization failed: {msg}", {"step": "init_mongodb_connection"})
 
     # Load deals and samr_cases
     print("📊 Loading deals from MongoDB...")
@@ -1041,7 +1056,7 @@ def main(headless=True):
 
         try:
             print(f"📍 Calling BASE_URL: {BASE_URL}")
-            page.goto(BASE_URL, wait_until="networkidle", timeout=60000)
+            _goto_with_retry(page, BASE_URL)
             print(f"   ✅ Loaded\n")
 
             page_num = 1
@@ -1065,15 +1080,10 @@ def main(headless=True):
                     page.wait_for_timeout(2000)
                     page_num += 1
                 except Exception as e:
-                    print(f"\n⚠️ Pagination error: {e}")
-                    _log_error_and_email(
-                        f"Pagination error: {e}",
-                        {"step": "paginate_listing", "page_num": page_num},
-                    )
+                    logger.exception(f"Pagination error: {e}")
                     break
         except Exception as e:
-            print(f"\n❌ Scraping error: {e}")
-            _log_error_and_email(
+            _log_critical_error_and_email(
                 f"Scraping error: {e}",
                 {"step": "scrape_listing", "base_url": BASE_URL},
             )
@@ -1183,9 +1193,9 @@ if __name__ == "__main__":
             print("\nDefault: Scrape new pages from SAMR website in headless mode\n")
             sys.exit(0)
 
-    print("🌐 Mode: Scrape SAMR conditional approval pages")
+    logger.info("Mode: Scrape SAMR conditional approval pages")
     try:
         main(headless=headless_mode)
     except Exception as e:
-        _log_error_and_email(f"Unhandled error in main: {e}", {"step": "main"})
+        _log_critical_error_and_email(f"Unhandled error in main: {e}", {"step": "main"})
         raise

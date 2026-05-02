@@ -5,9 +5,9 @@ import os
 import re
 import sys
 import logging
-import builtins
 import requests
 import traceback
+from logging.handlers import RotatingFileHandler
 import xml.etree.ElementTree as ET
 from bson import ObjectId
 from bs4 import BeautifulSoup
@@ -16,6 +16,7 @@ from openai import OpenAI
 from pymongo import MongoClient
 from typing import Optional, Tuple
 from error_email_service import send_error_email
+from log_utils import cleanup_old_logs
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -27,6 +28,11 @@ PERSISTENT_LOG_DIR = "/var/data/logs"
 SCRIPT_NAME = "uk_cases_register"
 IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
+
 
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
@@ -37,9 +43,6 @@ def _get_log_file() -> str:
 
 
 LOG_FILE = _get_log_file()
-
-logger = logging.getLogger("new_uk_cma_mergers_scraper_atom")
-logger.setLevel(logging.INFO)
 
 
 class _ISTFormatter(logging.Formatter):
@@ -53,9 +56,12 @@ class _ISTFormatter(logging.Formatter):
         return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
 
 
+logger = logging.getLogger(SCRIPT_NAME)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+
 if not logger.handlers:
     formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8")
     fh.setFormatter(formatter)
     logger.addHandler(fh)
     sh = logging.StreamHandler(sys.stdout)
@@ -63,22 +69,11 @@ if not logger.handlers:
     logger.addHandler(sh)
 logger.propagate = False
 
-
-def _logged_print(*args, level: str = "info", **kwargs):
-    msg = " ".join(str(a) for a in args)
-    if level == "error":
-        logger.error(msg)
-    elif level == "warning":
-        logger.warning(msg)
-    else:
-        logger.info(msg)
-    builtins.print(*args, **kwargs)
+cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 
 
-print = _logged_print  # type: ignore
-
-
-def _log_error_and_email(msg: str, context: Optional[dict] = None):
+def _log_critical_error_and_email(msg: str, context: Optional[dict] = None):
+    """Immediate error email — use ONLY for critical startup / fatal failures."""
     logger.error(msg)
     send_error_email(
         script_name=SCRIPT_NAME,
@@ -856,10 +851,6 @@ def process_record(record, existing_urls):
         except Exception as e:
             print(f"  ⚠️ Error checking USA relation: {e}")
             logger.exception("Error checking USA relation")
-            _log_error_and_email(
-                f"Error checking USA relation: {e}",
-                {"title": case_record.get("title", "N/A"), "step": "verify_usa_relation"},
-            )
 
     # Insert into uk_cma_cases collection
     insert_uk_cma_case(case_record)
@@ -886,7 +877,7 @@ def main():
     if success:
         print(f"✅ {msg}\n")
     else:
-        _log_error_and_email(
+        _log_critical_error_and_email(
             f"MongoDB connection failed: {msg}",
             {"step": "mongodb_connect"},
         )
@@ -906,7 +897,7 @@ def main():
     print(f"{'='*60}\n")
     xml_content = fetch_atom_feed()
     if not xml_content:
-        _log_error_and_email("Failed to fetch Atom feed. Exiting.", {"step": "fetch_atom_feed"})
+        _log_critical_error_and_email("Failed to fetch Atom feed. Exiting.", {"step": "fetch_atom_feed"})
         return
 
     atom_records = parse_atom_feed(xml_content)
@@ -953,5 +944,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        _log_error_and_email(f"Unhandled error in main: {e}", {"step": "main"})
+        _log_critical_error_and_email(f"Unhandled error in main: {e}", {"step": "main"})
         raise
