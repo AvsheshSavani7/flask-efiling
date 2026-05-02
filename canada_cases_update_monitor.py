@@ -26,10 +26,10 @@ from error_email_service import send_error_email
 import os
 import sys
 import logging
-import builtins
 import traceback
 from datetime import datetime, timezone, timedelta
 from html import escape as escape_html
+from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -38,16 +38,21 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 
+from log_utils import cleanup_old_logs
+
 load_dotenv(".env")
 
 # -----------------------------------------------------------------------------
-# Logging — date-wise log files under /var/data/logs/ (persistent disk)
-# Timestamps in IST (UTC+5:30)
+# Logging — production setup (RotatingFileHandler, IST, env-based settings)
 # -----------------------------------------------------------------------------
-LOGGER_NAME = "canada_cases_update_monitor"
 PERSISTENT_LOG_DIR = "/var/data/logs"
 SCRIPT_NAME = "canada_cases_update_monitor"
 IST = timezone(timedelta(hours=5, minutes=30))
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
 
 def _get_log_file() -> str:
@@ -60,51 +65,41 @@ def _get_log_file() -> str:
 
 LOG_FILE = _get_log_file()
 
-logger = logging.getLogger(LOGGER_NAME)
-logger.setLevel(logging.INFO)
+
+class _ISTFormatter(logging.Formatter):
+    def converter(self, timestamp):
+        return datetime.fromtimestamp(timestamp, tz=IST)
+
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            return ct.strftime(datefmt)
+        return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
+
+
+logger = logging.getLogger(SCRIPT_NAME)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 
 if not logger.handlers:
-    class _ISTFormatter(logging.Formatter):
-        def converter(self, timestamp):
-            return datetime.fromtimestamp(timestamp, tz=IST)
-
-        def formatTime(self, record, datefmt=None):
-            ct = self.converter(record.created)
-            if datefmt:
-                return ct.strftime(datefmt)
-            return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
-
     formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
 
-    file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    fh = RotatingFileHandler(
+        LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8",
+    )
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
 
-    stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setLevel(logging.INFO)
-    stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
 
 logger.propagate = False
 
-
-def _logged_print(*args, level: str = "info", **kwargs):
-    """Replacement for print that also logs to a file via the module logger."""
-    msg = " ".join(str(a) for a in args)
-    if level == "error":
-        logger.error(msg)
-    elif level == "warning":
-        logger.warning(msg)
-    else:
-        logger.info(msg)
-    builtins.print(*args, **kwargs)
+cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 
 
-print = _logged_print  # type: ignore
-
-
-def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+    """Immediate error email — use ONLY for critical startup / fatal failures."""
     logger.error(msg)
     send_error_email(
         script_name=SCRIPT_NAME,
@@ -451,40 +446,36 @@ def update_case_document(
             print("    ℹ️ No DB changes made (document already up to date)")
         return True
     except Exception as e:
-        _log_error_and_email(
-            f"Error updating case document: {e}",
-            {"parties": case_doc.get("parties", "N/A"), "step": "update_case_document"},
-        )
+        logger.exception(f"Error updating case document: {e}")
         return False
 
 
 def process_canada_cases_updates():
     """Main entrypoint for Canada cases update monitoring."""
     run_start = datetime.now()
-    error_count = 0
+    error_items: List[Dict[str, Any]] = []
     logger.info("=" * 60)
     logger.info("Starting Canada Cases Update Monitor")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
-    print("🚀 Starting Canada Cases Update Monitor\n")
 
-    print("🔌 Initializing MongoDB connection...")
+    logger.info("Initializing MongoDB connection...")
     success, message = init_mongodb_connection(ENV_PATH)
     if not success:
-        _log_error_and_email(
+        _log_critical_error_and_email(
             f"MongoDB connection failed: {message}",
             {"step": "mongodb_connect"},
         )
         return
-    print(f"✅ {message}\n")
+    logger.info(f"MongoDB: {message}")
 
     if not is_connected():
-        _log_error_and_email("MongoDB not connected. Exiting.", {"step": "mongodb_connect"})
+        _log_critical_error_and_email("MongoDB not connected. Exiting.", {"step": "mongodb_connect"})
         return
 
     cases_collection = get_canada_cases_collection()
     if cases_collection is None:
-        _log_error_and_email(
+        _log_critical_error_and_email(
             "Could not access 'canada_cases' collection. Exiting.",
             {"step": "get_collection"},
         )
@@ -495,21 +486,19 @@ def process_canada_cases_updates():
     cursor = cases_collection.find({"is_open": True})
     cases = list(cursor)
     if not cases:
-        print("⚠️ No cases with is_open=True found in canada_cases collection.", level="warning")
+        logger.warning("No cases with is_open=True found in canada_cases collection.")
         return
 
-    print(
-        f"📊 Found {len(cases)} open cases (is_open=True) in canada_cases collection\n")
+    logger.info(f"Found {len(cases)} open cases (is_open=True) in canada_cases collection")
 
-    # Fetch fresh data from Competition Bureau
     html = fetch_report_html(REPORT_URL)
     if not html:
-        print("❌ Failed to fetch report HTML. Exiting.", level="error")
+        logger.error("Failed to fetch report HTML. Exiting.")
         return
 
     fresh_rows = parse_merger_table(html)
     if not fresh_rows:
-        print("⚠️ No rows parsed from report. Exiting.", level="warning")
+        logger.warning("No rows parsed from report. Exiting.")
         return
 
     fresh_lookup = build_fresh_lookup(fresh_rows)
@@ -523,66 +512,57 @@ def process_canada_cases_updates():
         opened_date = case_doc.get("opened_date", "")
         key = f"{parties.strip()}|{opened_date.strip()}"
 
-        print(f"[{idx}/{len(cases)}] Checking case: {parties[:60]}...")
+        logger.info(f"[{idx}/{len(cases)}] Checking case: {parties[:60]}...")
 
         if key not in fresh_lookup:
-            print("  ⚠️ Case not found in current report; skipping")
+            logger.warning("  Case not found in current report; skipping")
             continue
 
         new_row = fresh_lookup[key]
         differences = detect_changes(case_doc, new_row)
 
         if not differences:
-            print("  ✅ No changes detected")
+            logger.info("  No changes detected")
             continue
 
         total_changed += 1
         changed_fields = [f for f, _, _ in differences]
-        print(f"  🔄 Changes detected: {', '.join(changed_fields)}")
+        logger.info(f"  Changes detected: {', '.join(changed_fields)}")
 
         deal_id = case_doc.get("deal_id")
         deal = None
         new_case_data = dict(new_row)
 
         if deal_id:
-            print(f"  🔗 Case already linked to deal_id={deal_id}")
+            logger.info(f"  Case already linked to deal_id={deal_id}")
             if deals_collection is not None:
                 try:
                     deal = deals_collection.find_one(
                         {"_id": ObjectId(deal_id)})
                 except Exception as e:
-                    print(f"  ⚠️ Could not fetch deal: {e}", level="warning")
-                    _log_error_and_email(
-                        f"Could not fetch deal: {e}",
-                        {"deal_id": deal_id, "step": "fetch_linked_deal"},
-                    )
-                    error_count += 1
+                    logger.exception(f"  Could not fetch deal: {e}")
+                    error_items.append({"parties": parties[:80], "error": str(e), "step": "fetch_linked_deal"})
 
             send_update_email(case_doc, new_row, deal, differences)
             new_case_data["deal_id"] = deal_id
         else:
-            print("  🔍 No deal_id found; attempting LLM deal match...")
+            logger.info("  No deal_id found; attempting LLM deal match...")
             matched_deal_id = match_case_to_deal(parties)
 
             if matched_deal_id:
-                print(f"  🎯 LLM matched case to deal_id={matched_deal_id}")
+                logger.info(f"  LLM matched case to deal_id={matched_deal_id}")
                 if deals_collection is not None:
                     try:
                         deal = deals_collection.find_one(
                             {"_id": ObjectId(matched_deal_id)})
                     except Exception as e:
-                        print(
-                            f"  ⚠️ Could not fetch deal: {e}", level="warning")
-                        _log_error_and_email(
-                            f"Could not fetch matched deal: {e}",
-                            {"deal_id": matched_deal_id, "step": "fetch_matched_deal"},
-                        )
-                        error_count += 1
+                        logger.exception(f"  Could not fetch matched deal: {e}")
+                        error_items.append({"parties": parties[:80], "error": str(e), "step": "fetch_matched_deal"})
 
                 send_update_email(case_doc, new_row, deal, differences)
                 new_case_data["deal_id"] = matched_deal_id
             else:
-                print("  🔍 No deal match; checking if USA-related...")
+                logger.info("  No deal match; checking if USA-related...")
                 try:
                     details_for_llm = (
                         f"Parties: {parties}\n"
@@ -596,45 +576,47 @@ def process_canada_cases_updates():
                         case_type="CANADA",
                     )
                 except Exception as e:
-                    print(
-                        f"  ⚠️ USA relation check error: {e}", level="warning")
-                    _log_error_and_email(
-                        f"USA relation check error: {e}",
-                        {"parties": parties[:120], "step": "verify_usa_relation"},
-                    )
-                    error_count += 1
+                    logger.exception(f"  USA relation check error: {e}")
+                    error_items.append({"parties": parties[:80], "error": str(e), "step": "verify_usa_relation"})
                     is_usa = False
 
                 if is_usa:
-                    print("  🇺🇸 Case is USA-related; sending update email")
+                    logger.info("  Case is USA-related; sending update email")
                     send_update_email(case_doc, new_row, None, differences)
                 else:
-                    print("  ℹ️ Not USA-related; updating DB only (no email)")
+                    logger.info("  Not USA-related; updating DB only (no email)")
 
         # Set is_open=False if both concluded_date and outcome are not "Ongoing"
         new_concluded = (new_row.get("concluded_date") or "").strip().lower()
         new_outcome = (new_row.get("outcome") or "").strip().lower()
         if new_concluded != "ongoing" and new_outcome != "ongoing":
             new_case_data["is_open"] = False
-            print("  🔒 Case no longer ongoing; setting is_open=False")
+            logger.info("  Case no longer ongoing; setting is_open=False")
 
         update_case_document(cases_collection, case_doc, new_case_data)
 
-    print("\n" + "=" * 60)
-    print("📊 Summary:")
-    print(f"   Total cases checked: {total_checked}")
-    print(f"   Cases with changes: {total_changed}")
-    print("=" * 60 + "\n")
-    print("🎉 Done!")
+    if error_items:
+        logger.warning(f"{len(error_items)} per-case errors collected — sending summary email")
+        send_error_email(
+            script_name=SCRIPT_NAME,
+            error_message=f"{len(error_items)} errors occurred during run",
+            context={"error_count": len(error_items), "errors": error_items[:20]},
+            traceback_str=None,
+        )
+
     elapsed = round((datetime.now() - run_start).total_seconds(), 1)
     logger.info("=" * 60)
     logger.info("SUMMARY")
     logger.info(f"  Total cases checked          : {total_checked}")
     logger.info(f"  Cases with changes           : {total_changed}")
-    logger.info(f"  Errors encountered           : {error_count}")
+    logger.info(f"  Errors encountered           : {len(error_items)}")
     logger.info(f"  Total time                   : {elapsed}s")
     logger.info("=" * 60)
 
 
 if __name__ == "__main__":
-    process_canada_cases_updates()
+    try:
+        process_canada_cases_updates()
+    except Exception as e:
+        _log_critical_error_and_email(f"Unhandled error in __main__: {e}", {"step": "__main__"})
+        raise
