@@ -954,7 +954,7 @@ def main():
     if success:
         print(f"✅ {msg}\n")
     else:
-        _log_error_and_email(
+        _log_critical_error_and_email(
             f"MongoDB connection failed: {msg}",
             {"step": "mongodb_connect"},
         )
