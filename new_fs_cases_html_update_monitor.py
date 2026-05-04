@@ -143,7 +143,7 @@ N8N_WEBHOOK_URL = os.getenv(
 # - _id, is_open, created_at, updated_at: DB-only metadata
 # - deal_id: set by our register/monitor script, never in scraped data
 _EXCLUDE_FROM_COMPARE = frozenset({
-    "_id", "is_open", "created_at", "updated_at", "deal_id", "instrument", "case_title"
+    "_id", "is_open", "created_at", "updated_at", "deal_id", "instrument", "case_title", "status"
 })
 
 SPA_CONTENT_INDICATORS = [
