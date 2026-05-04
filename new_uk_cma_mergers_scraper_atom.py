@@ -6,6 +6,7 @@ import re
 import sys
 import logging
 import requests
+import time
 import traceback
 from logging.handlers import RotatingFileHandler
 import xml.etree.ElementTree as ET
@@ -61,7 +62,8 @@ logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 
 if not logger.handlers:
     formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
-    fh = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8")
+    fh = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES,
+                             backupCount=LOG_BACKUP_COUNT, encoding="utf-8")
     fh.setFormatter(formatter)
     logger.addHandler(fh)
     sh = logging.StreamHandler(sys.stdout)
@@ -81,6 +83,7 @@ def _log_critical_error_and_email(msg: str, context: Optional[dict] = None):
         context=context or {},
         traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
     )
+
 
 # ---------------------------------------------------------------------------
 # Environment & clients
@@ -250,18 +253,49 @@ def insert_uk_cma_case(record: dict) -> bool:
 # Atom feed
 # ===================================================================
 
-def fetch_atom_feed():
-    try:
-        print(f"🌐 Fetching Atom feed from: {ATOM_FEED_URL}")
-        response = requests.get(ATOM_FEED_URL, timeout=30)
-        response.raise_for_status()
-        print(
-            f"✅ Successfully fetched Atom feed ({len(response.content)} bytes)")
-        return response.text
-    except Exception as e:
-        print(f"❌ Error fetching Atom feed: {e}")
-        traceback.print_exc()
-        return None
+def fetch_atom_feed(max_retries: int = 2):
+    """Fetch the Atom feed with retry logic and detailed error reporting."""
+    last_error = None
+    last_status = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(
+                f"🌐 Attempt {attempt}/{max_retries} — fetching Atom feed from: {ATOM_FEED_URL}")
+            response = requests.get(ATOM_FEED_URL, timeout=60)
+            last_status = response.status_code
+            response.raise_for_status()
+            print(
+                f"✅ Successfully fetched Atom feed ({len(response.content)} bytes)")
+            return response.text
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                f"  Attempt {attempt}/{max_retries} failed fetching Atom feed: {e}")
+            if attempt < max_retries:
+                logger.info(f"  Retrying in 10s...")
+                time.sleep(10)
+
+    explanation = (
+        f"Failed to fetch the UK CMA Atom feed after {max_retries} attempts. "
+        f"URL: {ATOM_FEED_URL}. Last error: {last_error}. "
+        f"The CMA feed may be temporarily unavailable or the server is slow to respond."
+    )
+    _log_critical_error_and_email(
+        explanation,
+        {
+            "step": "fetch_atom_feed",
+            "feed_url": ATOM_FEED_URL,
+            "attempts": str(max_retries),
+            "last_http_status": str(last_status) if last_status else "no response",
+            "last_error": str(last_error),
+            "possible_causes": (
+                "1) UK CMA website temporarily down or slow; "
+                "2) Network issue between server and gov.uk; "
+                "3) Feed URL changed or removed"
+            ),
+        },
+    )
+    return None
 
 
 def parse_atom_feed(xml_content):
@@ -403,37 +437,67 @@ def extract_published_dates(soup):
     return result
 
 
-def scrape_detail_page(url):
-    """Fetch the detail page HTML and extract all fields."""
-    try:
-        print(f"  🌐 Scraping: {url}")
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.content, "html.parser")
+def scrape_detail_page(url, max_retries: int = 3):
+    """Fetch the detail page HTML and extract all fields. Retries on failure."""
+    import time
+    last_error = None
+    last_status = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"  🌐 Attempt {attempt}/{max_retries} — scraping: {url}")
+            resp = requests.get(url, timeout=60)
+            last_status = resp.status_code
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.content, "html.parser")
 
-        sidebar = extract_sidebar_metadata(soup)
-        pub = extract_published_dates(soup)
+            sidebar = extract_sidebar_metadata(soup)
+            pub = extract_published_dates(soup)
 
-        data = {
-            "title": extract_title(soup),
-            "description": extract_description(soup),
-            "case_type": sidebar.get("case_type"),
-            "case_state": sidebar.get("case_state"),
-            "market_sector": sidebar.get("market_sector"),
-            "outcome": sidebar.get("outcome"),
-            "opened_date": sidebar.get("opened_date"),
-            "closed_date": sidebar.get("closed_date"),
-            "history": extract_history(soup),
-            "published_date": pub.get("published_date"),
-            "last_updated": pub.get("last_updated"),
-        }
-        print(
-            f"    ✅ Scraped: {data.get('title', 'N/A')[:60]} | state={data.get('case_state')}")
-        return data
-    except Exception as e:
-        print(f"    ❌ Error scraping detail page: {e}")
-        traceback.print_exc()
-        return None
+            data = {
+                "title": extract_title(soup),
+                "description": extract_description(soup),
+                "case_type": sidebar.get("case_type"),
+                "case_state": sidebar.get("case_state"),
+                "market_sector": sidebar.get("market_sector"),
+                "outcome": sidebar.get("outcome"),
+                "opened_date": sidebar.get("opened_date"),
+                "closed_date": sidebar.get("closed_date"),
+                "history": extract_history(soup),
+                "published_date": pub.get("published_date"),
+                "last_updated": pub.get("last_updated"),
+            }
+            print(
+                f"    ✅ Scraped: {data.get('title', 'N/A')[:60]} | state={data.get('case_state')}")
+            return data
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                f"    Attempt {attempt}/{max_retries} failed scraping {url}: {e}")
+            if attempt < max_retries:
+                logger.info(f"    Retrying in 10s...")
+            time.sleep(10)
+
+    explanation = (
+        f"Failed to scrape UK CMA detail page after {max_retries} attempts. "
+        f"URL: {url}. Last error: {last_error}. "
+        f"The page may be temporarily unavailable or its structure may have changed."
+    )
+    _log_critical_error_and_email(
+        explanation,
+        {
+            "step": "scrape_detail_page",
+            "page_url": url,
+            "attempts": str(max_retries),
+            "last_http_status": str(last_status) if last_status else "no response",
+            "last_error": str(last_error),
+            "possible_causes": (
+                "1) UK CMA website temporarily down or slow; "
+                "2) Network issue between server and gov.uk; "
+                "3) Page HTML structure changed (parser broken)"
+            ),
+        },
+    )
+    return None
 
 
 # ===================================================================
@@ -527,8 +591,7 @@ If no deal satisfies this rule, respond exactly: None"""
 
 
 def find_deal_by_id(deal_id):
-    deal_by_id = {str(d.get("deal_id", ""))
-                      : d for d in deals if d.get("deal_id")}
+    deal_by_id = {str(d.get("deal_id", "")): d for d in deals if d.get("deal_id")}
     return deal_by_id.get(deal_id)
 
 
@@ -770,21 +833,23 @@ def send_email_via_webhook(subject, html_email, extra_payload=None):
 def process_record(record, existing_urls):
     detail_url = record.get("url", "")
     title = record.get("title", "")
+    print(f"STEP 1.5.1: Record: {record}")
+    print(f"STEP 1.5.2: Existing URLs: {existing_urls}")
 
     if not detail_url:
         print(f"  ⏩ Skipped (no URL): {title[:60]}")
         return None
-
+    print(f"STEP 1.5.3: Detail URL: {detail_url}")
     if detail_url in existing_urls:
         print(f"  ⏩ Already in DB: {title[:60]}")
         return None
-
+    print(f"STEP 1.5.4: Already in DB: {title[:60]}")
     # Scrape detail page
     scraped = scrape_detail_page(detail_url)
     if not scraped:
         print(f"  ⚠️ Failed to scrape, skipping: {title[:60]}")
         return None
-
+    print(f"STEP 1.5.5: Scraped: {scraped}")
     # Build the record to insert
     case_record = {
         "atom_id": record.get("id", ""),
@@ -808,14 +873,14 @@ def process_record(record, existing_urls):
     # --- LLM deal matching ---
     deal_id = match_title_with_deals(case_record["title"])
     deal_match = find_deal_by_id(deal_id) if deal_id else None
-
+    print(f"STEP 1.5.6: Deal match: {deal_match}")
     if deal_match:
         acquirer = deal_match.get(
             "acquirer") or deal_match.get("acquire_name", "N/A")
         target = deal_match.get("target") or deal_match.get(
             "target_name", "N/A")
         print(f"  🎯 Match: {acquirer} / {target}")
-
+        print(f"STEP 1.5.7: Match: {acquirer} / {target}")
         case_record["deal_id"] = deal_id
 
         email_info = {**case_record, "updated": record.get("updated", "")}
@@ -828,6 +893,7 @@ def process_record(record, existing_urls):
             "url": detail_url,
             "is_new_case": True,
         })
+        print(f"STEP 1.5.8: Email sent: {subj}")
     else:
         if deal_id:
             print(f"  ⚠️ Deal ID from LLM not found in deals list: {deal_id}")
@@ -835,25 +901,31 @@ def process_record(record, existing_urls):
         print(f"  ➖ No deal match for: {case_record['title'][:60]}")
         try:
             is_usa = verify_usa_relation(case_record["title"])
+            print(f"STEP 1.5.9: USA relation: {is_usa}")
             if is_usa:
                 print(f"  🇺🇸 USA-related - sending email")
+                print(f"STEP 1.5.10: Sending email")
                 email_info = {**case_record,
                               "updated": record.get("updated", "")}
                 subj, html = generate_unmatched_email_html(email_info)
+                print(f"STEP 1.5.11: Email generated: {subj}")
                 send_email_via_webhook(subj, html, {
                     "title": case_record["title"],
                     "url": detail_url,
                     "is_unmatched": True,
                     "usa_related": True,
                 })
+                print(f"STEP 1.5.12: Email sent: {subj}")
             else:
                 print(f"  ℹ️ Not USA-related - no email")
         except Exception as e:
             print(f"  ⚠️ Error checking USA relation: {e}")
+            print(f"STEP 1.5.13: Error checking USA relation: {e}")
             logger.exception("Error checking USA relation")
 
     # Insert into uk_cma_cases collection
     insert_uk_cma_case(case_record)
+    print(f"STEP 1.5.14: Inserted into uk_cma_cases collection: {case_record}")
     return case_record
 
 
@@ -864,7 +936,7 @@ def process_record(record, existing_urls):
 def main():
     run_start = datetime.datetime.now()
     logger.info("=" * 60)
-    logger.info("Starting UK CMA Cases Register")
+    logger.info("STEP 1: Starting UK CMA Cases Register")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
     print(f"\n{'='*60}")
@@ -872,7 +944,7 @@ def main():
     print(f"{'='*60}\n")
 
     # Step 1: MongoDB connection
-    print("🔌 Connecting to MongoDB...")
+    print("STEP 1.1: Connecting to MongoDB...")
     success, msg = init_mongodb_connection()
     if success:
         print(f"✅ {msg}\n")
@@ -884,28 +956,32 @@ def main():
         return
 
     # Step 2: Load deals
-    print("📊 Loading deals from MongoDB...")
+    print("STEP 1.2: Loading deals from MongoDB...")
     load_deals()
 
     # Step 3: Get existing open uk_cma_cases detail_urls for dedup
-    print("\n📋 Fetching existing open uk_cma_cases for dedup...")
+    print("\nSTEP 1.3: Fetching existing open uk_cma_cases for dedup...")
     existing_urls = get_existing_open_case_urls()
+    print(f"STEP 1.3.1: Existing open uk_cma_cases: {existing_urls}")
 
     # Step 4: Fetch & parse Atom feed
     print(f"\n{'='*60}")
-    print("🌐 FETCHING & PARSING ATOM FEED")
+    print("STEP 1.4: FETCHING & PARSING ATOM FEED")
     print(f"{'='*60}\n")
     xml_content = fetch_atom_feed()
+    print(f"STEP 1.4.1: XML content: {xml_content}")
     if not xml_content:
-        _log_critical_error_and_email("Failed to fetch Atom feed. Exiting.", {"step": "fetch_atom_feed"})
+        _log_critical_error_and_email("Failed to fetch Atom feed. Exiting.", {
+                                      "step": "fetch_atom_feed"})
         return
 
     atom_records = parse_atom_feed(xml_content)
-    print(f"\n📊 Total entries from feed: {len(atom_records)}")
+    print(f"STEP 1.4.2: Total entries from feed: {len(atom_records)}")
+    print(f"STEP 1.4.3: Atom records: {atom_records}")
 
     # Step 5: Process each record
     print(f"\n{'='*60}")
-    print("🔄 PROCESSING RECORDS")
+    print("STEP 1.5: PROCESSING RECORDS")
     print(f"{'='*60}\n")
 
     new_count = 0
@@ -924,19 +1000,20 @@ def main():
 
     # Summary
     print(f"\n{'='*60}")
-    print("✅ ALL DONE!")
+    print("STEP 1.6: ALL DONE!")
     print(f"{'='*60}")
-    print(f"📊 Total feed entries: {len(atom_records)}")
-    print(f"🆕 New records processed: {new_count}")
-    print(f"⏩ Skipped (already in DB): {skipped_count}")
+    print(f"STEP 1.6.1: Total feed entries: {len(atom_records)}")
+    print(f"STEP 1.6.2: New records processed: {new_count}")
+    print(f"STEP 1.6.3: Skipped (already in DB): {skipped_count}")
     print(f"{'='*60}\n")
     elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
     logger.info("=" * 60)
     logger.info("SUMMARY")
-    logger.info(f"  Total feed entries           : {len(atom_records)}")
-    logger.info(f"  New records processed        : {new_count}")
-    logger.info(f"  Skipped                      : {skipped_count}")
-    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info(
+        f"STEP 1.6.4: Total feed entries           : {len(atom_records)}")
+    logger.info(f"STEP 1.6.5: New records processed        : {new_count}")
+    logger.info(f"STEP 1.6.6: Skipped                      : {skipped_count}")
+    logger.info(f"STEP 1.6.7: Total time                   : {elapsed}s")
     logger.info("=" * 60)
 
 
@@ -944,5 +1021,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        _log_critical_error_and_email(f"Unhandled error in main: {e}", {"step": "main"})
+        _log_critical_error_and_email(
+            f"Unhandled error in main: {e}", {"step": "main"})
         raise

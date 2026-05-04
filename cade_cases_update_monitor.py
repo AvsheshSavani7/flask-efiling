@@ -372,48 +372,33 @@ def handle_image_captcha_if_present(page) -> bool:
 # Detail page extraction (standalone copies)
 # ---------------------------------------------------------------------------
 
-def extract_autuacao_info(page, context, url: str) -> Dict[str, str]:
-    """Open detail page and extract Autuação info."""
-    logger.info(f"    Opening detail page for Autuação: {url}")
-    detail_page = None
-    try:
-        detail_page = context.new_page()
-        detail_page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        time.sleep(3)
-        if handle_image_captcha_if_present(detail_page):
-            time.sleep(4)
-        time.sleep(2)
+def extract_autuacao_info(page, context, url: str, max_retries: int = 2) -> Dict[str, str]:
+    """Open detail page and extract Autuação info. Retries on timeout."""
+    empty_result = {"process": "", "type": "",
+                    "registration_date": "", "interessados": ""}
 
-        html = detail_page.content()
-        soup = BeautifulSoup(html, "html.parser")
-        info = {"process": "", "type": "",
-                "registration_date": "", "interessados": ""}
+    for attempt in range(1, max_retries + 1):
+        logger.info(
+            f"    Attempt {attempt}/{max_retries} — opening detail page for Autuação: {url}")
+        detail_page = None
+        try:
+            detail_page = context.new_page()
+            detail_page.goto(url, wait_until="networkidle", timeout=90000)
+            time.sleep(5)
+            if handle_image_captcha_if_present(detail_page):
+                time.sleep(4)
+            time.sleep(2)
 
-        for table in soup.find_all("table"):
-            header = table.find("th", string=re.compile(r"Autuação", re.I))
-            if not header:
-                continue
-            for row in table.find_all("tr"):
-                cells = row.find_all(["td", "th"])
-                if len(cells) == 2:
-                    label = cells[0].get_text(strip=True)
-                    value = cells[1].get_text(separator=" ", strip=True)
-                    if "Processo" in label:
-                        info["process"] = value
-                    elif "Tipo" in label:
-                        info["type"] = value
-                    elif "Data de Registro" in label:
-                        info["registration_date"] = value
-                    elif "Interessados" in label:
-                        info["interessados"] = value
-            break
+            html = detail_page.content()
+            soup = BeautifulSoup(html, "html.parser")
+            info = {"process": "", "type": "",
+                    "registration_date": "", "interessados": ""}
 
-        if not info["process"]:
-            for tbody in soup.find_all("tbody"):
-                header = tbody.find("th", string=re.compile(r"Autuação", re.I))
+            for table in soup.find_all("table"):
+                header = table.find("th", string=re.compile(r"Autuação", re.I))
                 if not header:
                     continue
-                for row in tbody.find_all("tr"):
+                for row in table.find_all("tr"):
                     cells = row.find_all(["td", "th"])
                     if len(cells) == 2:
                         label = cells[0].get_text(strip=True)
@@ -428,114 +413,226 @@ def extract_autuacao_info(page, context, url: str) -> Dict[str, str]:
                             info["interessados"] = value
                 break
 
-        detail_page.close()
-        return info
-    except Exception as e:
-        logger.exception(f"Failed to extract Autuação from {url}: {e}")
-        if detail_page:
-            try:
-                detail_page.close()
-            except Exception:
-                pass
-        return {"process": "", "type": "", "registration_date": "", "interessados": ""}
+            if not info["process"]:
+                for tbody in soup.find_all("tbody"):
+                    header = tbody.find(
+                        "th", string=re.compile(r"Autuação", re.I))
+                    if not header:
+                        continue
+                    for row in tbody.find_all("tr"):
+                        cells = row.find_all(["td", "th"])
+                        if len(cells) == 2:
+                            label = cells[0].get_text(strip=True)
+                            value = cells[1].get_text(
+                                separator=" ", strip=True)
+                            if "Processo" in label:
+                                info["process"] = value
+                            elif "Tipo" in label:
+                                info["type"] = value
+                            elif "Data de Registro" in label:
+                                info["registration_date"] = value
+                            elif "Interessados" in label:
+                                info["interessados"] = value
+                    break
 
-
-def extract_tables(page, context, url: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Extract tblDocumentos + tblHistorico from detail page in one visit."""
-    detail_page = None
-    try:
-        detail_page = context.new_page()
-        detail_page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        time.sleep(3)
-        if handle_image_captcha_if_present(detail_page):
-            time.sleep(4)
-        time.sleep(2)
-
-        html = detail_page.content()
-        soup = BeautifulSoup(html, "html.parser")
-
-        # --- tblDocumentos ---
-        table = soup.find("table", id="tblDocumentos")
-        table_data: List[Dict[str, Any]] = []
-        if table:
-            for row in table.find_all("tr"):
-                if row.find("th"):
+            detail_page.close()
+            return info
+        except Exception as e:
+            logger.warning(
+                f"    Attempt {attempt}/{max_retries} failed for Autuação {url}: {e}")
+            if detail_page:
+                if attempt < max_retries:
+                    try:
+                        detail_page.close()
+                    except Exception:
+                        pass
+                    logger.info(f"    Retrying in 10s...")
+                    time.sleep(10)
                     continue
-                cells = row.find_all("td")
-                if len(cells) < 5:
-                    continue
-                row_data: Dict[str, Any] = {}
-                doc_link = row.find("a", class_="ancoraPadraoAzul")
-                if doc_link:
-                    doc_number = doc_link.get_text(strip=True)
-                    if doc_number and re.match(r"^\d+$", doc_number):
-                        row_data["documento_processo"] = doc_number
-                    onclick = doc_link.get("onclick", "")
-                    if onclick and "window.open" in onclick:
-                        match = re.search(
-                            r"window\.open\('([^']+)'\)", onclick)
-                        if match:
-                            doc_url = match.group(1)
-                            if not doc_url.startswith("http"):
-                                doc_url = requests.compat.urljoin(
-                                    BASE_PESQUISA_URL, doc_url)
-                            row_data["document_url"] = doc_url
-                    doc_type = doc_link.get(
-                        "alt") or doc_link.get("title") or ""
-                    if doc_type.strip():
-                        row_data["tipo_documento"] = doc_type.strip()
-                dates_found = []
-                for cell in cells:
-                    ct = cell.get_text(strip=True)
-                    if re.match(r"^\d{2}/\d{2}/\d{4}$", ct):
-                        dates_found.append(ct)
-                if len(dates_found) >= 1:
-                    row_data["data_documento"] = dates_found[0]
-                if len(dates_found) >= 2:
-                    row_data["data_registro"] = dates_found[1]
-                unidade_link = row.find("a", class_="ancoraSigla")
-                if unidade_link:
-                    u = unidade_link.get_text(strip=True)
-                    if u:
-                        row_data["unidade"] = u
-                row_data = {k: v for k, v in row_data.items()
-                            if v and str(v).strip()}
-                if row_data.get("documento_processo"):
-                    table_data.append(row_data)
+                screenshot_path = None
+                try:
+                    log_dir = os.path.dirname(LOG_FILE)
+                    screenshot_path = os.path.join(
+                        log_dir,
+                        f"debug_screenshot_{datetime.datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.png",
+                    )
+                    detail_page.screenshot(path=screenshot_path)
+                    logger.error(
+                        f"    Debug screenshot saved to {screenshot_path}")
+                except Exception:
+                    pass
+                try:
+                    detail_page.close()
+                except Exception:
+                    pass
+            explanation = (
+                f"Failed to extract Autuação after {max_retries} attempts. "
+                f"URL: {url}. Last error: {e}. "
+                f"The CADE SEI portal may be temporarily unavailable, slow to render, "
+                f"or its page structure may have changed."
+            )
+            _log_critical_error_and_email(
+                explanation,
+                {
+                    "step": "extract_autuacao_info",
+                    "page_url": url,
+                    "attempts": str(max_retries),
+                    "last_error": str(e),
+                    "possible_causes": (
+                        "1) CADE SEI portal temporarily slow or under maintenance; "
+                        "2) CAPTCHA blocked page load; "
+                        "3) Page HTML structure changed; "
+                        "4) Network issue between server and CADE portal"
+                    ),
+                    "screenshot": screenshot_path or "capture failed",
+                },
+            )
+            return empty_result
 
-        # --- tblHistorico ---
-        hist_table = soup.find("table", id="tblHistorico")
-        hist_data: List[Dict[str, Any]] = []
-        if hist_table:
-            for row in hist_table.find_all("tr"):
-                if row.find("th"):
-                    continue
-                cells = row.find_all("td")
-                if len(cells) < 3:
-                    continue
-                date_time = cells[0].get_text(strip=True)
-                unit_link = cells[1].find("a", class_="ancoraSigla")
-                unit = unit_link.get_text(
-                    strip=True) if unit_link else cells[1].get_text(strip=True)
-                description = cells[2].get_text(strip=True)
-                if not description:
-                    continue
-                hist_data.append({
-                    "date_time": date_time,
-                    "unit": unit,
-                    "description": description,
-                })
 
-        detail_page.close()
-        return table_data, hist_data
-    except Exception as e:
-        logger.exception(f"Failed to extract tables from {url}: {e}")
-        if detail_page:
-            try:
-                detail_page.close()
-            except Exception:
-                pass
-        return [], []
+def extract_tables(page, context, url: str, max_retries: int = 2) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Extract tblDocumentos + tblHistorico from detail page in one visit. Retries on timeout."""
+
+    for attempt in range(1, max_retries + 1):
+        logger.info(
+            f"    Attempt {attempt}/{max_retries} — opening detail page for tables: {url}")
+        detail_page = None
+        try:
+            detail_page = context.new_page()
+            detail_page.goto(url, wait_until="networkidle", timeout=90000)
+            time.sleep(5)
+            if handle_image_captcha_if_present(detail_page):
+                time.sleep(4)
+            time.sleep(2)
+
+            html = detail_page.content()
+            soup = BeautifulSoup(html, "html.parser")
+
+            # --- tblDocumentos ---
+            table = soup.find("table", id="tblDocumentos")
+            table_data: List[Dict[str, Any]] = []
+            if table:
+                for row in table.find_all("tr"):
+                    if row.find("th"):
+                        continue
+                    cells = row.find_all("td")
+                    if len(cells) < 5:
+                        continue
+                    row_data: Dict[str, Any] = {}
+                    doc_link = row.find("a", class_="ancoraPadraoAzul")
+                    if doc_link:
+                        doc_number = doc_link.get_text(strip=True)
+                        if doc_number and re.match(r"^\d+$", doc_number):
+                            row_data["documento_processo"] = doc_number
+                        onclick = doc_link.get("onclick", "")
+                        if onclick and "window.open" in onclick:
+                            match = re.search(
+                                r"window\.open\('([^']+)'\)", onclick)
+                            if match:
+                                doc_url = match.group(1)
+                                if not doc_url.startswith("http"):
+                                    doc_url = requests.compat.urljoin(
+                                        BASE_PESQUISA_URL, doc_url)
+                                row_data["document_url"] = doc_url
+                        doc_type = doc_link.get(
+                            "alt") or doc_link.get("title") or ""
+                        if doc_type.strip():
+                            row_data["tipo_documento"] = doc_type.strip()
+                    dates_found = []
+                    for cell in cells:
+                        ct = cell.get_text(strip=True)
+                        if re.match(r"^\d{2}/\d{2}/\d{4}$", ct):
+                            dates_found.append(ct)
+                    if len(dates_found) >= 1:
+                        row_data["data_documento"] = dates_found[0]
+                    if len(dates_found) >= 2:
+                        row_data["data_registro"] = dates_found[1]
+                    unidade_link = row.find("a", class_="ancoraSigla")
+                    if unidade_link:
+                        u = unidade_link.get_text(strip=True)
+                        if u:
+                            row_data["unidade"] = u
+                    row_data = {k: v for k, v in row_data.items()
+                                if v and str(v).strip()}
+                    if row_data.get("documento_processo"):
+                        table_data.append(row_data)
+
+            # --- tblHistorico ---
+            hist_table = soup.find("table", id="tblHistorico")
+            hist_data: List[Dict[str, Any]] = []
+            if hist_table:
+                for row in hist_table.find_all("tr"):
+                    if row.find("th"):
+                        continue
+                    cells = row.find_all("td")
+                    if len(cells) < 3:
+                        continue
+                    date_time = cells[0].get_text(strip=True)
+                    unit_link = cells[1].find("a", class_="ancoraSigla")
+                    unit = unit_link.get_text(
+                        strip=True) if unit_link else cells[1].get_text(strip=True)
+                    description = cells[2].get_text(strip=True)
+                    if not description:
+                        continue
+                    hist_data.append({
+                        "date_time": date_time,
+                        "unit": unit,
+                        "description": description,
+                    })
+
+            detail_page.close()
+            return table_data, hist_data
+        except Exception as e:
+            logger.warning(
+                f"    Attempt {attempt}/{max_retries} failed for tables {url}: {e}")
+            if detail_page:
+                if attempt < max_retries:
+                    try:
+                        detail_page.close()
+                    except Exception:
+                        pass
+                    logger.info(f"    Retrying in 10s...")
+                    time.sleep(10)
+                    continue
+                screenshot_path = None
+                try:
+                    log_dir = os.path.dirname(LOG_FILE)
+                    screenshot_path = os.path.join(
+                        log_dir,
+                        f"debug_screenshot_{datetime.datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.png",
+                    )
+                    detail_page.screenshot(path=screenshot_path)
+                    logger.error(
+                        f"    Debug screenshot saved to {screenshot_path}")
+                except Exception:
+                    pass
+                try:
+                    detail_page.close()
+                except Exception:
+                    pass
+            explanation = (
+                f"Failed to extract tables after {max_retries} attempts. "
+                f"URL: {url}. Last error: {e}. "
+                f"The CADE SEI portal may be temporarily unavailable, slow to render, "
+                f"or its page structure may have changed."
+            )
+            _log_critical_error_and_email(
+                explanation,
+                {
+                    "step": "extract_tables",
+                    "page_url": url,
+                    "attempts": str(max_retries),
+                    "last_error": str(e),
+                    "possible_causes": (
+                        "1) CADE SEI portal temporarily slow or under maintenance; "
+                        "2) CAPTCHA blocked page load; "
+                        "3) Page HTML structure changed; "
+                        "4) Network issue between server and CADE portal"
+                    ),
+                    "screenshot": screenshot_path or "capture failed",
+                },
+            )
+            return [], []
 
 
 # ---------------------------------------------------------------------------
@@ -864,24 +961,26 @@ def process_brazil_cases_updates(headless: bool = True):
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
 
-    logger.info("Initializing MongoDB connection...")
+    logger.info("[STEP 1] Initializing MongoDB connection...")
     ok, msg = init_mongodb_connection(ENV_PATH)
     if not ok:
         _log_critical_error_and_email(f"MongoDB connection failed: {msg}", {
-                             "step": "mongodb_connect"})
+            "step": "mongodb_connect"})
         return
-    logger.info(f"MongoDB: {msg}")
+    logger.info(f"[STEP 1.1] MongoDB: {msg}")
 
     if not is_connected():
-        _log_critical_error_and_email("MongoDB not connected after init", {
-                             "step": "mongodb_connect"})
+        _log_critical_error_and_email("[STEP 1.2] MongoDB not connected after init", {
+            "step": "mongodb_connect"})
         return
 
     cases_collection = get_brazil_cases_collection()
     if cases_collection is None:
-        _log_critical_error_and_email("Could not access 'brazil_cases' collection", {
-                             "step": "get_collection"})
+        _log_critical_error_and_email("[STEP 1.3] Could not access 'brazil_cases' collection", {
+            "step": "get_collection"})
         return
+
+    logger.info("[STEP 1.4] brazil_cases collection ready")
 
     deals_collection = get_deals_collection()
     deals_status_filter = {
@@ -895,10 +994,11 @@ def process_brazil_cases_updates(headless: bool = True):
     # Step 1: fetch open records from brazil_cases
     cases = list(cases_collection.find({"is_open": True}))
     if not cases:
-        logger.info("No open records in brazil_cases. Exiting.")
+        logger.info("[STEP 1.5] No open records in brazil_cases. Exiting.")
         return
 
-    logger.info(f"Found {len(cases)} open records in brazil_cases")
+    logger.info(f"[STEP 1.6] Found {len(cases)} open records in brazil_cases")
+    logger.info(f"[STEP 1.7] Found open cases: {cases}")
 
     total_checked = 0
     total_changed = 0
@@ -928,10 +1028,11 @@ def process_brazil_cases_updates(headless: bool = True):
                 process_num = case_doc.get("process", "N/A")
                 detail_url = case_doc.get("detail_url")
 
-                logger.info(f"[{idx}/{len(cases)}] Process {process_num}")
+                logger.info(
+                    f"[STEP 2] [{idx}/{len(cases)}] Process {process_num}")
 
                 if not detail_url:
-                    logger.warning("  No detail_url; skipping")
+                    logger.warning("[STEP 2.1] No detail_url; skipping")
                     continue
 
                 # Step 3: extract fresh data from live page
@@ -941,7 +1042,7 @@ def process_brazil_cases_updates(headless: bool = True):
 
                 live_table, live_historico = extract_tables(
                     page, context, detail_url)
-                logger.info(f"  Live: type={live_type[:50]}..., "
+                logger.info(f"[STEP 2.2] Live: type={live_type[:50]}..., "
                             f"table_records={len(live_table)}, historico={len(live_historico)}")
 
                 should_close = any(
@@ -950,7 +1051,8 @@ def process_brazil_cases_updates(headless: bool = True):
                     for rec in live_table
                 )
                 if should_close:
-                    logger.info("  'Certidão de Trânsito em Julgado' found — will set is_open=False")
+                    logger.info(
+                        "[STEP 2.3] 'Certidão de Trânsito em Julgado' found — will set is_open=False")
 
                 # Step 4: detect changes
                 changes = detect_changes(
@@ -958,11 +1060,12 @@ def process_brazil_cases_updates(headless: bool = True):
                 )
 
                 if not changes and not should_close:
-                    logger.info("  No changes detected")
+                    logger.info("[STEP 2.4] No changes detected")
                     continue
 
                 if not changes and should_close:
-                    logger.info("  No field changes but closing case (is_open → False)")
+                    logger.info(
+                        "[STEP 2.5] No field changes but closing case (is_open → False)")
                     update_case_in_db(
                         cases_collection, case_doc, changes,
                         live_table, live_historico,
@@ -971,12 +1074,14 @@ def process_brazil_cases_updates(headless: bool = True):
                     continue
 
                 total_changed += 1
-                logger.info(f"  {len(changes)} change(s) detected:")
+                logger.info(f"[STEP 2.6] {len(changes)} change(s) detected:")
                 for field, old_val, new_val, ctype in changes:
                     if ctype == "new_items":
-                        logger.info(f"    {field}: {len(new_val)} new item(s)")
+                        logger.info(
+                            f"[STEP 2.7]    {field}: {len(new_val)} new item(s)")
                     else:
-                        logger.info(f"    {field}: {old_val} → {new_val} ({ctype})")
+                        logger.info(
+                            f"[STEP 2.8]    {field}: {old_val} → {new_val} ({ctype})")
 
                 # Step 5: branch on deal_id
                 deal = None
@@ -989,11 +1094,12 @@ def process_brazil_cases_updates(headless: bool = True):
                             {"_id": ObjectId(deal_id), **deals_status_filter}
                         )
                     except Exception as e:
-                        logger.exception(f"    Invalid deal_id: {e}")
-                        error_items.append({"process": process_num, "error": str(e), "step": "resolve_deal"})
+                        logger.exception(f"[STEP 2.9] Invalid deal_id: {e}")
+                        error_items.append(
+                            {"process": process_num, "error": str(e), "step": "resolve_deal"})
 
                     if deal:
-                        logger.info("    Deal linked — sending email")
+                        logger.info("[STEP 2.10] Deal linked — sending email")
                         send_update_email(case_doc, changes, deal)
                         update_case_in_db(
                             cases_collection, case_doc, changes,
@@ -1014,11 +1120,14 @@ def process_brazil_cases_updates(headless: bool = True):
                         matched_deal_id = match_case_to_deal(
                             interessados_text, translated_text)
                     except Exception as e:
-                        logger.exception(f"    Error during deal matching: {e}")
-                        error_items.append({"process": process_num, "error": str(e), "step": "match_case_to_deal"})
+                        logger.exception(
+                            f"[STEP 2.11] Error during deal matching: {e}")
+                        error_items.append(
+                            {"process": process_num, "error": str(e), "step": "match_case_to_deal"})
 
                 if matched_deal_id:
-                    logger.info(f"    Deal match found (deal_id={matched_deal_id})")
+                    logger.info(
+                        f"[STEP 2.12] Deal match found (deal_id={matched_deal_id})")
                     matched_deal = None
                     if deals_collection is not None:
                         try:
@@ -1026,8 +1135,10 @@ def process_brazil_cases_updates(headless: bool = True):
                                 {"_id": ObjectId(matched_deal_id)}
                             )
                         except Exception as e:
-                            logger.exception(f"    Error resolving matched deal: {e}")
-                            error_items.append({"process": process_num, "error": str(e), "step": "resolve_matched_deal"})
+                            logger.exception(
+                                f"[STEP 2.13] Error resolving matched deal: {e}")
+                            error_items.append({"process": process_num, "error": str(
+                                e), "step": "resolve_matched_deal"})
 
                     send_update_email(case_doc, changes, matched_deal)
                     update_case_in_db(
@@ -1054,11 +1165,13 @@ def process_brazil_cases_updates(headless: bool = True):
                                 case_type="BRAZIL",
                             ))
                         except Exception as e:
-                            logger.exception(f"    Error verifying USA relation: {e}")
-                            error_items.append({"process": process_num, "error": str(e), "step": "verify_usa_relation"})
+                            logger.exception(
+                                f"[STEP 2.14] Error verifying USA relation: {e}")
+                            error_items.append(
+                                {"process": process_num, "error": str(e), "step": "verify_usa_relation"})
 
                     if is_usa:
-                        logger.info("    USA-related — sending email")
+                        logger.info("[STEP 2.15] USA-related — sending email")
                         send_update_email(case_doc, changes, None)
 
                     update_case_in_db(
@@ -1071,7 +1184,7 @@ def process_brazil_cases_updates(headless: bool = True):
 
         except Exception as e:
             _log_critical_error_and_email(
-                f"Unhandled error in monitoring: {e}",
+                f"[STEP 2.16] Unhandled error in monitoring: {e}",
                 {"step": "run_main"},
             )
         finally:
@@ -1079,7 +1192,8 @@ def process_brazil_cases_updates(headless: bool = True):
             logger.info("Browser closed")
 
     if error_items:
-        logger.warning(f"{len(error_items)} per-case errors collected — sending summary email")
+        logger.warning(
+            f"{len(error_items)} per-case errors collected — sending summary email")
         send_error_email(
             script_name=SCRIPT_NAME,
             error_message=f"{len(error_items)} errors occurred during run",
@@ -1094,10 +1208,11 @@ def process_brazil_cases_updates(headless: bool = True):
     logger.info("")
     logger.info("=" * 60)
     logger.info("SUMMARY")
-    logger.info(f"  Total records checked        : {total_checked}")
-    logger.info(f"  Records with changes         : {total_changed}")
-    logger.info(f"  Errors encountered           : {len(error_items)}")
-    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info(f"[STEP 2.17] Total records checked        : {total_checked}")
+    logger.info(f"[STEP 2.18] Records with changes         : {total_changed}")
+    logger.info(
+        f"[STEP 2.19] Errors encountered           : {len(error_items)}")
+    logger.info(f"[STEP 2.20] Total time                   : {elapsed}s")
     logger.info("=" * 60)
 
 
@@ -1105,5 +1220,6 @@ if __name__ == "__main__":
     try:
         process_brazil_cases_updates(headless=True)
     except Exception as e:
-        _log_critical_error_and_email(f"Unhandled error in __main__: {e}", {"step": "__main__"})
+        _log_critical_error_and_email(
+            f"Unhandled error in __main__: {e}", {"step": "__main__"})
         raise

@@ -108,6 +108,7 @@ def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = 
         traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
     )
 
+
 # Constants
 BASE_URL = "https://www.comcom.govt.nz"
 ENV_PATH = ".env"
@@ -209,6 +210,7 @@ def fetch_case_detail_page(page, url: str) -> Optional[Dict[str, Any]]:
     try:
         page.goto(url, wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
+        logger.info(f"[STEP 2.3.1] page.content(): {page.content()}")
         try:
             view_all = page.get_by_role("button", name="View All")
             if view_all.count() > 0:
@@ -218,6 +220,7 @@ def fetch_case_detail_page(page, url: str) -> Optional[Dict[str, Any]]:
             pass
 
         html = page.content()
+        logger.info(f"[STEP 2.3.1] HTML: {html}")
         soup = BeautifulSoup(html, "html.parser")
         desc_el = soup.select_one(".content-block__content p")
         description = desc_el.get_text(strip=True) if desc_el else ""
@@ -242,48 +245,61 @@ def fetch_case_detail_page(page, url: str) -> Optional[Dict[str, Any]]:
             except Exception:
                 pass
             doc_soup = BeautifulSoup(page.content(), "html.parser")
+            logger.info(f"[STEP 2.3.2] doc_soup: {doc_soup}")
             for link in doc_soup.select(".project-block__content a[href]"):
                 href = link.get("href")
                 if href and (href.endswith(".pdf") or "document" in href.lower() or "documents" in href):
                     documents_section.append({"title": link.get_text(
                         strip=True) or href, "url": make_absolute_url(href)})
+            logger.info(f"[STEP 2.3.3] documents_section: {documents_section}")
             for block in doc_soup.select(".timeline-block"):
+                logger.info(f"[STEP 2.3.4] block: {block}")
                 title_el = block.select_one(".timeline-block__content-title")
+                logger.info(f"[STEP 2.3.5] title_el: {title_el}")
                 if title_el:
                     documents_section.append(
                         {"title": title_el.get_text(strip=True), "url": ""})
         except Exception as e:
-            logger.warning("Error fetching documents section: %s", e)
+            logger.warning(
+                f"[STEP 2.3.6] Error fetching documents section: {e}")
 
         media_section: List[Dict[str, str]] = []
         qs_media = parse_qs(parsed.query)
+        logger.info(f"[STEP 2.3.7] qs_media: {qs_media}")
         qs_media["section"] = ["media"]
         media_query = urlencode(qs_media, doseq=True)
+        logger.info(f"[STEP 2.3.8] media_query: {media_query}")
         media_url = urlunparse((parsed.scheme, parsed.netloc,
                                parsed.path, parsed.params, media_query, parsed.fragment))
         try:
             page.goto(media_url, wait_until="domcontentloaded")
+            logger.info(f"[STEP 2.3.9] media_url: {media_url}")
             page.wait_for_timeout(1500)
             try:
                 view_all_media = page.get_by_role("button", name="View All")
+                logger.info(f"[STEP 2.3.10] view_all_media: {view_all_media}")
                 if view_all_media.count() > 0:
                     view_all_media.first.click()
                     page.wait_for_timeout(1500)
             except Exception:
                 pass
             media_soup = BeautifulSoup(page.content(), "html.parser")
+            logger.info(f"[STEP 2.3.11] media_soup: {media_soup}")
             for block in media_soup.select(".timeline-block"):
+                logger.info(f"[STEP 2.3.12] block: {block}")
                 title_el = block.select_one(".timeline-block__content-title")
                 link_el = block.select_one("a[href]")
                 date_el = block.select_one(".timeline-block__timeline-date")
+                logger.info(f"[STEP 2.3.13] date_el: {date_el}")
                 raw_href = (link_el.get("href") or "") if link_el else ""
+                logger.info(f"[STEP 2.3.14] raw_href: {raw_href}")
                 media_section.append({
                     "date": " ".join(date_el.get_text(strip=True).split()) if date_el else "",
                     "title": title_el.get_text(strip=True) if title_el else "",
                     "url": make_absolute_url(raw_href),
                 })
         except Exception as e:
-            logger.warning("Error fetching media section: %s", e)
+            logger.warning(f"[STEP 2.3.15] Error fetching media section: {e}")
 
         return {
             "description": description,
@@ -293,7 +309,8 @@ def fetch_case_detail_page(page, url: str) -> Optional[Dict[str, Any]]:
             "updates_media": media_section,
         }
     except Exception as e:
-        logger.exception(f"Error fetching detail page {url}: {e}")
+        logger.exception(
+            f"[STEP 2.3.16] Error fetching detail page {url}: {e}")
         return None
 
 
@@ -354,7 +371,8 @@ def detect_changes(
     Returns list of (field_name, old_value, new_value, change_type).
     """
     changes: List[Tuple[str, Any, Any, str]] = []
-
+    logger.info(f"[STEP 2.5.1] old_case: {old_case}")
+    logger.info(f"[STEP 2.5.2] current_info: {current_info}")
     # Scalars
     for field in ("title", "description", "outcome", "tag", "status"):
         old_val = _normalize_value(old_case.get(field))
@@ -827,28 +845,32 @@ def run():
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
 
+    logger.info("[STEP 1] Initializing MongoDB connection...")
     success, message = init_mongodb_connection(ENV_PATH)
     if not success:
-        _log_critical_error_and_email(f"MongoDB connection failed: {message}", {"step": "mongodb_connect"})
+        _log_critical_error_and_email(f"MongoDB connection failed: {message}", {
+                                      "step": "mongodb_connect"})
         return
-    logger.info(message)
+    logger.info(f"[STEP 1.1] MongoDB: {message}")
 
     nz_collection = get_nz_cases_collection()
     if nz_collection is None:
-        _log_critical_error_and_email("nz_cases collection not available", {"step": "get_collection"})
+        _log_critical_error_and_email("[STEP 1.2] nz_cases collection not available", {
+                                      "step": "get_collection"})
         return
 
     # Step 1: nz_cases with status Open
     cases = list(nz_collection.find({"status": "Open"}))
     if not cases:
-        logger.warning("No nz_cases with status=Open found.")
+        logger.warning("[STEP 1.3] No nz_cases with status=Open found.")
         return
-    logger.info("Found %s nz_cases with status=Open", len(cases))
+    logger.info(f"[STEP 1.4] Found {len(cases)} nz_cases with status=Open")
 
     # Step 2: deals for LLM matching
     deals = get_open_deals_for_matching()
     logger.info("Loaded %s deals for matching", len(deals))
 
+    logger.info(f"[STEP 2] Found Open Cases: {cases}")
     total_checked = 0
     total_updated = 0
 
@@ -862,17 +884,18 @@ def run():
             case_number = (case_doc.get("case_details")
                            or {}).get("Case number", "")
             if not detail_url:
-                logger.info("[%s/%s] No detail_url, skipping: %s",
+                logger.info("[STEP 2.1] [%s/%s] No detail_url, skipping: %s",
                             idx, len(cases), title)
                 continue
 
             total_checked += 1
-            logger.info("[%s/%s] %s", idx, len(cases), title or case_number)
-            logger.info("Detail URL: %s", detail_url)
+            logger.info("[STEP 2.2] [%s/%s] %s", idx,
+                        len(cases), title or case_number)
+            logger.info(f"[STEP 2.3] Detail URL: {detail_url}")
 
             current_info = fetch_case_detail_page(page, detail_url)
             if not current_info:
-                logger.warning("Could not fetch detail, skipping")
+                logger.warning("[STEP 2.4] Could not fetch detail, skipping")
                 continue
 
             # Include list-level fields in current_info for comparison
@@ -889,22 +912,25 @@ def run():
             current_info["outcome"] = scraped_details.get(
                 "Outcome", case_doc.get("outcome", ""))
 
+            logger.info(f"[STEP 2.5] case_doc: {case_doc}")
             changes = detect_changes(case_doc, current_info)
+            logger.info(f"[STEP 2.6] changes: {changes}")
             if not changes:
-                logger.info("No changes detected")
+                logger.info("[STEP 2.7] No changes detected")
                 continue
 
-            logger.info("Changes detected (%s item(s))", len(changes))
+            logger.info(
+                f"[STEP 2.8] Changes detected ({len(changes)} item(s))")
             for field_name, old_val, new_val, change_type in changes:
                 if field_name.startswith("Case details:"):
-                    logger.info("%s (%s)", field_name, change_type)
+                    logger.info(f"[STEP 2.9] {field_name} ({change_type})")
                 elif field_name.startswith("Timeline") and isinstance(new_val, list):
                     if field_name == "Timeline (new)":
                         logger.info(
-                            "Timeline: %s new entry(ies)", len(new_val))
+                            f"[STEP 2.10] Timeline: {len(new_val)} new entry(ies)")
                     elif field_name == "Timeline (updated)":
                         logger.info(
-                            "Timeline: %s updated entry(ies)", len(new_val))
+                            f"[STEP 2.11] Timeline: {len(new_val)} updated entry(ies)")
                     else:
                         logger.info("%s: %s entry(ies)",
                                     field_name, len(new_val))
@@ -962,17 +988,20 @@ def run():
 
             # If already linked to a deal, skip LLM matching and email as matched.
             existing_deal_id = case_doc.get("deal_id")
+            logger.info(f"[STEP 2.13] existing_deal_id: {existing_deal_id}")
             if existing_deal_id:
                 deal = get_deal_by_id(str(existing_deal_id))
                 if deal:
                     updated_case["deal_id"] = str(existing_deal_id)
+                    logger.info(f"[STEP 2.14] deal: {deal}")
                     html_content = generate_nz_update_email_html(
                         updated_case, deal, changes)
+                    logger.info(f"[STEP 2.15] html_content: {html_content}")
                     send_nz_update_email_via_webhook(
                         updated_case, deal, html_content, changes)
                 else:
                     logger.warning(
-                        "Stored deal_id could not be resolved; falling back to LLM matching"
+                        f"[STEP 2.16] Stored deal_id could not be resolved; falling back to LLM matching"
                     )
                     existing_deal_id = None
 
@@ -980,6 +1009,7 @@ def run():
             if not existing_deal_id:
                 deal_id = match_case_to_deal(
                     title or "", parties, description or "", deals)
+                logger.info(f"[STEP 2.17] deal_id: {deal_id}")
 
                 if deal_id:
                     deal = get_deal_by_id(deal_id)
@@ -987,6 +1017,8 @@ def run():
                         updated_case["deal_id"] = deal_id
                         html_content = generate_nz_update_email_html(
                             updated_case, deal, changes)
+                        logger.info(
+                            f"[STEP 2.18] html_content: {html_content}")
                         send_nz_update_email_via_webhook(
                             updated_case, deal, html_content, changes)
                     else:
@@ -1002,12 +1034,15 @@ def run():
                     }
                     is_usa = verify_usa_relation(
                         company_details=nz_details, case_type="NZ")
+                    logger.info(f"[STEP 2.19] is_usa: {is_usa}")
                     if is_usa:
-                        logger.info("USA-related – sending email and updating")
+                        logger.info(
+                            f"[STEP 2.20] USA-related – sending email and updating")
                         send_unmatched_nz_usa_email_via_webhook(
                             updated_case, changes)
                     else:
-                        logger.info("Not USA-related – updating only")
+                        logger.info(
+                            f"[STEP 2.21] Not USA-related – updating only")
 
             if update_nz_case_document(nz_collection, case_doc["_id"], updated_case):
                 total_updated += 1
@@ -1016,10 +1051,11 @@ def run():
         logger.info("Browser closed")
 
     if error_items:
-        logger.warning(f"{len(error_items)} per-case errors collected — sending summary email")
+        logger.warning(
+            f"[STEP 2.22] {len(error_items)} per-case errors collected — sending summary email")
         send_error_email(
             script_name=SCRIPT_NAME,
-            error_message=f"{len(error_items)} errors occurred during run",
+            error_message=f"[STEP 2.23] {len(error_items)} errors occurred during run",
             context={
                 "error_count": len(error_items),
                 "errors": error_items[:20],
@@ -1031,10 +1067,11 @@ def run():
     logger.info("")
     logger.info("=" * 60)
     logger.info("SUMMARY")
-    logger.info(f"  Total cases checked          : {total_checked}")
-    logger.info(f"  Cases updated                : {total_updated}")
-    logger.info(f"  Errors encountered           : {len(error_items)}")
-    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info(f"[STEP 2.24] Total cases checked          : {total_checked}")
+    logger.info(f"[STEP 2.25] Cases updated                : {total_updated}")
+    logger.info(
+        f"[STEP 2.26] Errors encountered           : {len(error_items)}")
+    logger.info(f"[STEP 2.27] Total time                   : {elapsed}s")
     logger.info("=" * 60)
 
 
@@ -1042,5 +1079,6 @@ if __name__ == "__main__":
     try:
         run()
     except Exception as e:
-        _log_critical_error_and_email(f"Unhandled error in __main__: {e}", {"step": "__main__"})
+        _log_critical_error_and_email(
+            f"Unhandled error in __main__: {e}", {"step": "__main__"})
         raise

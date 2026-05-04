@@ -192,51 +192,96 @@ def wait_for_spa_content(page, timeout_s: int = 15) -> bool:
     return False
 
 
-def scrape_case_page(context, case_number: str) -> Optional[Dict[str, Any]]:
-    """Open detail page, parse in memory, close tab."""
+def scrape_case_page(context, case_number: str, max_retries: int = 2) -> Optional[Dict[str, Any]]:
+    """Open detail page, parse in memory, close tab. Retries on timeout."""
     url = f"https://competition-cases.ec.europa.eu/cases/{case_number}"
-    logger.info(f"  [{case_number}] Opening detail page: {url}")
-    page = context.new_page()
-    try:
-        resp = page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-        http_status = resp.status if resp else "N/A"
-        logger.info(f"  [{case_number}] Page response: status={http_status}")
+    for attempt in range(1, max_retries + 1):
+        logger.info(
+            f"  [{case_number}] Attempt {attempt}/{max_retries} — opening detail page: {url}")
+        page = context.new_page()
+        try:
+            resp = page.goto(url, wait_until="networkidle", timeout=90000)
 
-        if resp and resp.status >= 400:
-            logger.error(
-                f"  [{case_number}] Detail page returned HTTP {resp.status}")
-            return None
+            http_status = resp.status if resp else "N/A"
+            logger.info(
+                f"  [{case_number}] Page response: status={http_status}")
 
-        dismiss_cookie_banner(page)
+            if resp and resp.status >= 400:
+                logger.error(
+                    f"  [{case_number}] Detail page returned HTTP {resp.status}")
+                return None
 
-        spa_loaded = wait_for_spa_content(page, timeout_s=15)
-        logger.info(f"  [{case_number}] SPA content loaded: {spa_loaded}")
-        if not spa_loaded:
+            dismiss_cookie_banner(page)
+
+            spa_loaded = wait_for_spa_content(page, timeout_s=15)
+            logger.info(f"  [{case_number}] SPA content loaded: {spa_loaded}")
+            if not spa_loaded:
+                logger.warning(
+                    f"  [{case_number}] SPA not ready, waiting 5s fallback")
+                page.wait_for_timeout(5000)
+
+            html = page.content()
+            logger.info(f"  [{case_number}] HTML fetched ({len(html)} chars)")
+
+            parsed = parse_case_html(html, case_number)
+            if parsed and not parsed.get("error"):
+                for k, v in parsed.items():
+                    display = json.dumps(v, ensure_ascii=False, default=str) if isinstance(
+                        v, (dict, list)) else str(v)
+                    logger.info(f"  [{case_number}] {k}: {display}")
+            else:
+                error_msg = parsed.get(
+                    "error") if parsed else "parse returned None"
+                logger.error(
+                    f"  [{case_number}] HTML parse failed: {error_msg} | html_length={len(html)}")
+            return parsed
+        except Exception as exc:
             logger.warning(
-                f"  [{case_number}] SPA not ready, waiting 3s fallback")
-            page.wait_for_timeout(3000)
-
-        html = page.content()
-        logger.info(f"  [{case_number}] HTML fetched ({len(html)} chars)")
-
-        parsed = parse_case_html(html, case_number)
-        if parsed and not parsed.get("error"):
-            for k, v in parsed.items():
-                display = json.dumps(v, ensure_ascii=False, default=str) if isinstance(
-                    v, (dict, list)) else str(v)
-                logger.info(f"  [{case_number}] {k}: {display}")
-        else:
-            error_msg = parsed.get(
-                "error") if parsed else "parse returned None"
-            logger.error(
-                f"  [{case_number}] HTML parse failed: {error_msg} | html_length={len(html)}")
-        return parsed
-    except Exception as exc:
-        logger.exception(f"  [{case_number}] Failed to scrape: {exc}")
-        return None
-    finally:
-        page.close()
+                f"  [{case_number}] Attempt {attempt} failed: {exc}")
+            if attempt < max_retries:
+                logger.info(
+                    f"  [{case_number}] Retrying in 10s...")
+                page.close()
+                time.sleep(10)
+                continue
+            screenshot_path = None
+            try:
+                log_dir = os.path.dirname(LOG_FILE)
+                screenshot_path = os.path.join(
+                    log_dir,
+                    f"debug_screenshot_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.png",
+                )
+                page.screenshot(path=screenshot_path)
+                logger.error(
+                    f"  [{case_number}] Debug screenshot saved to {screenshot_path}")
+            except Exception:
+                pass
+            explanation = (
+                f"Failed to scrape case detail page for {case_number} after "
+                f"{max_retries} attempts. URL: {url}. Last error: {exc}. "
+                f"The page may be temporarily unavailable, slow to render, "
+                f"or the site structure may have changed."
+            )
+            _log_critical_error_and_email(
+                explanation,
+                {
+                    "step": "scrape_case_page",
+                    "case_number": case_number,
+                    "page_url": url,
+                    "attempts": str(max_retries),
+                    "last_error": str(exc),
+                    "possible_causes": (
+                        "1) Site temporarily slow or under maintenance; "
+                        "2) Site HTML structure changed; "
+                        "3) Network issue between server and EC portal"
+                    ),
+                    "screenshot": screenshot_path or "capture failed",
+                },
+            )
+            return None
+        finally:
+            page.close()
 
 
 # ---------------------------------------------------------------------------
@@ -748,7 +793,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                 {"step": "mongodb_connect"},
             )
             return
-        logger.info(f"[STEP 1] {message}")
+        logger.info(f"[STEP 1.1] {message}")
 
         if not is_connected():
             _log_critical_error_and_email(
@@ -764,7 +809,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                 {"step": "get_collection"},
             )
             return
-        logger.info("[STEP 1] ec_cases collection ready")
+        logger.info("[STEP 1.3] ec_cases collection ready")
 
         # --- Step 2: Fetch deals ---
         logger.info("[STEP 2] Loading deals from MongoDB...")
@@ -774,51 +819,53 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
             for d in deals if d.get("deal_id") or d.get("_id")
         }
         logger.info(
-            f"[STEP 2] Deal lookup map built ({len(deal_by_id)} entries)")
+            f"[STEP 2.1] Deal lookup map built ({len(deal_by_id)} entries)")
 
         # --- Step 3: Fetch open cases ---
         logger.info("[STEP 3] Fetching open EC cases...")
         open_cases = fetch_open_cases(collection)
+        logger.info(f"[STEP 2.2] open_cases: {open_cases}")
         if not open_cases:
-            logger.info("No open cases found. Exiting.")
+            logger.info("[STEP 2.3] No open cases found. Exiting.")
             return
 
         if max_cases:
             open_cases = open_cases[:max_cases]
-            logger.info(f"Limited to first {max_cases} cases")
+            logger.info(f"[STEP 2.4] Limited to first {max_cases} cases")
 
         total = len(open_cases)
 
         # --- Step 4: Playwright iteration ---
         logger.info("[STEP 4] Launching Playwright browser...")
-        logger.info(f"  [{SCRIPT_NAME}] old open cases: {open_cases}")
+
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=not headed)
             context = browser.new_context()
 
             init_page = context.new_page()
             init_page.goto("https://competition-cases.ec.europa.eu/cases/M.12145",
-                           wait_until="domcontentloaded", timeout=60000)
+                           wait_until="networkidle", timeout=90000)
             dismiss_cookie_banner(init_page)
             init_page.close()
             logger.info(
-                "[STEP 4] Cookie banner dismissed, starting case iteration")
+                "[STEP 4.1] Cookie banner dismissed, starting case iteration")
 
             for idx, case_doc in enumerate(open_cases, 1):
                 case_number = case_doc.get("case_number", "")
                 old_title = case_doc.get("case_title", "N/A")
                 deal_id = case_doc.get("deal_id")
 
-                logger.info(f"\n[{idx}/{total}] {case_number}: {old_title}")
+                logger.info(
+                    f"\n[STEP 4.2] [{idx}/{total}] {case_number}: {old_title}")
 
                 if not case_number:
-                    logger.warning("  No case_number; skipping")
+                    logger.warning("[STEP 4.3] No case_number; skipping")
                     continue
 
                 new_data = scrape_case_page(context, case_number)
                 if not new_data or new_data.get("error"):
                     logger.warning(
-                        f"  [{case_number}] Scrape/parse failed — skipping")
+                        f"[STEP 4.4] [{case_number}] Scrape/parse failed — skipping")
                     error_items.append({
                         "case_number": case_number,
                         "error": "Scrape/parse failed",
@@ -836,7 +883,8 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                 ]
 
                 if not differences:
-                    logger.info(f"  [{case_number}] No changes detected")
+                    logger.info(
+                        f"[STEP 4.5] [{case_number}] No changes detected")
                     continue
 
                 changed_count += 1
@@ -846,7 +894,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                     if name not in changed_names:
                         changed_names.append(name)
                 logger.info(
-                    f"  [{case_number}] Changes detected: {', '.join(changed_names)}")
+                    f"[STEP 4.6] [{case_number}] Changes detected: {', '.join(changed_names)}")
                 for diff_path, old_val, new_val in differences:
                     old_display = json.dumps(old_val, ensure_ascii=False) if isinstance(
                         old_val, (dict, list)) else str(old_val) if old_val is not None else "(empty)"
@@ -867,16 +915,16 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                     extra_fields["investigation_phase"] = None
                     closed_count += 1
                     logger.info(
-                        f"  [{case_number}] investigation_phase is empty/missing -> setting is_open: false")
+                        f"[STEP 4.7] [{case_number}] investigation_phase is empty/missing -> setting is_open: false")
 
                 # Email logic
                 if deal_id:
                     logger.info(
-                        f"  [{case_number}] Linked to deal_id={deal_id}")
+                        f"[STEP 4.8] [{case_number}] Linked to deal_id={deal_id}")
                     deal = deal_by_id.get(deal_id)
                     if not deal:
                         logger.info(
-                            f"  [{case_number}] deal_id={deal_id} not in cache, querying DB...")
+                            f"[STEP 4.9] [{case_number}] deal_id={deal_id} not in cache, querying DB...")
                         try:
                             deals_coll = get_deals_collection()
                             if deals_coll:
@@ -886,13 +934,13 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                                     raw["deal_id"] = str(raw["_id"])
                                     deal = raw
                                     logger.info(
-                                        f"  [{case_number}] Found deal in DB")
+                                        f"[STEP 4.10] [{case_number}] Found deal in DB")
                                 else:
                                     logger.warning(
-                                        f"  [{case_number}] deal_id={deal_id} not found in DB")
+                                        f"[STEP 4.11] [{case_number}] deal_id={deal_id} not found in DB")
                         except Exception as e:
                             logger.exception(
-                                f"  [{case_number}] Error looking up deal {deal_id}: {e}")
+                                f"[STEP 4.12] [{case_number}] Error looking up deal {deal_id}: {e}")
                             error_items.append({
                                 "case_number": case_number,
                                 "error": str(e),
@@ -924,7 +972,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                     case_title = new_data.get("case_title", "N/A")
 
                     logger.info(
-                        f"  [{case_number}] No deal_id -> LLM Call #1: deal match (companies={companies})...")
+                        f"[STEP 4.13] [{case_number}] No deal_id -> LLM Call #1: deal match (companies={companies})...")
                     match_result = match_case_to_deal(
                         companies, deals) if deals else None
 
@@ -932,11 +980,11 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                     if match_result:
                         matched_deal_id, matched_company, matched_role = match_result
                         logger.info(
-                            f"  [{case_number}] LLM returned match: deal_id={matched_deal_id}, company={matched_company}, role={matched_role}")
+                            f"[STEP 4.14] [{case_number}] LLM returned match: deal_id={matched_deal_id}, company={matched_company}, role={matched_role}")
                         deal = deal_by_id.get(matched_deal_id)
                         if not deal:
                             logger.info(
-                                f"  [{case_number}] deal_id={matched_deal_id} not in cache, querying DB...")
+                                f"[STEP 4.15] [{case_number}] deal_id={matched_deal_id} not in cache, querying DB...")
                             try:
                                 deals_coll = get_deals_collection()
                                 if deals_coll:
@@ -946,13 +994,13 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                                         raw["deal_id"] = str(raw["_id"])
                                         deal = raw
                                         logger.info(
-                                            f"  [{case_number}] Found deal in DB")
+                                            f"[STEP 4.16] [{case_number}] Found deal in DB")
                                     else:
                                         logger.warning(
-                                            f"  [{case_number}] deal_id={matched_deal_id} not found in DB")
+                                            f"[STEP 4.17] [{case_number}] deal_id={matched_deal_id} not found in DB")
                             except Exception as e:
                                 logger.exception(
-                                    f"  [{case_number}] Error looking up deal {matched_deal_id}: {e}")
+                                    f"[STEP 4.18] [{case_number}] Error looking up deal {matched_deal_id}: {e}")
                                 error_items.append({
                                     "case_number": case_number,
                                     "error": str(e),
@@ -962,7 +1010,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                     if deal:
                         matched_deal_id = deal.get("deal_id", matched_deal_id)
                         logger.info(
-                            f"  [{case_number}] Match confirmed: deal_id={matched_deal_id}")
+                            f"[STEP 4.19] [{case_number}] Match confirmed: deal_id={matched_deal_id}")
                         extra_fields["deal_id"] = matched_deal_id
 
                         email_html = generate_update_email_html(
@@ -980,15 +1028,15 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                                                deal_id=matched_deal_id, changed_fields=changed_names)
                     else:
                         logger.info(
-                            f"  [{case_number}] No match -> LLM Call #2: USA check (companies={companies})...")
+                            f"[STEP 4.20] [{case_number}] No match -> LLM Call #2: USA check (companies={companies})...")
                         try:
                             is_usa = verify_usa_relation(
                                 company_details=companies, case_type="EC")
                             logger.info(
-                                f"  [{case_number}] USA check result: {is_usa}")
+                                f"[STEP 4.21] [{case_number}] USA check result: {is_usa}")
                         except Exception as e:
                             logger.exception(
-                                f"  [{case_number}] USA check error: {e}")
+                                f"[STEP 4.22] [{case_number}] USA check error: {e}")
                             error_items.append({
                                 "case_number": case_number,
                                 "error": str(e),
@@ -998,7 +1046,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
 
                         if is_usa:
                             logger.info(
-                                f"  [{case_number}] USA-related case detected — sending email")
+                                f"[STEP 4.23] [{case_number}] USA-related case detected — sending email")
                             email_html = generate_update_email_html(
                                 new_data, differences)
                             banner = _build_usa_banner(case_number)
@@ -1012,14 +1060,14 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                                 subject, email_html, case_number, case_title, changed_fields=changed_names)
                         else:
                             logger.info(
-                                f"  [{case_number}] Not matched, not USA-related — no email")
+                                f"[STEP 4.24] [{case_number}] Not matched, not USA-related — no email")
 
                 update_case_document(collection, case_doc,
                                      new_data, extra_fields or None)
 
             context.close()
             browser.close()
-            logger.info("Browser closed")
+            logger.info("[STEP 4.25] Browser closed")
 
     except Exception as e:
         _log_critical_error_and_email(
@@ -1030,7 +1078,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
     finally:
         if error_items:
             logger.warning(
-                f"{len(error_items)} per-case errors collected — sending summary email")
+                f"[STEP 4.26] {len(error_items)} per-case errors collected — sending summary email")
             send_error_email(
                 script_name=SCRIPT_NAME,
                 error_message=f"{len(error_items)} errors occurred during run",

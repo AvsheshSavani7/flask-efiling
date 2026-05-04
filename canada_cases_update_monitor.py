@@ -108,6 +108,7 @@ def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = 
         traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
     )
 
+
 # OpenAI client for LLM matching
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -455,11 +456,11 @@ def process_canada_cases_updates():
     run_start = datetime.now()
     error_items: List[Dict[str, Any]] = []
     logger.info("=" * 60)
-    logger.info("Starting Canada Cases Update Monitor")
+    logger.info(f"[STEP 1] Starting Canada Cases Update Monitor")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
 
-    logger.info("Initializing MongoDB connection...")
+    logger.info(f"[STEP 1.1] Initializing MongoDB connection...")
     success, message = init_mongodb_connection(ENV_PATH)
     if not success:
         _log_critical_error_and_email(
@@ -467,16 +468,17 @@ def process_canada_cases_updates():
             {"step": "mongodb_connect"},
         )
         return
-    logger.info(f"MongoDB: {message}")
+    logger.info(f"[STEP 1.2] MongoDB: {message}")
 
     if not is_connected():
-        _log_critical_error_and_email("MongoDB not connected. Exiting.", {"step": "mongodb_connect"})
+        _log_critical_error_and_email(f"[STEP 1.3] MongoDB not connected. Exiting.", {
+                                      "step": "mongodb_connect"})
         return
 
     cases_collection = get_canada_cases_collection()
     if cases_collection is None:
         _log_critical_error_and_email(
-            "Could not access 'canada_cases' collection. Exiting.",
+            f"[STEP 1.4] Could not access 'canada_cases' collection. Exiting.",
             {"step": "get_collection"},
         )
         return
@@ -486,23 +488,28 @@ def process_canada_cases_updates():
     cursor = cases_collection.find({"is_open": True})
     cases = list(cursor)
     if not cases:
-        logger.warning("No cases with is_open=True found in canada_cases collection.")
+        logger.warning(
+            f"[STEP 1.5] No cases with is_open=True found in canada_cases collection.")
         return
 
-    logger.info(f"Found {len(cases)} open cases (is_open=True) in canada_cases collection")
+    logger.info(
+        f"[STEP 1.6] Found {len(cases)} open cases (is_open=True) in canada_cases collection")
 
+    logger.info(f"[STEP 1.7] Existing cases: {cases}")
     html = fetch_report_html(REPORT_URL)
+    logger.info(f"[STEP 1.7] HTML: {html}")
     if not html:
         logger.error("Failed to fetch report HTML. Exiting.")
         return
 
     fresh_rows = parse_merger_table(html)
+    logger.info(f"[STEP 1.8] Fresh rows: {fresh_rows}")
     if not fresh_rows:
-        logger.warning("No rows parsed from report. Exiting.")
+        logger.warning(f"[STEP 1.9] No rows parsed from report. Exiting.")
         return
 
     fresh_lookup = build_fresh_lookup(fresh_rows)
-
+    logger.info(f"[STEP 1.10] Fresh lookup: {fresh_lookup}")
     total_checked = 0
     total_changed = 0
 
@@ -512,52 +519,61 @@ def process_canada_cases_updates():
         opened_date = case_doc.get("opened_date", "")
         key = f"{parties.strip()}|{opened_date.strip()}"
 
-        logger.info(f"[{idx}/{len(cases)}] Checking case: {parties[:60]}...")
+        logger.info(
+            f"[STEP 1.11] [{idx}/{len(cases)}] Checking case: {parties[:60]}...")
 
         if key not in fresh_lookup:
-            logger.warning("  Case not found in current report; skipping")
+            logger.warning(
+                f"[STEP 1.12] Case not found in current report; skipping")
             continue
 
         new_row = fresh_lookup[key]
         differences = detect_changes(case_doc, new_row)
 
         if not differences:
-            logger.info("  No changes detected")
+            logger.info(f"[STEP 1.13] No changes detected")
             continue
 
         total_changed += 1
         changed_fields = [f for f, _, _ in differences]
-        logger.info(f"  Changes detected: {', '.join(changed_fields)}")
+        logger.info(
+            f"[STEP 1.14] Changes detected: {', '.join(changed_fields)}")
 
         deal_id = case_doc.get("deal_id")
         deal = None
         new_case_data = dict(new_row)
 
         if deal_id:
-            logger.info(f"  Case already linked to deal_id={deal_id}")
+            logger.info(
+                f"[STEP 1.15] Case already linked to deal_id={deal_id}")
             if deals_collection is not None:
                 try:
                     deal = deals_collection.find_one(
                         {"_id": ObjectId(deal_id)})
                 except Exception as e:
-                    logger.exception(f"  Could not fetch deal: {e}")
-                    error_items.append({"parties": parties[:80], "error": str(e), "step": "fetch_linked_deal"})
+                    logger.exception(f"[STEP 1.16] Could not fetch deal: {e}")
+                    error_items.append(
+                        {"parties": parties[:80], "error": str(e), "step": "fetch_linked_deal"})
 
             send_update_email(case_doc, new_row, deal, differences)
             new_case_data["deal_id"] = deal_id
         else:
-            logger.info("  No deal_id found; attempting LLM deal match...")
+            logger.info(
+                f"[STEP 1.17] No deal_id found; attempting LLM deal match...")
             matched_deal_id = match_case_to_deal(parties)
 
             if matched_deal_id:
-                logger.info(f"  LLM matched case to deal_id={matched_deal_id}")
+                logger.info(
+                    f"[STEP 1.18] LLM matched case to deal_id={matched_deal_id}")
                 if deals_collection is not None:
                     try:
                         deal = deals_collection.find_one(
                             {"_id": ObjectId(matched_deal_id)})
                     except Exception as e:
-                        logger.exception(f"  Could not fetch matched deal: {e}")
-                        error_items.append({"parties": parties[:80], "error": str(e), "step": "fetch_matched_deal"})
+                        logger.exception(
+                            f"[STEP 1.19] Could not fetch matched deal: {e}")
+                        error_items.append(
+                            {"parties": parties[:80], "error": str(e), "step": "fetch_matched_deal"})
 
                 send_update_email(case_doc, new_row, deal, differences)
                 new_case_data["deal_id"] = matched_deal_id
@@ -575,42 +591,52 @@ def process_canada_cases_updates():
                         company_details=details_for_llm,
                         case_type="CANADA",
                     )
+                    logger.info(
+                        f"[STEP 1.20] details_for_llm: {details_for_llm}")
                 except Exception as e:
-                    logger.exception(f"  USA relation check error: {e}")
-                    error_items.append({"parties": parties[:80], "error": str(e), "step": "verify_usa_relation"})
+                    logger.exception(
+                        f"[STEP 1.21] USA relation check error: {e}")
+                    error_items.append(
+                        {"parties": parties[:80], "error": str(e), "step": "verify_usa_relation"})
                     is_usa = False
 
                 if is_usa:
-                    logger.info("  Case is USA-related; sending update email")
+                    logger.info(
+                        f"[STEP 1.22] Case is USA-related; sending update email")
                     send_update_email(case_doc, new_row, None, differences)
                 else:
-                    logger.info("  Not USA-related; updating DB only (no email)")
+                    logger.info(
+                        f"[STEP 1.23] Not USA-related; updating DB only (no email)")
 
         # Set is_open=False if both concluded_date and outcome are not "Ongoing"
         new_concluded = (new_row.get("concluded_date") or "").strip().lower()
         new_outcome = (new_row.get("outcome") or "").strip().lower()
         if new_concluded != "ongoing" and new_outcome != "ongoing":
             new_case_data["is_open"] = False
-            logger.info("  Case no longer ongoing; setting is_open=False")
+            logger.info(
+                f"[STEP 1.24] Case no longer ongoing; setting is_open=False")
 
         update_case_document(cases_collection, case_doc, new_case_data)
 
     if error_items:
-        logger.warning(f"{len(error_items)} per-case errors collected — sending summary email")
+        logger.warning(
+            f"[STEP 1.25] {len(error_items)} per-case errors collected — sending summary email")
         send_error_email(
             script_name=SCRIPT_NAME,
-            error_message=f"{len(error_items)} errors occurred during run",
-            context={"error_count": len(error_items), "errors": error_items[:20]},
+            error_message=f"[STEP 1.26] {len(error_items)} errors occurred during run",
+            context={"error_count": len(
+                error_items), "errors": error_items[:20]},
             traceback_str=None,
         )
 
     elapsed = round((datetime.now() - run_start).total_seconds(), 1)
     logger.info("=" * 60)
     logger.info("SUMMARY")
-    logger.info(f"  Total cases checked          : {total_checked}")
-    logger.info(f"  Cases with changes           : {total_changed}")
-    logger.info(f"  Errors encountered           : {len(error_items)}")
-    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info(f"[STEP 1.27] Total cases checked          : {total_checked}")
+    logger.info(f"[STEP 1.28] Cases with changes           : {total_changed}")
+    logger.info(
+        f"[STEP 1.29] Errors encountered           : {len(error_items)}")
+    logger.info(f"[STEP 1.30] Total time                   : {elapsed}s")
     logger.info("=" * 60)
 
 
@@ -618,5 +644,6 @@ if __name__ == "__main__":
     try:
         process_canada_cases_updates()
     except Exception as e:
-        _log_critical_error_and_email(f"Unhandled error in __main__: {e}", {"step": "__main__"})
+        _log_critical_error_and_email(
+            f"Unhandled error in __main__: {e}", {"step": "__main__"})
         raise

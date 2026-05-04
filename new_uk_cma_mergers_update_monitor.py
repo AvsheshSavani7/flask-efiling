@@ -5,6 +5,7 @@ import re
 import sys
 import logging
 import requests
+import time
 import traceback
 from logging.handlers import RotatingFileHandler
 from bson import ObjectId
@@ -347,36 +348,66 @@ def extract_published_dates(soup):
     return result
 
 
-def scrape_detail_page(url):
-    try:
-        print(f"  🌐 Scraping: {url}")
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.content, "html.parser")
+def scrape_detail_page(url, max_retries: int = 2):
+    """Fetch the detail page HTML and extract all fields. Retries on failure."""
+    last_error = None
+    last_status = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"  🌐 Attempt {attempt}/{max_retries} — scraping: {url}")
+            resp = requests.get(url, timeout=60)
+            last_status = resp.status_code
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.content, "html.parser")
 
-        sidebar = extract_sidebar_metadata(soup)
-        pub = extract_published_dates(soup)
+            sidebar = extract_sidebar_metadata(soup)
+            pub = extract_published_dates(soup)
 
-        data = {
-            "title": extract_title(soup),
-            "description": extract_description(soup),
-            "case_type": sidebar.get("case_type"),
-            "case_state": sidebar.get("case_state"),
-            "market_sector": sidebar.get("market_sector"),
-            "outcome": sidebar.get("outcome"),
-            "opened_date": sidebar.get("opened_date"),
-            "closed_date": sidebar.get("closed_date"),
-            "history": extract_history(soup),
-            "published_date": pub.get("published_date"),
-            "last_updated": pub.get("last_updated"),
-        }
-        print(
-            f"    ✅ Scraped: {data.get('title', 'N/A')[:60]} | state={data.get('case_state')}")
-        return data
-    except Exception as e:
-        print(f"    ❌ Error scraping detail page: {e}")
-        traceback.print_exc()
-        return None
+            data = {
+                "title": extract_title(soup),
+                "description": extract_description(soup),
+                "case_type": sidebar.get("case_type"),
+                "case_state": sidebar.get("case_state"),
+                "market_sector": sidebar.get("market_sector"),
+                "outcome": sidebar.get("outcome"),
+                "opened_date": sidebar.get("opened_date"),
+                "closed_date": sidebar.get("closed_date"),
+                "history": extract_history(soup),
+                "published_date": pub.get("published_date"),
+                "last_updated": pub.get("last_updated"),
+            }
+            print(
+                f"    ✅ Scraped: {data.get('title', 'N/A')[:60]} | state={data.get('case_state')}")
+            return data
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                f"    Attempt {attempt}/{max_retries} failed scraping {url}: {e}")
+            if attempt < max_retries:
+                logger.info(f"    Retrying in 10s...")
+            time.sleep(10)
+
+    explanation = (
+        f"Failed to scrape UK CMA detail page after {max_retries} attempts. "
+        f"URL: {url}. Last error: {last_error}. "
+        f"The page may be temporarily unavailable or its structure may have changed."
+    )
+    _log_critical_error_and_email(
+        explanation,
+        {
+            "step": "scrape_detail_page",
+            "page_url": url,
+            "attempts": str(max_retries),
+            "last_http_status": str(last_status) if last_status else "no response",
+            "last_error": str(last_error),
+            "possible_causes": (
+                "1) UK CMA website temporarily down or slow; "
+                "2) Network issue between server and gov.uk; "
+                "3) Page HTML structure changed (parser broken)"
+            ),
+        },
+    )
+    return None
 
 
 # ===================================================================
@@ -390,6 +421,8 @@ def _history_key(entry):
 def detect_changes(db_record, scraped):
     """Compare DB record with freshly scraped data. Returns dict of changes."""
     changes = {}
+    print(f"Detect changes: db_record: {db_record}")
+    print(f"Detect changes: scraped: {scraped}")
 
     for field in FIELDS_TO_COMPARE:
         if field == "history":
@@ -501,7 +534,8 @@ If no deal satisfies this rule, respond exactly: None"""
 
 
 def find_deal_by_id(deal_id):
-    deal_by_id = {str(d.get("deal_id", "")): d for d in deals if d.get("deal_id")}
+    deal_by_id = {str(d.get("deal_id", ""))
+                      : d for d in deals if d.get("deal_id")}
     return deal_by_id.get(deal_id)
 
 
@@ -798,22 +832,29 @@ def process_case(db_record):
     doc_id = db_record.get("_id")
     detail_url = db_record.get("detail_url", "")
     title = db_record.get("title", "N/A")
-
+    print(f"STEP 1.5.2: DB record: {db_record}")
+    print(f"STEP 1.5.3: Detail URL: {detail_url}")
+    print(f"STEP 1.5.4: Title: {title}")
     if not detail_url:
         print(f"  ⏩ Skipped (no detail_url): {title[:60]}")
+        print(f"STEP 1.5.5: Skipped (no detail_url): {title[:60]}")
         return False
 
     # Scrape current state of the detail page
     scraped = scrape_detail_page(detail_url)
+    print(f" Scraped: {scraped}")
     if not scraped:
         print(f"  ⚠️ Failed to scrape, skipping: {title[:60]}")
+        print(f"STEP 1.5.6: Failed to scrape, skipping: {title[:60]}")
         return False
 
     # Detect changes
     changes = detect_changes(db_record, scraped)
+    print(f"Changes: {changes}")
 
     if not changes:
         print(f"  ✅ No changes detected")
+        print(f"STEP 1.5.7: No changes detected")
         # Still update the scraped fields to keep data fresh
         update_uk_cma_case(doc_id, {
             "title": scraped.get("title") or title,
@@ -828,9 +869,11 @@ def process_case(db_record):
             "published_date": scraped.get("published_date"),
             "last_updated": scraped.get("last_updated"),
         })
+        print("STEP 1.5.8: Updated DB record (no-change refresh)")
         return False
 
     print(f"  📝 Changes detected: {list(changes.keys())}")
+    print(f"STEP 1.5.9: Changes detected: {list(changes.keys())}")
 
     # Build case_info for email (use scraped data as current)
     case_info = {
@@ -847,15 +890,17 @@ def process_case(db_record):
         "published_date": scraped.get("published_date"),
         "last_updated": scraped.get("last_updated"),
     }
-
+    print(f"STEP 1.5.10: Case info: {case_info}")
     deal_id = db_record.get("deal_id")
     deal_match = None
-
+    print(f"STEP 1.5.11: Deal ID: {deal_id}")
     if deal_id:
         # Already has a deal_id -> find deal and send update email
         deal_match = find_deal_by_id(deal_id)
+        print(f"STEP 1.5.12: Deal match: {deal_match}")
         if deal_match:
             print(f"  🎯 Existing deal_id: {deal_id}")
+            print(f"STEP 1.5.13: Existing deal_id: {deal_id}")
             subj, html = generate_update_email_html(
                 case_info, changes, deal_match)
             send_email_via_webhook(subj, html, {
@@ -864,24 +909,26 @@ def process_case(db_record):
                 "url": detail_url,
                 "is_update": True,
             })
+            print(f"STEP 1.5.14: Email sent: {subj}")
         else:
             print(
                 f"  ⚠️ deal_id {deal_id} not found in deals list, treating as unmatched")
             deal_id = None
-
+            print(f"STEP 1.5.15: No deal match for: {case_info['title'][:60]}")
     if not deal_id:
         # No deal_id -> try LLM matching
         matched_deal_id = match_title_with_deals(case_info["title"])
+        print(f"STEP 1.5.16: Matched deal ID: {matched_deal_id}")
         deal_match = find_deal_by_id(
             matched_deal_id) if matched_deal_id else None
-
+        print(f"STEP 1.5.17: Deal match: {deal_match}")
         if deal_match:
             acquirer = deal_match.get(
                 "acquirer") or deal_match.get("acquire_name", "N/A")
             target = deal_match.get("target") or deal_match.get(
                 "target_name", "N/A")
             print(f"  🎯 New match: {acquirer} / {target}")
-
+            print(f"STEP 1.5.18: New match: {acquirer} / {target}")
             deal_id = matched_deal_id
 
             subj, html = generate_update_email_html(
@@ -892,15 +939,19 @@ def process_case(db_record):
                 "url": detail_url,
                 "is_update": True,
             })
+            print(f"STEP 1.5.19: Email sent: {subj}")
         else:
             if matched_deal_id:
                 print(f"  ⚠️ Deal ID from LLM not found: {matched_deal_id}")
             # No match -> check USA relation
             print(f"  ➖ No deal match for: {case_info['title'][:60]}")
+            print(f"STEP 1.5.20: No deal match for: {case_info['title'][:60]}")
             try:
                 is_usa = verify_usa_relation(case_info["title"])
+                print(f"STEP 1.5.21: USA relation: {is_usa}")
                 if is_usa:
                     print(f"  🇺🇸 USA-related - sending update email")
+                    print(f"STEP 1.5.22: Sending update email")
                     subj, html = generate_update_email_html(case_info, changes)
                     send_email_via_webhook(subj, html, {
                         "title": case_info["title"],
@@ -908,11 +959,12 @@ def process_case(db_record):
                         "is_update": True,
                         "usa_related": True,
                     })
+                    print(f"STEP 1.5.23: Email sent: {subj}")
                 else:
                     print(f"  ℹ️ Not USA-related - no email, updating DB only")
             except Exception as e:
                 logger.exception(f"  Error checking USA relation: {e}")
-
+                print(f"STEP 1.5.24: Error checking USA relation: {e}")
     # Update the DB record with all scraped fields
     update_fields = {
         "title": scraped.get("title") or title,
@@ -929,8 +981,9 @@ def process_case(db_record):
     }
     if deal_id:
         update_fields["deal_id"] = deal_id
-
+    print(f"STEP 1.5.25: Update fields: {update_fields}")
     update_uk_cma_case(doc_id, update_fields)
+    print(f"STEP 1.5.26: Updated DB record: {update_fields}")
     return True
 
 
@@ -941,15 +994,15 @@ def process_case(db_record):
 def main():
     run_start = datetime.datetime.now()
     logger.info("=" * 60)
-    logger.info("Starting UK CMA Cases Update Monitor")
+    logger.info("STEP 1: Starting UK CMA Cases Update Monitor")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
     print(f"\n{'='*60}")
-    print("🔄 UK CMA Open Mergers Update Monitor")
+    print("STEP 1.1: UK CMA Open Mergers Update Monitor")
     print(f"{'='*60}\n")
 
     # Step 1: MongoDB connection
-    print("🔌 Connecting to MongoDB...")
+    print("STEP 1.2: Connecting to MongoDB...")
     success, msg = init_mongodb_connection()
     if success:
         print(f"✅ {msg}\n")
@@ -961,49 +1014,54 @@ def main():
         return
 
     # Step 2: Load deals
-    print("📊 Loading deals from MongoDB...")
+    print("STEP 1.3: Loading deals from MongoDB...")
     load_deals()
 
     # Step 3: Fetch open cases from uk_cma_cases
-    print("\n📋 Fetching open cases from uk_cma_cases...")
+    print("\nSTEP 1.4: Fetching open cases from uk_cma_cases...")
     open_cases = get_open_cases()
     if not open_cases:
-        print("ℹ️ No open cases to monitor. Exiting.")
+        print("STEP 1.4.1: No open cases to monitor. Exiting.")
         return
 
     # Step 4: Process each open case
     print(f"\n{'='*60}")
-    print("🔄 PROCESSING OPEN CASES")
+    print("STEP 1.5: PROCESSING OPEN CASES")
     print(f"{'='*60}\n")
 
     updated_count = 0
     unchanged_count = 0
 
     for idx, case in enumerate(open_cases, 1):
+        print(f"STEP 1.5.1: Case: {case}")
         title = case.get("title", "N/A")
         print(f"\n[{idx}/{len(open_cases)}] {title[:70]}")
 
         had_changes = process_case(case)
+        print(f"STEP 1.5.3: Had changes: {had_changes}")
         if had_changes:
             updated_count += 1
         else:
+            print(f"STEP 1.5.4: Unchanged")
             unchanged_count += 1
 
     # Summary
     print(f"\n{'='*60}")
-    print("✅ ALL DONE!")
+    print("STEP 1.6: ALL DONE!")
     print(f"{'='*60}")
-    print(f"📊 Total open cases checked: {len(open_cases)}")
-    print(f"📝 Cases with updates: {updated_count}")
-    print(f"✅ Cases unchanged: {unchanged_count}")
+    print(f"STEP 1.6.1: Total open cases checked: {len(open_cases)}")
+    print(f"STEP 1.6.2: Cases with updates: {updated_count}")
+    print(f"STEP 1.6.3: Cases unchanged: {unchanged_count}")
     print(f"{'='*60}\n")
     elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
     logger.info("=" * 60)
     logger.info("SUMMARY")
-    logger.info(f"  Total open cases checked     : {len(open_cases)}")
-    logger.info(f"  Cases with updates           : {updated_count}")
-    logger.info(f"  Cases unchanged              : {unchanged_count}")
-    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info(
+        f"STEP 1.6.4: Total open cases checked     : {len(open_cases)}")
+    logger.info(f"STEP 1.6.5: Cases with updates           : {updated_count}")
+    logger.info(
+        f"STEP 1.6.6: Cases unchanged              : {unchanged_count}")
+    logger.info(f"STEP 1.6.7: Total time                   : {elapsed}s")
     logger.info("=" * 60)
 
 

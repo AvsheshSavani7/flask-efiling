@@ -104,6 +104,7 @@ def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = 
         traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
     )
 
+
 # Constants
 BASE_URL = "https://www.comcom.govt.nz"
 ENV_PATH = ".env"
@@ -257,9 +258,12 @@ If no deal satisfies this rule, respond exactly: None"""
             ]
         )
         content = (res.choices[0].message.content or "").strip()
-        tokens_used = getattr(res.usage, "total_tokens", "N/A") if res.usage else "N/A"
-        logger.info(f"   LLM match — input: title={title[:60]}, parties={parties[:60]}")
-        logger.info(f"   LLM match raw response: {content} (tokens={tokens_used})")
+        tokens_used = getattr(res.usage, "total_tokens",
+                              "N/A") if res.usage else "N/A"
+        logger.info(
+            f"   LLM match — input: title={title[:60]}, parties={parties[:60]}")
+        logger.info(
+            f"   LLM match raw response: {content} (tokens={tokens_used})")
         if not content.lower().startswith("match"):
             logger.info(f"   LLM match result: None")
             return None
@@ -642,23 +646,27 @@ def run():
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
 
+    logger.info("[STEP 1] Initializing MongoDB connection...")
+
     success, message = init_mongodb_connection(ENV_PATH)
     if not success:
-        _log_critical_error_and_email(f"MongoDB connection failed: {message}", {"step": "mongodb_connect"})
+        _log_critical_error_and_email(f"MongoDB connection failed: {message}", {
+                                      "step": "mongodb_connect"})
         return
-    logger.info(f"MongoDB: {message}")
+    logger.info(f"[STEP 1.1] MongoDB: {message}")
 
     collection = get_nz_cases_collection()
     if collection is None:
-        _log_critical_error_and_email("nz_cases collection not available", {"step": "get_collection"})
+        _log_critical_error_and_email("[STEP 1.2] nz_cases collection not available", {
+                                      "step": "get_collection"})
         return
 
     deals = get_open_deals_for_matching()
-    logger.info(f"Loaded {len(deals)} deals for matching")
+    logger.info(f"[STEP 1.3] Loaded {len(deals)} deals for matching")
 
     open_date = get_open_date_one_week_ago()
     list_url = LIST_URL_TEMPLATE.format(open_date=open_date)
-    logger.info(f"List URL (open_date={open_date}): {list_url}")
+    logger.info(f"[STEP 1.4] List URL (open_date={open_date}): {list_url}")
 
     inserted = 0
     skipped = 0
@@ -668,31 +676,34 @@ def run():
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        # Step 1: fetch list page and extract items
+        # [STEP 2] Fetch list page and extract items
         page.goto(list_url, wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
         list_html = page.content()
         items = extract_list_items_from_html(list_html)
-        logger.info(f"Found {len(items)} list items from ol.filter__results-list")
+        logger.info(
+            f"[STEP 2] Found {len(items)} list items from ol.filter__results-list")
 
         for i, list_item in enumerate(items, 1):
             title = list_item.get("title", "?")
             detail_url = list_item.get("detail_url", "")
             if not detail_url:
-                logger.warning(f"   [{i}/{len(items)}] No detail URL, skipping: {title}")
+                logger.warning(
+                    f"[STEP 2.1] [{i}/{len(items)}] No detail URL, skipping: {title}")
                 continue
 
-            logger.info(f"   [{i}/{len(items)}] {title}")
+            logger.info(f"[STEP 2.2] [{i}/{len(items)}] {title}")
 
             if not test_mode and detail_url_exists(collection, detail_url):
-                logger.info(f"      detail_url already in nz_cases, skip")
+                logger.info(f"[STEP 2.3] detail_url already in nz_cases, skip")
                 skipped += 1
                 continue
 
             detail = fetch_case_detail_page(page, detail_url)
             if not detail:
-                logger.warning(f"      Could not fetch detail, skipping")
-                error_items.append({"title": title, "error": "Detail fetch failed", "step": "fetch_case_detail_page"})
+                logger.warning(f"[STEP 2.4] Could not fetch detail, skipping")
+                error_items.append(
+                    {"title": title, "error": "Detail fetch failed", "step": "fetch_case_detail_page"})
                 continue
 
             doc = build_case_document(list_item, detail)
@@ -710,7 +721,7 @@ def run():
 
             if deal_id:
                 doc["deal_id"] = deal_id
-                logger.info(f"      Deal match found (deal_id={deal_id})")
+                logger.info(f"[STEP 2.5] Deal match found (deal_id={deal_id})")
                 if not test_mode:
                     send_nz_new_case_matched_email(doc, deal_id)
             else:
@@ -729,12 +740,13 @@ def run():
                             company_details=nz_details, case_type="NZ")
                     )
                 except Exception as e:
-                    logger.exception(f"      USA verification error: {e}")
-                    error_items.append({"title": title, "error": str(e), "step": "verify_usa_relation"})
+                    logger.exception(f"[STEP 2.6] USA verification error: {e}")
+                    error_items.append(
+                        {"title": title, "error": str(e), "step": "verify_usa_relation"})
                     is_usa = False
 
                 if is_usa:
-                    logger.info("      USA-related (unmatched)")
+                    logger.info("[STEP 2.7] USA-related (unmatched)")
                     if not test_mode:
                         send_unmatched_nz_usa_email_via_webhook(doc)
 
@@ -746,22 +758,26 @@ def run():
                         inserted += 1
                     else:
                         updated += 1
-                    logger.info(f"      Upserted into nz_cases ({action})")
+                    logger.info(
+                        f"[STEP 2.8] Upserted into nz_cases ({action})")
                 else:
                     collection.insert_one(doc)
                     case_number = (doc.get("case_number") or "").strip()
                     extra = f" case_number={case_number}" if case_number else ""
-                    logger.info(f"      Inserted into nz_cases (detail_url){extra}")
+                    logger.info(
+                        f"[STEP 2.9] Inserted into nz_cases (detail_url){extra}")
                     inserted += 1
             except Exception as e:
-                logger.exception(f"      Insert failed: {e}")
-                error_items.append({"title": title, "error": str(e), "step": "insert_case"})
+                logger.exception(f"[STEP 2.10] Insert failed: {e}")
+                error_items.append(
+                    {"title": title, "error": str(e), "step": "insert_case"})
 
         browser.close()
-        logger.info("Browser closed")
+        logger.info("[STEP 2.11] Browser closed")
 
     if error_items:
-        logger.warning(f"{len(error_items)} per-case errors collected — sending summary email")
+        logger.warning(
+            f"[STEP 2.12] {len(error_items)} per-case errors collected — sending summary email")
         send_error_email(
             script_name=SCRIPT_NAME,
             error_message=f"{len(error_items)} errors occurred during run",
@@ -776,11 +792,12 @@ def run():
     logger.info("")
     logger.info("=" * 60)
     logger.info("SUMMARY")
-    logger.info(f"  Inserted                     : {inserted}")
-    logger.info(f"  Updated                      : {updated}")
-    logger.info(f"  Skipped (already in DB)      : {skipped}")
-    logger.info(f"  Errors encountered           : {len(error_items)}")
-    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info(f"[STEP 2.13] Inserted                     : {inserted}")
+    logger.info(f"[STEP 2.14] Updated                      : {updated}")
+    logger.info(f"[STEP 2.15] Skipped (already in DB)      : {skipped}")
+    logger.info(
+        f"[STEP 2.16] Errors encountered           : {len(error_items)}")
+    logger.info(f"[STEP 2.17] Total time                   : {elapsed}s")
     logger.info("=" * 60)
 
 
@@ -788,5 +805,6 @@ if __name__ == "__main__":
     try:
         run()
     except Exception as e:
-        _log_critical_error_and_email(f"Unhandled error in __main__: {e}", {"step": "__main__"})
+        _log_critical_error_and_email(
+            f"Unhandled error in __main__: {e}", {"step": "__main__"})
         raise

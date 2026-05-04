@@ -486,19 +486,38 @@ def submit_search_form(page, start_date, end_date, process_type_id: Optional[str
         try:
             recaptcha_div = page.locator("#g-recaptcha")
             if recaptcha_div.is_visible():
+                print("🔐 reCAPTCHA detected on search form, solving...")
                 token = solve_recaptcha_v2(
                     RECAPTCHA_SITE_KEY, page.url, CAPTCHA_API_KEY)
                 if token:
+                    filled = False
                     for retry in range(3):
                         if fill_recaptcha_token(page, token):
+                            filled = True
+                            print("✅ reCAPTCHA token filled successfully")
                             break
                         time.sleep(2)
-        except Exception:
-            pass
+                    if not filled:
+                        print("⚠️ Failed to fill reCAPTCHA token after 3 retries")
+                else:
+                    print("⚠️ Failed to obtain reCAPTCHA token — search may fail")
+        except Exception as e:
+            print(f"⚠️ reCAPTCHA handling error: {e}")
 
         page.locator("#sbmPesquisar").click()
         print("⏳ Waiting for search results...")
-        time.sleep(5)
+
+        try:
+            page.wait_for_selector(
+                "table tr, .pesquisaTituloRegistro, .infraTabelaResultado",
+                timeout=15000,
+            )
+            print("✅ Results table detected")
+        except Exception:
+            print(
+                "⚠️ No results table detected within 15s, continuing with fallback wait...")
+            time.sleep(5)
+
         return True
     except Exception as e:
         print(f"❌ Error submitting form: {e}")
@@ -514,6 +533,7 @@ def parse_search_results(page) -> List[Dict[str, Any]]:
         time.sleep(3)
         html = page.content()
         soup = BeautifulSoup(html, "html.parser")
+        # print(f"🔍 Parsing search results: {soup}")
 
         results: List[Dict[str, Any]] = []
         tables = soup.find_all("table")
@@ -524,7 +544,14 @@ def parse_search_results(page) -> List[Dict[str, Any]]:
                     all_rows.append(row)
 
         if not all_rows:
-            print("⚠️ No table rows found")
+            try:
+                debug_dir = os.path.dirname(LOG_FILE)
+                debug_path = os.path.join(debug_dir, "debug_no_results.png")
+                page.screenshot(path=debug_path)
+                print(
+                    f"⚠️ No table rows found — screenshot saved to {debug_path}")
+            except Exception as ss_err:
+                print(f"⚠️ No table rows found (screenshot failed: {ss_err})")
             return []
 
         idx = 0
@@ -582,13 +609,13 @@ def collect_all_pages(page) -> List[Dict[str, Any]]:
     page_num = 1
 
     while True:
-        print(f"\n📄 Processing page {page_num}...")
+        print(f"\n[STEP 2.2.1] Processing page {page_num}...")
         check_and_solve_recaptcha(page)
 
         parsed = parse_search_results(page)
         all_results.extend(parsed)
         print(
-            f"✅ Found {len(parsed)} results on page {page_num} (total: {len(all_results)})")
+            f"[STEP 2.2.2] ✅ Found {len(parsed)} results on page {page_num} (total: {len(all_results)})")
 
         try:
             current_indicator = page.locator(".pesquisaPaginaSelecionada")
@@ -626,7 +653,8 @@ def collect_all_pages(page) -> List[Dict[str, Any]]:
                         found_higher = True
                         break
                 if not found_higher:
-                    print(f"✅ Reached last page ({current_displayed})")
+                    print(
+                        f"[STEP 2.2.3] ✅ Reached last page ({current_displayed})")
                     break
 
             if has_next and next_button:
@@ -636,7 +664,7 @@ def collect_all_pages(page) -> List[Dict[str, Any]]:
                     or (next_button.get_attribute("aria-disabled") or "").lower() == "true"
                 )
                 if is_disabled:
-                    print("✅ Reached last page (next button disabled)")
+                    print("[STEP 2.2.4] ✅ Reached last page (next button disabled)")
                     break
 
                 next_button.scroll_into_view_if_needed()
@@ -655,12 +683,12 @@ def collect_all_pages(page) -> List[Dict[str, Any]]:
                         page_num += 1
                 else:
                     page_num += 1
-                print(f"✅ Navigated to page {page_num}")
+                print(f"[STEP 2.2.5] ✅ Navigated to page {page_num}")
             else:
-                print("✅ No more pages")
+                print("[STEP 2.2.6] ✅ No more pages")
                 break
         except Exception as e:
-            print(f"⚠️ Pagination error: {e}")
+            print(f"[STEP 2.2.7] ⚠️ Pagination error: {e}")
             break
 
     return all_results
@@ -685,48 +713,31 @@ def extract_detail_page(
 
     Returns a dict with keys: autuacao, table_records, historico_records.
     Returns None when skip_certidao_transitada triggers.
+    Retries on timeout/failure.
     """
-    detail_page = None
-    try:
-        detail_page = context.new_page()
-        detail_page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        time.sleep(3)
+    max_retries = 2
+    for attempt in range(1, max_retries + 1):
+        detail_page = None
+        try:
+            detail_page = context.new_page()
+            detail_page.goto(url, wait_until="networkidle", timeout=90000)
+            time.sleep(5)
 
-        if handle_image_captcha_if_present(detail_page):
-            time.sleep(4)
-        time.sleep(2)
+            if handle_image_captcha_if_present(detail_page):
+                time.sleep(4)
+            time.sleep(2)
 
-        html = detail_page.content()
-        soup = BeautifulSoup(html, "html.parser")
+            html = detail_page.content()
+            soup = BeautifulSoup(html, "html.parser")
 
-        # --- Autuação ---
-        info = dict(_EMPTY_AUTUACAO)
+            # --- Autuação ---
+            info = dict(_EMPTY_AUTUACAO)
 
-        for table in soup.find_all("table"):
-            header = table.find("th", string=re.compile(r"Autuação", re.I))
-            if not header:
-                continue
-            for row in table.find_all("tr"):
-                cells = row.find_all(["td", "th"])
-                if len(cells) == 2:
-                    label = cells[0].get_text(strip=True)
-                    value = cells[1].get_text(separator=" ", strip=True)
-                    if "Processo" in label:
-                        info["process"] = value
-                    elif "Tipo" in label:
-                        info["type"] = value
-                    elif "Data de Registro" in label:
-                        info["registration_date"] = value
-                    elif "Interessados" in label:
-                        info["interessados"] = value
-            break
-
-        if not info["process"]:
-            for tbody in soup.find_all("tbody"):
-                header = tbody.find("th", string=re.compile(r"Autuação", re.I))
+            for table in soup.find_all("table"):
+                header = table.find("th", string=re.compile(r"Autuação", re.I))
                 if not header:
                     continue
-                for row in tbody.find_all("tr"):
+                for row in table.find_all("tr"):
                     cells = row.find_all(["td", "th"])
                     if len(cells) == 2:
                         label = cells[0].get_text(strip=True)
@@ -741,136 +752,201 @@ def extract_detail_page(
                             info["interessados"] = value
                 break
 
-        print(f"  📄 Autuação: process={info['process']}, type={info['type'][:60]}..., "
-              f"date={info['registration_date']}, interessados={info['interessados'][:80]}...")
+            if not info["process"]:
+                for tbody in soup.find_all("tbody"):
+                    header = tbody.find(
+                        "th", string=re.compile(r"Autuação", re.I))
+                    if not header:
+                        continue
+                    for row in tbody.find_all("tr"):
+                        cells = row.find_all(["td", "th"])
+                        if len(cells) == 2:
+                            label = cells[0].get_text(strip=True)
+                            value = cells[1].get_text(
+                                separator=" ", strip=True)
+                            if "Processo" in label:
+                                info["process"] = value
+                            elif "Tipo" in label:
+                                info["type"] = value
+                            elif "Data de Registro" in label:
+                                info["registration_date"] = value
+                            elif "Interessados" in label:
+                                info["interessados"] = value
+                    break
 
-        # --- tblDocumentos ---
-        doc_table = soup.find("table", id="tblDocumentos")
-        table_data: List[Dict[str, Any]] = []
+            print(f"  📄 Autuação: process={info['process']}, type={info['type'][:60]}..., "
+                  f"date={info['registration_date']}, interessados={info['interessados'][:80]}...")
 
-        if doc_table:
-            for row in doc_table.find_all("tr"):
-                if row.find("th"):
-                    continue
-                cells = row.find_all("td")
-                if len(cells) < 5:
-                    continue
+            # --- tblDocumentos ---
+            doc_table = soup.find("table", id="tblDocumentos")
+            table_data: List[Dict[str, Any]] = []
 
-                row_data: Dict[str, Any] = {}
+            if doc_table:
+                for row in doc_table.find_all("tr"):
+                    if row.find("th"):
+                        continue
+                    cells = row.find_all("td")
+                    if len(cells) < 5:
+                        continue
 
-                doc_link = row.find("a", class_="ancoraPadraoAzul")
-                if doc_link:
-                    doc_number = doc_link.get_text(strip=True)
-                    if doc_number and re.match(r"^\d+$", doc_number):
-                        row_data["documento_processo"] = doc_number
+                    row_data: Dict[str, Any] = {}
 
-                    onclick = doc_link.get("onclick", "")
-                    if onclick and "window.open" in onclick:
-                        match = re.search(
-                            r"window\.open\('([^']+)'\)", onclick)
-                        if match:
-                            doc_url = match.group(1)
-                            if not doc_url.startswith("http"):
-                                doc_url = requests.compat.urljoin(
-                                    BASE_PESQUISA_URL, doc_url)
-                            row_data["document_url"] = doc_url
+                    doc_link = row.find("a", class_="ancoraPadraoAzul")
+                    if doc_link:
+                        doc_number = doc_link.get_text(strip=True)
+                        if doc_number and re.match(r"^\d+$", doc_number):
+                            row_data["documento_processo"] = doc_number
 
-                    doc_type = doc_link.get(
-                        "alt") or doc_link.get("title") or ""
-                    if doc_type.strip():
-                        row_data["tipo_documento"] = doc_type.strip()
+                        onclick = doc_link.get("onclick", "")
+                        if onclick and "window.open" in onclick:
+                            match = re.search(
+                                r"window\.open\('([^']+)'\)", onclick)
+                            if match:
+                                doc_url = match.group(1)
+                                if not doc_url.startswith("http"):
+                                    doc_url = requests.compat.urljoin(
+                                        BASE_PESQUISA_URL, doc_url)
+                                row_data["document_url"] = doc_url
 
-                dates_found = []
-                for cell in cells:
-                    cell_text = cell.get_text(strip=True)
-                    if re.match(r"^\d{2}/\d{2}/\d{4}$", cell_text):
-                        dates_found.append(cell_text)
+                        doc_type = doc_link.get(
+                            "alt") or doc_link.get("title") or ""
+                        if doc_type.strip():
+                            row_data["tipo_documento"] = doc_type.strip()
 
-                if len(dates_found) >= 1:
-                    row_data["data_documento"] = dates_found[0]
-                if len(dates_found) >= 2:
-                    row_data["data_registro"] = dates_found[1]
+                    dates_found = []
+                    for cell in cells:
+                        cell_text = cell.get_text(strip=True)
+                        if re.match(r"^\d{2}/\d{2}/\d{4}$", cell_text):
+                            dates_found.append(cell_text)
 
-                unidade_link = row.find("a", class_="ancoraSigla")
-                if unidade_link:
-                    u_text = unidade_link.get_text(strip=True)
-                    if u_text:
-                        row_data["unidade"] = u_text
+                    if len(dates_found) >= 1:
+                        row_data["data_documento"] = dates_found[0]
+                    if len(dates_found) >= 2:
+                        row_data["data_registro"] = dates_found[1]
 
-                row_data = {k: v for k, v in row_data.items()
-                            if v and str(v).strip()}
-                if row_data.get("documento_processo"):
-                    table_data.append(row_data)
+                    unidade_link = row.find("a", class_="ancoraSigla")
+                    if unidade_link:
+                        u_text = unidade_link.get_text(strip=True)
+                        if u_text:
+                            row_data["unidade"] = u_text
 
-            print(
-                f"  📊 Extracted {len(table_data)} records from tblDocumentos")
-        else:
-            print("  ⚠️ tblDocumentos not found on detail page")
+                    row_data = {k: v for k, v in row_data.items()
+                                if v and str(v).strip()}
+                    if row_data.get("documento_processo"):
+                        table_data.append(row_data)
 
-        if skip_certidao_transitada and any(
-            rec.get("tipo_documento", "").strip(
-            ) == "Certidão de Trânsito em Julgado"
-            for rec in table_data
-        ):
-            print("  ⏩ 'Certidão de Trânsito em Julgado' found — skipping record")
-            detail_page.close()
-            return None
+                print(
+                    f"  📊 Extracted {len(table_data)} records from tblDocumentos")
+            else:
+                print("  ⚠️ tblDocumentos not found on detail page")
 
-        # --- tblHistorico ---
-        historico_table = soup.find("table", id="tblHistorico")
-        historico_data: List[Dict[str, Any]] = []
-
-        if historico_table:
-            for row in historico_table.find_all("tr"):
-                if row.find("th"):
-                    continue
-                cells = row.find_all("td")
-                if len(cells) < 3:
-                    continue
-
-                date_time = cells[0].get_text(strip=True)
-
-                unit_link = cells[1].find("a", class_="ancoraSigla")
-                unit = unit_link.get_text(
-                    strip=True) if unit_link else cells[1].get_text(strip=True)
-
-                description = cells[2].get_text(strip=True)
-
-                if not description:
-                    continue
-
-                description_en = translate_to_english(description)
-
-                historico_data.append({
-                    "date_time": date_time,
-                    "unit": unit,
-                    "description": description,
-                    "description_en": description_en,
-                })
-
-            print(
-                f"  📊 Extracted {len(historico_data)} records from tblHistorico")
-        else:
-            print("  ⚠️ tblHistorico not found on detail page")
-
-        detail_page.close()
-        return {
-            "autuacao": info,
-            "table_records": table_data,
-            "historico_records": historico_data,
-        }
-    except Exception as e:
-        logger.exception(f"Failed to extract detail page {url}: {e}")
-        if detail_page:
-            try:
+            if skip_certidao_transitada and any(
+                rec.get("tipo_documento", "").strip(
+                ) == "Certidão de Trânsito em Julgado"
+                for rec in table_data
+            ):
+                print("  ⏩ 'Certidão de Trânsito em Julgado' found — skipping record")
                 detail_page.close()
-            except Exception:
-                pass
-        return {
-            "autuacao": dict(_EMPTY_AUTUACAO),
-            "table_records": [],
-            "historico_records": [],
-        }
+                return None
+
+            # --- tblHistorico ---
+            historico_table = soup.find("table", id="tblHistorico")
+            historico_data: List[Dict[str, Any]] = []
+
+            if historico_table:
+                for row in historico_table.find_all("tr"):
+                    if row.find("th"):
+                        continue
+                    cells = row.find_all("td")
+                    if len(cells) < 3:
+                        continue
+
+                    date_time = cells[0].get_text(strip=True)
+
+                    unit_link = cells[1].find("a", class_="ancoraSigla")
+                    unit = unit_link.get_text(
+                        strip=True) if unit_link else cells[1].get_text(strip=True)
+
+                    description = cells[2].get_text(strip=True)
+
+                    if not description:
+                        continue
+
+                    description_en = translate_to_english(description)
+
+                    historico_data.append({
+                        "date_time": date_time,
+                        "unit": unit,
+                        "description": description,
+                        "description_en": description_en,
+                    })
+
+                print(
+                    f"  📊 Extracted {len(historico_data)} records from tblHistorico")
+            else:
+                print("  ⚠️ tblHistorico not found on detail page")
+
+            detail_page.close()
+            return {
+                "autuacao": info,
+                "table_records": table_data,
+                "historico_records": historico_data,
+            }
+        except Exception as e:
+            logger.warning(
+                f"  Attempt {attempt}/{max_retries} failed for {url}: {e}")
+            if detail_page:
+                if attempt < max_retries:
+                    try:
+                        detail_page.close()
+                    except Exception:
+                        pass
+                    logger.info(f"  Retrying in 10s...")
+                    time.sleep(10)
+                    continue
+                screenshot_path = None
+                try:
+                    log_dir = os.path.dirname(LOG_FILE)
+                    screenshot_path = os.path.join(
+                        log_dir,
+                        f"debug_screenshot_{datetime.datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.png",
+                    )
+                    detail_page.screenshot(path=screenshot_path)
+                    logger.error(
+                        f"  Debug screenshot saved to {screenshot_path}")
+                except Exception:
+                    pass
+                try:
+                    detail_page.close()
+                except Exception:
+                    pass
+            explanation = (
+                f"Failed to extract detail page after {max_retries} attempts. "
+                f"URL: {url}. Last error: {e}. "
+                f"The CADE SEI portal may be temporarily unavailable, slow to render, "
+                f"or its page structure may have changed."
+            )
+            _log_critical_error_and_email(
+                explanation,
+                {
+                    "step": "extract_detail_page",
+                    "page_url": url,
+                    "attempts": str(max_retries),
+                    "last_error": str(e),
+                    "possible_causes": (
+                        "1) CADE SEI portal temporarily slow or under maintenance; "
+                        "2) CAPTCHA blocked page load; "
+                        "3) Page HTML structure changed; "
+                        "4) Network issue between server and CADE portal"
+                    ),
+                    "screenshot": screenshot_path or "capture failed",
+                },
+            )
+            return {
+                "autuacao": dict(_EMPTY_AUTUACAO),
+                "table_records": [],
+                "historico_records": [],
+            }
 
 
 # ---------------------------------------------------------------------------
@@ -1122,30 +1198,35 @@ def run_cade_cases_register(
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
 
-    logger.info("Initializing MongoDB connection...")
+    logger.info("[STEP 1] Initializing MongoDB connection...")
     ok, msg = init_mongodb_connection(ENV_PATH)
     if not ok:
         _log_critical_error_and_email(f"MongoDB connection failed: {msg}", {
-                             "step": "mongodb_connect"})
+            "step": "mongodb_connect"})
         return
-    logger.info(f"MongoDB: {msg}")
+    logger.info(f"[STEP 1.1] MongoDB: {msg}")
 
     if not is_connected():
-        _log_critical_error_and_email("MongoDB not connected after init", {
-                             "step": "mongodb_connect"})
+        _log_critical_error_and_email("[STEP 1.2] MongoDB not connected after init", {
+            "step": "mongodb_connect"})
         return
 
     collection = get_brazil_cases_collection()
     if collection is None:
-        _log_critical_error_and_email("Could not access 'brazil_cases' collection", {
-                             "step": "get_collection"})
+        _log_critical_error_and_email("[STEP 1.3] Could not access 'brazil_cases' collection", {
+            "step": "get_collection"})
         return
+
+    logger.info("[STEP 1.4] brazil_cases collection ready")
 
     # Default date range
     if end_date is None:
         end_date = datetime.datetime.now()
     if start_date is None:
         start_date = end_date - datetime.timedelta(days=2)
+
+    logger.info(
+        f"[STEP 1.5] Date range: {start_date.strftime('%Y-%m-%d')} → {end_date.strftime('%Y-%m-%d')}")
 
     new_cases: List[Dict[str, Any]] = []
 
@@ -1170,7 +1251,7 @@ def run_cade_cases_register(
 
         try:
             logger.info(
-                f"Searching {start_date.strftime('%Y-%m-%d')} → "
+                f"[STEP 2] Searching {start_date.strftime('%Y-%m-%d')} → "
                 f"{end_date.strftime('%Y-%m-%d')} "
                 f"across {len(PROCESS_TYPES)} process types"
             )
@@ -1180,18 +1261,21 @@ def run_cade_cases_register(
             seen_urls: set = set()
 
             for type_name, type_id in PROCESS_TYPES.items():
-                logger.info(f"Searching: {type_name} (id={type_id})")
+                logger.info(
+                    f"[STEP 2.1] Searching: {type_name} (id={type_id})")
 
                 page.goto(BASE_URL, wait_until="domcontentloaded",
                           timeout=30000)
                 time.sleep(3)
 
                 if not submit_search_form(page, start_date, end_date, process_type_id=type_id):
-                    logger.warning(f"Failed to submit form for {type_name}")
+                    logger.warning(
+                        f"[STEP 2.2] Failed to submit form for {type_name}")
                     continue
 
                 type_results = collect_all_pages(page)
-                logger.info(f"Found {len(type_results)} results for {type_name}")
+                logger.info(
+                    f"[STEP 2.3] Found {len(type_results)} results for {type_name}")
 
                 added = 0
                 for r in type_results:
@@ -1202,23 +1286,25 @@ def run_cade_cases_register(
                         all_results.append(r)
                         added += 1
                 logger.info(
-                    f"  +{added} new (after dedup), {len(type_results) - added} duplicates skipped")
+                    f"[STEP 2.4]  +{added} new (after dedup), {len(type_results) - added} duplicates skipped")
 
-            logger.info(f"Total collected (deduplicated): {len(all_results)} results")
+            logger.info(
+                f"[STEP 2.5] Total collected (deduplicated): {len(all_results)} results")
 
             # Step 3–7: Process each record
             for idx, result in enumerate(all_results, 1):
                 detail_url = result.get("detail_url")
                 title = result.get("title", "N/A")
 
-                logger.info(f"[{idx}/{len(all_results)}] {title[:80]}...")
+                logger.info(
+                    f"[STEP 2.6] [{idx}/{len(all_results)}] {title[:80]}...")
 
                 if not detail_url:
-                    logger.warning("  No detail URL; skipping")
+                    logger.warning("[STEP 2.7] No detail URL; skipping")
                     continue
 
                 if not test_mode and case_exists_by_url(collection, detail_url):
-                    logger.info("  Already in brazil_cases; skipping")
+                    logger.info("[STEP 2.8] Already in brazil_cases; skipping")
                     continue
 
                 # Single page visit: autuação + tblDocumentos + tblHistorico
@@ -1239,7 +1325,8 @@ def run_cade_cases_register(
                 translated = ""
                 if interessados_text:
                     translated = translate_to_english(interessados_text)
-                    logger.info(f"  Translated: {translated[:150]}...")
+                    logger.info(
+                        f"[STEP 2.9] Translated: {translated[:150]}...")
 
                 type_en = ""
                 if autuacao.get("type"):
@@ -1281,7 +1368,8 @@ def run_cade_cases_register(
                         matched_deal_id = match_case_to_deal(
                             interessados_text, translated)
                     except Exception as e:
-                        logger.exception(f"  Error during deal matching: {e}")
+                        logger.exception(
+                            f"[STEP 2.10] Error during deal matching: {e}")
                         error_items.append({
                             "detail_url": detail_url,
                             "error": str(e),
@@ -1289,7 +1377,8 @@ def run_cade_cases_register(
                         })
 
                 if matched_deal_id:
-                    logger.info(f"  Deal match found (deal_id={matched_deal_id})")
+                    logger.info(
+                        f"[STEP 2.11] Deal match found (deal_id={matched_deal_id})")
                     case_doc["deal_id"] = matched_deal_id
 
                     if not test_mode:
@@ -1311,7 +1400,8 @@ def run_cade_cases_register(
                                 case_type="BRAZIL",
                             ))
                         except Exception as e:
-                            logger.exception(f"  Error verifying USA relation: {e}")
+                            logger.exception(
+                                f"[STEP 2.12] Error verifying USA relation: {e}")
                             error_items.append({
                                 "detail_url": detail_url,
                                 "error": str(e),
@@ -1319,29 +1409,32 @@ def run_cade_cases_register(
                             })
 
                     if is_usa:
-                        logger.info("  USA-related (unmatched) — sending email")
+                        logger.info(
+                            "[STEP 2.13] USA-related (unmatched) — sending email")
                         if not test_mode:
                             send_usa_related_email(case_doc)
                     else:
-                        logger.info("  No match, not USA-related — saving record only")
+                        logger.info(
+                            "[STEP 2.14] No match, not USA-related — saving record only")
 
                 inserted_id = insert_case(collection, case_doc)
                 if inserted_id:
-                    logger.info(f"  Inserted into brazil_cases (id={inserted_id})")
+                    logger.info(
+                        f"[STEP 2.15] Inserted into brazil_cases (id={inserted_id})")
                     backup = dict(case_doc)
                     backup.pop("_id", None)
                     new_cases.append(backup)
                 else:
-                    logger.warning("  Insert failed")
+                    logger.warning("[STEP 2.16] Insert failed")
 
         except Exception as e:
             _log_critical_error_and_email(
-                f"Unhandled error in main execution: {e}",
+                f"[STEP 2.17] Unhandled error in main execution: {e}",
                 {"step": "run_main"},
             )
         finally:
             browser.close()
-            logger.info("Browser closed")
+            logger.info("[STEP 2.18] Browser closed")
 
     # Backup JSON
     if new_cases:
@@ -1354,15 +1447,17 @@ def run_cade_cases_register(
             with open(BACKUP_JSON, "w", encoding="utf-8") as f:
                 json.dump(serializable, f, indent=2,
                           ensure_ascii=False, default=str)
-            logger.info(f"Saved {len(serializable)} cases to {BACKUP_JSON}")
+            logger.info(
+                f"[STEP 2.19] Saved {len(serializable)} cases to {BACKUP_JSON}")
         except Exception as e:
-            logger.warning(f"Error writing backup JSON: {e}")
+            logger.warning(f"[STEP 2.20] Error writing backup JSON: {e}")
 
     if error_items:
-        logger.warning(f"{len(error_items)} per-case errors collected — sending summary email")
+        logger.warning(
+            f"[STEP 2.21] {len(error_items)} per-case errors collected — sending summary email")
         send_error_email(
             script_name=SCRIPT_NAME,
-            error_message=f"{len(error_items)} errors occurred during run",
+            error_message=f"[STEP 2.22] {len(error_items)} errors occurred during run",
             context={
                 "error_count": len(error_items),
                 "errors": error_items[:20],
@@ -1374,9 +1469,10 @@ def run_cade_cases_register(
     logger.info("")
     logger.info("=" * 60)
     logger.info("SUMMARY")
-    logger.info(f"  New cases inserted           : {len(new_cases)}")
-    logger.info(f"  Errors encountered           : {len(error_items)}")
-    logger.info(f"  Total time                   : {elapsed}s")
+    logger.info(f"[STEP 2.23] New cases inserted           : {len(new_cases)}")
+    logger.info(
+        f"[STEP 2.24] Errors encountered           : {len(error_items)}")
+    logger.info(f"[STEP 2.25] Total time                   : {elapsed}s")
     logger.info("=" * 60)
 
 
@@ -1386,5 +1482,6 @@ if __name__ == "__main__":
         test_mode_env = env_flag in ("1", "true", "yes", "y")
         run_cade_cases_register(test_mode=False, skip_certidao_transitada=True)
     except Exception as e:
-        _log_critical_error_and_email(f"Unhandled error in __main__: {e}", {"step": "__main__"})
+        _log_critical_error_and_email(
+            f"Unhandled error in __main__: {e}", {"step": "__main__"})
         raise

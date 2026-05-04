@@ -200,7 +200,7 @@ def dismiss_cookie_banner(page) -> None:
             continue
 
 
-def wait_for_results(page, timeout_ms: int = 30000) -> str:
+def wait_for_results(page, timeout_ms: int = 45000) -> str:
     last_error = None
     for selector in WAIT_SELECTORS:
         try:
@@ -209,12 +209,50 @@ def wait_for_results(page, timeout_ms: int = 30000) -> str:
             return selector
         except Exception as exc:
             last_error = exc
-    _log_critical_error_and_email(
-        f"Could not find result links on page. Last error: {last_error}",
-        {"step": "wait_for_results"},
+
+    page_url = "unknown"
+    page_title = "unknown"
+    screenshot_path = None
+    try:
+        page_url = page.url
+        page_title = page.title()
+        log_dir = os.path.dirname(LOG_FILE)
+        screenshot_path = os.path.join(
+            log_dir,
+            f"debug_screenshot_{datetime.now(IST).strftime('%Y%m%d_%H%M%S')}.png",
+        )
+        page.screenshot(path=screenshot_path)
+        logger.error(f"Debug screenshot saved to {screenshot_path}")
+    except Exception:
+        pass
+
+    tried_selectors = ", ".join(WAIT_SELECTORS)
+    explanation = (
+        f"The EC Foreign Subsidies search page loaded (URL: {page_url}, "
+        f"title: '{page_title}') but no case-result links appeared within "
+        f"{timeout_ms / 1000:.0f}s. This usually means the site's SPA "
+        f"JavaScript did not render results in time — the site may be "
+        f"temporarily slow, under maintenance, or its HTML structure changed "
+        f"so the selectors no longer match. "
+        f"Selectors tried: {tried_selectors}"
     )
-    raise RuntimeError(
-        f"Could not find result links on page. Last error: {last_error}")
+    _log_critical_error_and_email(
+        explanation,
+        {
+            "step": "wait_for_results",
+            "page_url": page_url,
+            "page_title": page_title,
+            "timeout_seconds": f"{timeout_ms / 1000:.0f}",
+            "selectors_tried": tried_selectors,
+            "possible_causes": (
+                "1) Site temporarily slow or under maintenance; "
+                "2) Site HTML structure changed (selectors outdated); "
+                "3) Network issue between server and EC portal"
+            ),
+            "screenshot": screenshot_path or "capture failed",
+        },
+    )
+    raise RuntimeError(explanation)
 
 
 def collect_case_links(page, selector: str) -> List[Dict[str, str]]:
@@ -817,6 +855,11 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
         logger.info(
             f"[STEP 2] Deal lookup map built ({len(deal_by_id)} entries)")
 
+        logger.info("[STEP 2.1] Existing cases in DB:")
+        for case in collection.find():
+            logger.info(
+                f"[STEP 2.1.1] [{case.get('case_number')}] Case: {case}")
+
         # --- Step 3: Playwright scraping ---
         logger.info("[STEP 3] Launching Playwright browser...")
         with sync_playwright() as p:
@@ -824,22 +867,37 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
             context = browser.new_context()
             search_page = context.new_page()
 
-            logger.info(f"[STEP 3] Navigating to search page: {start_url}")
-            search_page.goto(
-                start_url, wait_until="domcontentloaded", timeout=60000)
-            search_page.wait_for_timeout(3000)
-            dismiss_cookie_banner(search_page)
-            selector = wait_for_results(search_page)
+            max_nav_retries = 2
+            selector = None
+            for nav_attempt in range(1, max_nav_retries + 1):
+                logger.info(
+                    f"[STEP 3] Attempt {nav_attempt}/{max_nav_retries} "
+                    f"— navigating to search page: {start_url}")
+                search_page.goto(
+                    start_url, wait_until="networkidle", timeout=90000)
+                search_page.wait_for_timeout(5000)
+                dismiss_cookie_banner(search_page)
+                try:
+                    selector = wait_for_results(search_page)
+                    logger.info(f"[STEP 3.1] Selector found: {selector}")
+                    break
+                except RuntimeError:
+                    if nav_attempt == max_nav_retries:
+                        raise
+                    logger.warning(
+                        f"[STEP 3.2] Attempt {nav_attempt} failed to find results, "
+                        f"retrying in 10s...")
+                    search_page.wait_for_timeout(10000)
 
             current_page = 1
             while True:
                 logger.info(
-                    f"\n[Page {current_page}] Collecting case links...")
+                    f"\n[STEP 3.3] [Page {current_page}] Collecting case links...")
                 search_page.wait_for_timeout(1000)
                 links = collect_case_links(search_page, selector)
                 logger.info(
-                    f"[Page {current_page}] Found {len(links)} case links")
-                logger.info(f"links: {links}")
+                    f"[STEP 3.4] [Page {current_page}] Found {len(links)} case links")
+                logger.info(f"[STEP 3.4.1] [{current_page}] links: {links}")
 
                 for item in links:
                     url = item["url"]
@@ -850,7 +908,7 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                     case_num = extract_case_num(url)
                     if not case_num:
                         logger.warning(
-                            f"  Could not extract case number from {url}")
+                            f"[STEP 3.5] Could not extract case number from {url}")
                         continue
 
                     # DB check
@@ -861,13 +919,13 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
 
                     # Scrape + parse in memory
                     logger.info(
-                        f"links=>  [{case_num}] Scraping detail page...")
+                        f"[STEP 3.6] links=>  [{case_num}] Scraping detail page...")
                     case = scrape_case_detail(context, url)
 
-                    logger.info(f"  [{case_num}] Case: {case}")
+                    logger.info(f"[STEP 3.7] [{case_num}] Case: {case}")
                     if not case or case.get("error"):
                         logger.warning(
-                            f"  [{case_num}] Parse failed; skipping")
+                            f"[STEP 3.8] [{case_num}] Parse failed; skipping")
                         error_items.append({
                             "case_number": case_num,
                             "error": "Scrape/parse failed",
@@ -877,27 +935,28 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
 
                     case_title = case.get("case_title") or "N/A"
                     companies = get_companies_from_title(case)
-                    logger.info(f"  [{case_num}] Title: {case_title}")
-                    logger.info(f"  [{case_num}] Companies: {companies}")
-                    logger.info(f"  [{case_num}] Parsed data: case_type={case.get('case_type')} | regulation={case.get('regulation')} | notification_date={case.get('notification_date')} | last_decision_date={case.get('last_decision_date')} | status={case.get('status')}")
+                    logger.info(f"[STEP 3.9] [{case_num}] Title: {case_title}")
+                    logger.info(
+                        f"[STEP 3.10] [{case_num}] Companies: {companies}")
+                    logger.info(f"[STEP 3.11] [{case_num}] Parsed data: case_type={case.get('case_type')} | regulation={case.get('regulation')} | notification_date={case.get('notification_date')} | last_decision_date={case.get('last_decision_date')} | status={case.get('status')}")
 
                     now_iso = utc_now_iso()
 
                     # --- LLM #1: deal match ---
                     logger.info(
-                        f"  [{case_num}] LLM Call #1: deal match (companies={companies})...")
+                        f"[STEP 3.12] [{case_num}] LLM Call #1: deal match (companies={companies})...")
                     match_result = match_case_to_deal(
                         companies, deals) if deals else None
 
                     if match_result:
                         matched_deal_id, matched_company, matched_role = match_result
                         logger.info(
-                            f"  [{case_num}] LLM returned match: deal_id={matched_deal_id}, company={matched_company}, role={matched_role}")
+                            f"[STEP 3.13] [{case_num}] LLM returned match: deal_id={matched_deal_id}, company={matched_company}, role={matched_role}")
                         deal = deal_by_id.get(matched_deal_id)
 
                         if not deal:
                             logger.info(
-                                f"  [{case_num}] deal_id={matched_deal_id} not in cache, querying DB...")
+                                f"[STEP 3.14] [{case_num}] deal_id={matched_deal_id} not in cache, querying DB...")
                             try:
                                 deals_coll = get_deals_collection()
                                 if deals_coll:
@@ -907,13 +966,13 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                                         raw["deal_id"] = str(raw["_id"])
                                         deal = raw
                                         logger.info(
-                                            f"  [{case_num}] Found deal in DB: target={raw.get('target')}, acquirer={raw.get('acquirer')}")
+                                            f"[STEP 3.15] [{case_num}] Found deal in DB: target={raw.get('target')}, acquirer={raw.get('acquirer')}")
                                     else:
                                         logger.warning(
-                                            f"  [{case_num}] deal_id={matched_deal_id} not found in DB either")
+                                            f"[STEP 3.16] [{case_num}] deal_id={matched_deal_id} not found in DB either")
                             except Exception as e:
                                 logger.exception(
-                                    f"  [{case_num}] Error looking up deal {matched_deal_id}: {e}")
+                                    f"[STEP 3.17] [{case_num}] Error looking up deal {matched_deal_id}: {e}")
                                 error_items.append({
                                     "case_number": case_num,
                                     "error": str(e),
@@ -926,7 +985,7 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                             acquirer = deal.get("acquirer") or deal.get(
                                 "acquire_name", "N/A")
                             logger.info(
-                                f"  [{case_num}] Matched deal: target={target} | acquirer={acquirer} | deal_id={matched_deal_id}")
+                                f"[STEP 3.18] [{case_num}] Matched deal: target={target} | acquirer={acquirer} | deal_id={matched_deal_id}")
 
                             subject, html_email = generate_matched_email(
                                 case, deal, companies)
@@ -946,7 +1005,7 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                             continue
                         else:
                             logger.warning(
-                                f"  [{case_num}] LLM returned deal_id={matched_deal_id} but deal not found anywhere; falling through to USA check")
+                                f"[STEP 3.19] [{case_num}] LLM returned deal_id={matched_deal_id} but deal not found anywhere; falling through to USA check")
 
                     # --- LLM #2: USA check ---
                     logger.info(
@@ -955,10 +1014,10 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                         is_usa = verify_usa_relation(
                             company_details=companies, case_type="FS")
                         logger.info(
-                            f"  [{case_num}] USA check result: {is_usa}")
+                            f"[STEP 3.20] [{case_num}] USA check result: {is_usa}")
                     except Exception as e:
                         logger.exception(
-                            f"  [{case_num}] USA check error: {e}")
+                            f"[STEP 3.21] [{case_num}] USA check error: {e}")
                         error_items.append({
                             "case_number": case_num,
                             "error": str(e),
@@ -968,7 +1027,7 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
 
                     if is_usa:
                         logger.info(
-                            f"  [{case_num}] USA-related case detected — sending email")
+                            f"[STEP 3.22] [{case_num}] USA-related case detected — sending email")
                         subject, html_email = generate_usa_email(
                             case, companies)
                         send_email_via_webhook(
@@ -985,7 +1044,7 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                             new_count += 1
                     else:
                         logger.info(
-                            f"  [{case_num}] No match, not USA-related — saving to DB (no email)")
+                            f"[STEP 3.23] [{case_num}] No match, not USA-related — saving to DB (no email)")
                         case_doc = {
                             **case,
                             "is_open": True,
@@ -997,12 +1056,13 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                             new_count += 1
 
                 if max_pages is not None and current_page >= max_pages:
-                    logger.info(f"Reached max pages limit ({max_pages})")
+                    logger.info(
+                        f"[STEP 3.24] Reached max pages limit ({max_pages})")
                     break
 
                 if not click_next_page(search_page):
                     logger.info(
-                        "No more pages (next button not found or disabled)")
+                        f"[STEP 3.25] No more pages (next button not found or disabled)")
                     break
 
                 selector = wait_for_results(search_page)
@@ -1010,7 +1070,7 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
 
             context.close()
             browser.close()
-            logger.info("Browser closed")
+            logger.info(f"[STEP 3.26] Browser closed")
 
     except Exception as e:
         _log_critical_error_and_email(
@@ -1021,7 +1081,7 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
     finally:
         if error_items:
             logger.warning(
-                f"{len(error_items)} per-case errors collected — sending summary email")
+                f"[STEP 3.27] {len(error_items)} per-case errors collected — sending summary email")
             send_error_email(
                 script_name=SCRIPT_NAME,
                 error_message=f"{len(error_items)} errors occurred during run",
@@ -1036,11 +1096,14 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
         logger.info("")
         logger.info("=" * 60)
         logger.info("SUMMARY")
-        logger.info(f"  Total URLs visited           : {len(visited_urls)}")
+        logger.info(
+            f"[STEP 3.28] Total URLs visited           : {len(visited_urls)}")
         logger.info(f"  New cases inserted           : {new_count}")
-        logger.info(f"  Skipped (already in DB)      : {skipped_count}")
-        logger.info(f"  Errors encountered           : {len(error_items)}")
-        logger.info(f"  Total time                   : {elapsed}s")
+        logger.info(
+            f"[STEP 3.29] Skipped (already in DB)      : {skipped_count}")
+        logger.info(
+            f"[STEP 3.30] Errors encountered           : {len(error_items)}")
+        logger.info(f"[STEP 3.31] Total time                   : {elapsed}s")
         logger.info("=" * 60)
 
 
