@@ -163,6 +163,14 @@ SPA_CONTENT_INDICATORS = [
     "text=Last decision date:",
 ]
 
+# Plain-text versions of the above, used to validate fetched HTML content
+_SPA_HTML_INDICATORS = [
+    "Notification date:",
+    "Case type:",
+    "Regulation:",
+    "Last decision date:",
+]
+
 COOKIE_ACCEPT_SELECTORS = [
     "button:has-text('Accept all cookies')",
     "button:has-text('Accept all')",
@@ -273,6 +281,11 @@ def collect_case_links(page, selector: str) -> List[Dict[str, str]]:
     return results
 
 
+def is_spa_content_in_html(html: str) -> bool:
+    """Return True if the fetched HTML contains at least one SPA-rendered case label."""
+    return any(indicator in html for indicator in _SPA_HTML_INDICATORS)
+
+
 def wait_for_spa_content(page, timeout_s: int = 15) -> bool:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
@@ -341,6 +354,11 @@ def scrape_case_detail(context, url: str) -> Optional[Dict[str, Any]]:
 
         html = page.content()
         logger.info(f"  [{case_num}] HTML fetched ({len(html)} chars)")
+
+        if not is_spa_content_in_html(html):
+            logger.warning(
+                f"  [{case_num}] SPA labels not found in HTML — page did not fully load, skipping")
+            return None
 
         record = parse_case_html(html, case_num)
         if record and not record.get("error"):
