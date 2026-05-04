@@ -2668,12 +2668,18 @@ def list_log_dates():
 
 @app.route('/logs', methods=['GET'])
 def get_log_content():
-    """Return log content for a script + date.
-    GET /logs?script=fs_cases_register&date=2026-05-01
-    Omit date to get today's log. Use tail=N to get last N lines.
+    """Return log files for a script + date.
 
-    Reads the active log file *and* any RotatingFileHandler backups
-    (.log.1, .log.2, .log.3) so the full day's output is returned.
+    List mode  – omit file_name:
+        GET /logs?script=fs_cases_register&date=2026-05-01
+        Returns all log file names found for that date.
+
+    Content mode – provide file_name:
+        GET /logs?script=fs_cases_register&date=2026-05-01&file_name=2026-05-01.log
+        Returns the text content of that specific file.
+        Optional: tail=N to return only the last N lines.
+
+    Omit date to default to today (UTC).
     """
     script = request.args.get("script", "").strip()
     if script not in KNOWN_LOG_SCRIPTS:
@@ -2699,6 +2705,7 @@ def get_log_content():
         backup_paths.sort(reverse=True)
 
     all_paths = backup_paths + ([active_path] if os.path.isfile(active_path) else [])
+    all_names = [os.path.basename(p) for p in all_paths]
 
     if not all_paths:
         return jsonify({
@@ -2706,13 +2713,28 @@ def get_log_content():
             "error": f"No log found for {script} on {date_str}"
         }), 404
 
+    file_name = request.args.get("file_name", "").strip()
+
+    # List mode – no file_name supplied
+    if not file_name:
+        return jsonify({
+            "success": True,
+            "script": script,
+            "date": date_str,
+            "files": all_names,
+        }), 200
+
+    # Content mode – return the content of the requested file
+    if file_name not in all_names:
+        return jsonify({
+            "success": False,
+            "error": f"File '{file_name}' not found for {script} on {date_str}. Available: {all_names}"
+        }), 404
+
+    file_path = os.path.join(script_log_dir, file_name)
     try:
-        lines = []
-        files_read = []
-        for p in all_paths:
-            with open(p, "r", encoding="utf-8") as f:
-                lines.extend(f.readlines())
-            files_read.append(os.path.basename(p))
+        with open(file_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
 
         tail = request.args.get("tail", type=int)
         if tail and tail > 0:
@@ -2722,7 +2744,7 @@ def get_log_content():
             "success": True,
             "script": script,
             "date": date_str,
-            "files": files_read,
+            "file_name": file_name,
             "total_lines": len(lines),
             "content": "".join(lines),
         }), 200
