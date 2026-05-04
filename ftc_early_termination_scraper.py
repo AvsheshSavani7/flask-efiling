@@ -135,33 +135,43 @@ def match_with_llm(title):
         for d in deals
     ])
 
-    prompt = f"""You are an expert M&A deal matcher. Determine if ANY company mentioned in the FTC early termination notice appears in our deals database.
+    prompt = f"""You are an expert M&A deal matcher. Determine whether this FTC Early Termination Notice directly refers to a specific deal in our deals database.
 
 DEALS DATABASE:
 {deals_text}
 
-FTC EARLY TERMINATION NOTICE (Acquiring Party; Acquired Party):
+FTC EARLY TERMINATION NOTICE:
 {title}
 
 INSTRUCTIONS:
-1. Extract ALL company names from the notice (acquiring party and acquired party).
-2. Check if ANY of these names appears as either Target OR Acquirer in the deals database.
-3. Consider variations, abbreviations, and partial matches (e.g., "Coursera, Inc." matches "Coursera").
-4. Match on a SINGLE company name - you don't need both companies to match.
+1. Extract only the company names that are explicitly and directly mentioned in the FTC Early Termination Notice text.
+2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, service providers, or any company not actually written in the FTC Early Termination Notice text.
+3. For each deal in the deals database, check whether:
+   - the Acquirer (or its known alias), AND
+   - the Target (or its known alias)
+   are both directly mentioned in the FTC Early Termination Notice text.
+4. A deal is a valid match only if BOTH sides of the same deal are confidently matched from the FTC Early Termination Notice text:
+   - one match for the Acquirer side
+   - one match for the Target side
+5. Do not return a match if only one side is present, even if that single company is an exact match.
+6. Allow only normal name variations when they clearly refer to the same company, such as:
+   - punctuation differences
+   - “Inc.” vs “Incorporated”
+   - “Corp.” vs “Corporation”
+   - “Ltd” vs “Limited”
+   - obvious spacing/casing differences
+7. Do not match based only on sector, business type, article topic, indirect association, or partial deal overlap.
+8. If the FTC Early Termination Notice does not directly name both companies for the same deal, return None.
 
 RESPONSE FORMAT:
-- If you find ANY match, respond EXACTLY:
-  Match: DEAL_ID|COMPANY_NAME|(target|acquirer)
-  Example: Match: 69665014d0bb42af1044aecd|Coursera, Inc.|acquirer
-
-- If NO match, respond with:
-  None"""
-
+If BOTH the Acquirer and Target for one deal are directly matched, respond EXACTLY: Match: DEAL_ID
+If no deal satisfies this rule, respond exactly: None
+"""
     try:
         res = client.chat.completions.create(
             model="gpt-5.2",
             messages=[
-                {"role": "system", "content": "You are an expert M&A deal matcher. Respond only with Match: DEAL_ID|COMPANY|target|acquirer or None."},
+                {"role": "system", "content": "You are an expert M&A deal matcher. Respond only with Match: DEAL_ID or None."},
                 {"role": "user", "content": prompt},
             ]
 
@@ -566,20 +576,16 @@ def main():
             logger.info("Date: %s", date_str)
 
             deal_match = None
-            matched_company = None
-            matched_role = None
 
             result = match_with_llm(title)
             logger.info("LLM Result: %s", result)
 
             if result and result.lower().startswith("match"):
                 try:
-                    match_pattern = r"Match:\s*([^|]+)\|([^|]+)\|(target|acquirer)"
+                    match_pattern = r"Match:\s*(\S+)"
                     m = re.search(match_pattern, result, re.IGNORECASE)
                     if m:
                         deal_id = m.group(1).strip()
-                        matched_company = m.group(2).strip()
-                        matched_role = m.group(3).strip().lower()
 
                         for d in deals:
                             if d.get("deal_id") == deal_id:
@@ -589,7 +595,7 @@ def main():
                                 target = deal_match.get("target") or deal_match.get(
                                     "target_name", "N/A")
                                 logger.info(
-                                    "Match: %s / %s (on %s)", acquirer, target, matched_role
+                                    "Match: %s / %s", acquirer, target
                                 )
                                 break
 
@@ -616,8 +622,6 @@ def main():
                     "acquired_party": record.get("acquired_party", ""),
                     "acquired_entities": record.get("acquired_entities", []),
                     "detail_url": record.get("detail_url", ""),
-                    "matched_company": matched_company or "",
-                    "matched_role": matched_role or "",
                 }
                 if save_ftc_data_to_deal(deal_match, ftc_data):
                     send_ftc_match_email_via_webhook(ftc_data, deal_match)
