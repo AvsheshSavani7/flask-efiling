@@ -95,9 +95,9 @@ def _log_critical_error_and_email(msg: str, context: dict | None = None):
 def _goto_with_retry(page, url, max_retries=2):
     """Navigate to a URL with retries and fallback wait strategies."""
     strategies = [
-        ("networkidle", 120000),
+        ("networkidle", 90000),
+        ("domcontentloaded", 90000),
         ("domcontentloaded", 120000),
-        ("domcontentloaded", 150000),
     ]
     for attempt in range(max_retries):
         wait_until, timeout = strategies[min(attempt, len(strategies) - 1)]
