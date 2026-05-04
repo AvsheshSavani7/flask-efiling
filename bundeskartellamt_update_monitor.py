@@ -27,7 +27,7 @@ import sys
 import time
 import traceback
 import logging
-import builtins
+from logging.handlers import RotatingFileHandler
 import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
@@ -42,6 +42,7 @@ from html import escape as escape_html
 from llm_verification_service import verify_country_relation
 from bundeskartellamt_initial_proxy import match_deal_with_llm
 from error_email_service import send_error_email
+from log_utils import cleanup_old_logs
 
 load_dotenv(".env")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -60,6 +61,11 @@ FIELD_LABELS = {
     "diploma": "Abschluss (Conclusion)",
 }
 
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
+
 
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
@@ -72,7 +78,7 @@ def _get_log_file() -> str:
 LOG_FILE = _get_log_file()
 
 logger = logging.getLogger("bundeskartellamt_update_monitor")
-logger.setLevel(logging.INFO)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 
 
 class _ISTFormatter(logging.Formatter):
@@ -88,7 +94,12 @@ class _ISTFormatter(logging.Formatter):
 
 if not logger.handlers:
     formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
     fh.setFormatter(formatter)
     logger.addHandler(fh)
     sh = logging.StreamHandler(sys.stdout)
@@ -96,22 +107,10 @@ if not logger.handlers:
     logger.addHandler(sh)
 logger.propagate = False
 
-
-def _logged_print(*args, level: str = "info", **kwargs):
-    msg = " ".join(str(a) for a in args)
-    if level == "error":
-        logger.error(msg)
-    elif level == "warning":
-        logger.warning(msg)
-    else:
-        logger.info(msg)
-    builtins.print(*args, **kwargs)
+cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 
 
-print = _logged_print  # type: ignore
-
-
-def _log_error_and_email(msg: str, context: Optional[dict] = None):
+def _log_critical_error_and_email(msg: str, context: Optional[dict] = None):
     logger.error(msg)
     send_error_email(
         script_name=SCRIPT_NAME,
@@ -152,22 +151,22 @@ def fetch_html_with_proxy(url, max_retries=3):
         for label, proxies in [("DE residential proxy", _build_proxy_dict()), ("Direct (no proxy)", None)]:
             try:
                 if attempt > 1:
-                    print(f"   🌐 [{attempt}/{max_retries}] {label}...")
+                    logger.info(f"   [{attempt}/{max_retries}] {label}...")
                 else:
-                    print(f"   🌐 Strategy: {label}...")
+                    logger.info(f"   Strategy: {label}...")
                 resp = requests.get(url, headers=FETCH_HEADERS,
                                     proxies=proxies, timeout=45)
-                print(
-                    f"   📃 HTTP {resp.status_code}, {len(resp.text):,} chars")
+                logger.info(
+                    f"   HTTP {resp.status_code}, {len(resp.text):,} chars")
                 if resp.status_code == 200 and len(resp.text) > 500:
-                    print(f"   ✅ Success via {label}\n")
+                    logger.info(f"   Success via {label}")
                     return resp.text
-                print(
-                    f"   ⚠️ Got HTTP {resp.status_code} — trying next strategy...")
+                logger.warning(
+                    f"   Got HTTP {resp.status_code} — trying next strategy...")
             except Exception as e:
-                print(f"   ❌ {label} failed: {e}")
+                logger.error(f"   {label} failed: {e}")
         if attempt < max_retries:
-            print(f"   ⏳ Retrying in 5s...")
+            logger.info(f"   Retrying in 5s...")
             time.sleep(5)
     raise RuntimeError(
         "All fetch strategies failed — could not reach Bundeskartellamt")
@@ -191,10 +190,10 @@ def fetch_open_german_cases(collection) -> List[Dict[str, Any]]:
         for doc in docs:
             if "_id" in doc:
                 doc["_doc_id"] = doc["_id"]
-        print(f"✅ Loaded {len(docs)} open german_cases to monitor")
+        logger.info(f"Loaded {len(docs)} open german_cases to monitor")
         return docs
     except Exception as e:
-        print(f"⚠️ Error fetching german_cases: {e}")
+        logger.warning(f"Error fetching german_cases: {e}")
         return []
 
 
@@ -214,10 +213,10 @@ def fetch_deals() -> List[Dict[str, Any]]:
         for d in deals:
             if "_id" in d:
                 d["deal_id"] = str(d["_id"])
-        print(f"✅ Fetched {len(deals)} open/unknown deals from MongoDB")
+        logger.info(f"Fetched {len(deals)} open/unknown deals from MongoDB")
         return deals
     except Exception as e:
-        print(f"⚠️ Error fetching deals: {e}")
+        logger.warning(f"Error fetching deals: {e}")
         return []
 
 
@@ -231,7 +230,7 @@ def update_german_case(collection, doc_id, update_fields: Dict) -> bool:
         )
         return result.modified_count > 0
     except Exception as e:
-        print(f"   ⚠️ Error updating german_case: {e}")
+        logger.warning(f"   Error updating german_case: {e}")
         return False
 
 
@@ -256,7 +255,7 @@ def translate_to_english(text: str) -> str:
             if parts:
                 return " ".join(parts).strip()
     except Exception as e:
-        print(f"⚠️ Translation failed for: {text[:50]}... → {e}")
+        logger.warning(f"Translation failed for: {text[:50]}... → {e}")
     return "[Translation failed]"
 
 
@@ -314,22 +313,25 @@ def fetch_all_listing_rows() -> Dict[str, Dict[str, str]]:
 
     while page_num <= max_pages:
         url = _page_url(page_num)
-        print(f"   📄 Page {page_num}: fetching...")
+        logger.info(f"   Page {page_num}: fetching...")
         try:
             html = fetch_html_with_proxy(url)
+            logger.info(f"HTML: {html}")
         except RuntimeError as e:
-            print(f"   ❌ Failed to fetch page {page_num}: {e}")
+            logger.error(f"   Failed to fetch page {page_num}: {e}")
             break
 
         rows = extract_raw_table_rows(html)
+        logger.info(f"Rows: {rows}")
         if not rows:
-            print(f"   🏁 No rows on page {page_num}, stopping")
+            logger.info(f"   No rows on page {page_num}, stopping")
             break
 
         page_fns = {r.get("file_number", "") for r in rows}
         new_fns = page_fns - seen
         if not new_fns:
-            print(f"   🏁 Page {page_num} returned duplicate rows, stopping")
+            logger.info(
+                f"   Page {page_num} returned duplicate rows, stopping")
             break
         seen.update(page_fns)
 
@@ -338,11 +340,12 @@ def fetch_all_listing_rows() -> Dict[str, Dict[str, str]]:
             if fn:
                 lookup[fn] = r
 
-        print(f"   📋 Page {page_num}: {len(rows)} rows ({len(new_fns)} new)")
+        logger.info(
+            f"   Page {page_num}: {len(rows)} rows ({len(new_fns)} new)")
         page_num += 1
         time.sleep(2)
 
-    print(f"   ✅ Total listing rows: {len(lookup)}\n")
+    logger.info(f"   Total listing rows: {len(lookup)}")
     return lookup
 
 
@@ -353,6 +356,8 @@ def fetch_all_listing_rows() -> Dict[str, Dict[str, str]]:
 def detect_changes(stored: Dict, live: Dict) -> List[Tuple[str, str, str]]:
     """Compare stored record vs live row. Returns [(field, old_value, new_value), ...]."""
     changes = []
+    logger.info(f"Stored: {stored}")
+    logger.info(f"Live: {live}")
     for field in COMPARED_FIELDS:
         old_val = (stored.get(field) or "").strip()
         new_val = (live.get(field) or "").strip()
@@ -507,10 +512,10 @@ def send_email_via_webhook(subject: str, html: str, file_number: str = "",
         resp = requests.post(webhook_url, json=payload,
                              headers={"Content-Type": "application/json"}, timeout=30)
         resp.raise_for_status()
-        print(f"   ✅ Email sent ({resp.status_code})")
+        logger.info(f"   Email sent ({resp.status_code})")
         return True
     except Exception as e:
-        print(f"   ⚠️ Email failed: {e}")
+        logger.warning(f"   Email failed: {e}")
         return False
 
 
@@ -520,65 +525,70 @@ def send_email_via_webhook(subject: str, html: str, file_number: str = "",
 
 def main():
     run_start = time.time()
+    error_items: List[Dict[str, Any]] = []
     logger.info("=" * 60)
-    logger.info("Starting Germany Cases Update Monitor")
+    logger.info("[STEP 1] Starting Germany Cases Update Monitor")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
-    print(f"\n{'='*60}\n🔄 BUNDESKARTELLAMT UPDATE MONITOR\n{'='*60}\n")
+    logger.info("BUNDESKARTELLAMT UPDATE MONITOR")
 
     success, message = init_mongodb_connection(".env")
     if not success:
-        _log_error_and_email(f"MongoDB init failed: {message}", {"step": "init_mongodb_connection"})
+        _log_critical_error_and_email(f"MongoDB init failed: {message}", {
+                                      "step": "init_mongodb_connection"})
         return {"success": False, "error": message}
 
     # 1. Fetch deals
     deals = fetch_deals()
-    deal_by_id = {str(d.get("deal_id", ""))                  : d for d in deals if d.get("deal_id")}
+    deal_by_id = {str(d.get("deal_id", "")): d for d in deals if d.get("deal_id")}
 
     # 2. Fetch german_cases (is_open=True)
     gc_collection = get_german_cases_collection()
     if gc_collection is None:
-        _log_error_and_email("german_cases collection not available", {"step": "get_german_cases_collection"})
+        _log_critical_error_and_email("german_cases collection not available", {
+                                      "step": "get_german_cases_collection"})
         return {"success": False, "error": "german_cases collection unavailable"}
 
     open_cases = fetch_open_german_cases(gc_collection)
+    logger.info(f"Open cases: {open_cases}")
     if not open_cases:
-        print("ℹ️ No open german_cases to monitor")
+        logger.info("No open german_cases to monitor")
         return {"success": True, "message": "No open cases"}
 
     # 3. Fetch ALL listing pages → build file_number → live_row lookup
-    print("📍 Fetching complete listing for comparison...")
+    logger.info("Fetching complete listing for comparison...")
     live_lookup = fetch_all_listing_rows()
 
     # 4. Compare each stored case against live data
     stats = {"checked": 0, "unchanged": 0, "updated": 0, "not_found": 0,
              "email_sent": 0, "matched_new": 0, "usa_related": 0}
 
-    print(f"{'='*60}\n🔍 Checking {len(open_cases)} open cases for updates...\n{'='*60}\n")
+    logger.info(f"Checking {len(open_cases)} open cases for updates...")
 
     for idx, stored in enumerate(open_cases, 1):
         fn = stored.get("file_number", "")
         doc_id = stored.get("_doc_id") or stored.get("_id")
         stats["checked"] += 1
 
-        print(f"[{idx}/{len(open_cases)}] {fn}")
+        logger.info(f"[{idx}/{len(open_cases)}] {fn}")
 
         # Find live row
         live = live_lookup.get(fn)
         if live is None:
-            print(f"  ⏩ Not found in listing — skipping")
+            logger.info(f"  Not found in listing — skipping")
             stats["not_found"] += 1
             continue
 
         # Detect changes
         changes = detect_changes(stored, live)
+        logger.info(f"Changes: {changes}")
         if not changes:
-            print(f"  ✅ No changes")
+            logger.info(f"  No changes")
             stats["unchanged"] += 1
             continue
 
         changed_field_names = [f for f, _, _ in changes]
-        print(f"  📝 Changes: {', '.join(changed_field_names)}")
+        logger.info(f"  Changes: {', '.join(changed_field_names)}")
 
         # Build update dict with new values + translations for changed fields
         update_fields: Dict[str, Any] = {}
@@ -593,7 +603,7 @@ def main():
         new_is_open = determine_is_open(new_diploma)
         if new_is_open != stored.get("is_open"):
             update_fields["is_open"] = new_is_open
-            print(f"  📌 is_open: {stored.get('is_open')} → {new_is_open}")
+            logger.info(f"  is_open: {stored.get('is_open')} → {new_is_open}")
 
         # Update stored dict in-memory for email generation
         merged = {**stored, **update_fields}
@@ -616,15 +626,15 @@ def main():
                 except Exception:
                     pass
             if deal:
-                print(f"  🎯 Has deal_id → sending [FRMD] update email")
+                logger.info(f"  Has deal_id → sending [FRMD] update email")
                 subject, html = generate_update_email(merged, changes, deal)
                 send_email_via_webhook(subject, html, fn,
                                        deal_id=str(stored_deal_id),
                                        changed_fields=changed_field_names)
                 stats["email_sent"] += 1
             else:
-                print(
-                    f"  ⚠️ deal_id {stored_deal_id} not found in deals — treating as unmatched")
+                logger.warning(
+                    f"  deal_id {stored_deal_id} not found in deals — treating as unmatched")
                 stored_deal_id = None
 
         if not stored_deal_id:
@@ -643,8 +653,8 @@ def main():
                 # Matched → send [FRMD], set deal_id
                 deal = deal_match
                 update_fields["deal_id"] = deal_match.get("deal_id")
-                print(
-                    f"  🎯 New match: {matched_company} → sending [FRMD] update email")
+                logger.info(
+                    f"  New match: {matched_company} → sending [FRMD] update email")
                 subject, html = generate_update_email(merged, changes, deal)
                 send_email_via_webhook(subject, html, fn,
                                        deal_id=deal_match.get("deal_id"),
@@ -653,7 +663,7 @@ def main():
                 stats["matched_new"] += 1
             else:
                 # Path C: no match → USA check
-                print(f"  ➖ No deal match")
+                logger.info(f"  No deal match")
                 try:
                     company_details = {
                         "today_date": datetime.now().strftime("%Y-%m-%d"),
@@ -663,16 +673,17 @@ def main():
                         company_details=company_details, country="USA", case_type="GERMANY"
                     )
                 except Exception as e:
-                    print(f"  ⚠️ USA check failed: {e}")
-                    _log_error_and_email(
-                        f"USA check failed: {e}",
-                        {"step": "verify_country_relation", "file_number": fn},
-                    )
+                    logger.exception(f"USA check failed: {e}")
+                    error_items.append({
+                        "file_number": fn,
+                        "error": str(e),
+                        "step": "verify_country_relation",
+                    })
                     is_usa = False
 
                 if is_usa:
                     # Path C1: USA-related → send [FRUD]
-                    print(f"  🇺🇸 USA-related → sending [FRUD] update email")
+                    logger.info(f"  USA-related → sending [FRUD] update email")
                     subject, html = generate_update_email(
                         merged, changes, None)
                     send_email_via_webhook(subject, html, fn,
@@ -681,26 +692,29 @@ def main():
                     stats["usa_related"] += 1
                 else:
                     # Path C2: not USA → silent update
-                    print(f"  💾 Not USA-related → silent update")
+                    logger.info(f"  Not USA-related → silent update")
 
         # Always update DB
         if update_fields and doc_id:
             ok = update_german_case(gc_collection, doc_id, update_fields)
             if ok:
                 stats["updated"] += 1
-                print(f"  ✅ DB updated")
+                logger.info(f"  DB updated")
             else:
-                print(f"  ❌ DB update failed")
+                logger.error(f"  DB update failed")
+
+    if error_items:
+        send_error_email(
+            script_name=SCRIPT_NAME,
+            error_message=f"{len(error_items)} errors occurred during run",
+            context={
+                "error_count": len(error_items),
+                "errors": error_items[:20],
+            },
+            traceback_str=None,
+        )
 
     # Summary
-    print(f"\n{'='*60}\n✅ UPDATE MONITOR DONE\n{'='*60}")
-    print(f"📊 Checked: {stats['checked']}")
-    print(f"✅ Unchanged: {stats['unchanged']}")
-    print(f"⏩ Not found in listing: {stats['not_found']}")
-    print(f"📝 Updated: {stats['updated']}")
-    print(f"📧 Emails sent: {stats['email_sent']}")
-    print(f"🎯 New deal matches: {stats['matched_new']}")
-    print(f"🇺🇸 USA-related: {stats['usa_related']}\n")
     elapsed = round(time.time() - run_start, 1)
     logger.info("=" * 60)
     logger.info("SUMMARY")
@@ -727,5 +741,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        _log_error_and_email(f"Unhandled error in main: {e}", {"step": "main"})
+        _log_critical_error_and_email(
+            f"Unhandled error in main: {e}", {"step": "main"})
         raise

@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-import builtins
+from logging.handlers import RotatingFileHandler
 import sys
 import traceback
 import time
@@ -22,6 +22,7 @@ from mongodb_connection import (
 from llm_verification_service import verify_usa_relation
 from accc_cases_register import match_case_to_deal
 from error_email_service import send_error_email
+from log_utils import cleanup_old_logs
 
 
 load_dotenv(".env")
@@ -34,6 +35,11 @@ PERSISTENT_LOG_DIR = "/var/data/logs"
 SCRIPT_NAME = "australia_cases_update_monitor"
 LOGGER_NAME = "accc_cases_update_monitor"
 IST = timezone(timedelta(hours=5, minutes=30))
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
 
 def _get_log_file() -> str:
@@ -48,7 +54,7 @@ LOG_FILE = _get_log_file()
 
 # Create module logger
 logger = logging.getLogger(LOGGER_NAME)
-logger.setLevel(logging.INFO)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 
 # Avoid adding handlers multiple times if module is reloaded
 if not logger.handlers:
@@ -64,37 +70,27 @@ if not logger.handlers:
 
     formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
 
-    file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
-    file_handler.setLevel(logging.INFO)
+    file_handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
     stream_handler = logging.StreamHandler()
-    stream_handler.setLevel(logging.INFO)
+    stream_handler.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
     stream_handler.setFormatter(formatter)
     logger.addHandler(stream_handler)
 
+logger.propagate = False
 
-def _logged_print(*args, level: str = "info", **kwargs):
-    """
-    Replacement for print that also logs to a file via the module logger.
-    """
-    msg = " ".join(str(a) for a in args)
-    if level == "error":
-        logger.error(msg)
-    elif level == "warning":
-        logger.warning(msg)
-    else:
-        logger.info(msg)
-    # Still echo to original stdout for local runs
-    builtins.print(*args, **kwargs)
+cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 
 
-# Monkey-patch print in this module so all existing print() calls are logged.
-print = _logged_print  # type: ignore
-
-
-def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
     logger.error(msg)
     send_error_email(
         script_name=SCRIPT_NAME,
@@ -102,6 +98,7 @@ def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
         context=context,
         traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
     )
+
 
 # OpenAI client for LLM matching
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -143,7 +140,7 @@ def fetch_current_case_from_page(page, url: str) -> Optional[Dict[str, Any]]:
     a fresh snapshot of the case from the detail page.
     """
     try:
-        print(f"    📄 Fetching detail page: {url}")
+        logger.info(f"    Fetching detail page: {url}")
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(5000)
 
@@ -188,7 +185,7 @@ def fetch_current_case_from_page(page, url: str) -> Optional[Dict[str, Any]]:
             if date_elem:
                 case["effective_notification_date"] = extract_text(date_elem)
         except Exception as e:
-            print(f"    ⚠️ Error extracting summary fields: {e}")
+            logger.warning(f"    Error extracting summary fields: {e}")
 
         # Status block
         status_info: Dict[str, Any] = {}
@@ -222,7 +219,7 @@ def fetch_current_case_from_page(page, url: str) -> Optional[Dict[str, Any]]:
                     pub_date_elem
                 )
         except Exception as e:
-            print(f"    ⚠️ Error extracting status section: {e}")
+            logger.warning(f"    Error extracting status section: {e}")
 
         if status_info:
             case["status"] = status_info
@@ -328,7 +325,7 @@ def fetch_current_case_from_page(page, url: str) -> Optional[Dict[str, Any]]:
                     pass
                 about["description"] = extract_text(desc_elem)
         except Exception as e:
-            print(f"    ⚠️ Error extracting About the acquisition: {e}")
+            logger.warning(f"    Error extracting About the acquisition: {e}")
 
         if about:
             case["about_the_acquisition"] = about
@@ -392,18 +389,18 @@ def fetch_current_case_from_page(page, url: str) -> Optional[Dict[str, Any]]:
                 except Exception:
                     continue
         except Exception as e:
-            print(f"    ⚠️ Error extracting decisions/events: {e}")
+            logger.warning(f"    Error extracting decisions/events: {e}")
 
         if events:
             case["decisions_and_key_events"] = events
 
         if not case.get("case_number"):
-            print("    ⚠️ No case_number on detail page; skipping")
+            logger.warning("    No case_number on detail page; skipping")
             return None
 
         return case
     except Exception as e:
-        print(f"    ❌ Error fetching detail page {url}: {e}")
+        logger.error(f"    Error fetching detail page {url}: {e}")
         return None
 
 
@@ -427,6 +424,8 @@ def detect_changes(
     Returns list of (field_label, old_value, new_value, change_type).
     """
     changes: List[Tuple[str, Any, Any, str]] = []
+    logger.info(f"[STEP 1.8] Detect changes: old_case: {old_case}")
+    logger.info(f"[STEP 1.9] Detect changes: new_case: {new_case}")
 
     # Recursive diff for arbitrary nested structures (dicts/lists/scalars)
     def diff_recursive(path: str, old: Any, new: Any):
@@ -972,7 +971,7 @@ def send_update_email(
 
         import requests
 
-        print(f"    📤 Sending email via n8n webhook: {N8N_WEBHOOK_URL}")
+        logger.info(f"    Sending email via n8n webhook: {N8N_WEBHOOK_URL}")
         resp = requests.post(
             N8N_WEBHOOK_URL,
             json=payload,
@@ -980,10 +979,10 @@ def send_update_email(
             timeout=30,
         )
         resp.raise_for_status()
-        print(f"    ✅ Email sent successfully! Status: {resp.status_code}")
+        logger.info(f"    Email sent successfully! Status: {resp.status_code}")
         return True
     except Exception as e:
-        print(f"    ⚠️ Error sending email: {e}")
+        logger.warning(f"    Error sending email: {e}")
         return False
 
 
@@ -993,7 +992,7 @@ def update_case_document(
     try:
         _id = case_doc.get("_id")
         if not _id:
-            print("    ⚠️ Case document has no _id; cannot update")
+            logger.warning("    Case document has no _id; cannot update")
             return False
 
         # Preserve existing linkage fields such as deal_id and usa_related
@@ -1008,44 +1007,45 @@ def update_case_document(
 
         result = collection.update_one({"_id": _id}, {"$set": updated})
         if result.modified_count > 0:
-            print("    ✅ Updated case document in accc_cases")
+            logger.info("    Updated case document in accc_cases")
         else:
-            print("    ℹ️ No DB changes made (document already up to date)")
+            logger.info("    No DB changes made (document already up to date)")
         return True
     except Exception as e:
-        _log_error_and_email(
-            f"Error updating case document: {e}",
-            {"case_number": case_doc.get("case_number", "N/A"), "step": "update_case_document"},
-        )
+        logger.exception(f"Error updating case document: {e}")
         return False
 
 
 def process_accc_cases_updates():
+    logger.info("[STEP 1] Starting ACCC Cases Update Monitor")
     run_start = time.time()
     error_count = 0
+    error_items: List[Dict[str, Any]] = []
     logger.info("=" * 60)
-    logger.info("Starting ACCC Cases Update Monitor")
+    logger.info("[STEP 1] Starting ACCC Cases Update Monitor")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
-    print("🚀 Starting ACCC Cases Register update monitor\n")
+    logger.info("[STEP 1.1] Starting ACCC Cases Register update monitor")
 
-    print("🔌 Initializing MongoDB connection...")
+    logger.info("[STEP 1.2] Initializing MongoDB connection...")
     success, message = init_mongodb_connection(ENV_PATH)
     if not success:
-        _log_error_and_email(
+        _log_critical_error_and_email(
             f"MongoDB connection failed: {message}",
             {"step": "mongodb_connect"},
         )
         return
-    print(f"✅ {message}\n")
+    logger.info(f"[STEP 1.3] {message}")
 
     if not is_connected():
-        _log_error_and_email("MongoDB not connected. Exiting.", {"step": "mongodb_connect"})
+        _log_critical_error_and_email("MongoDB not connected. Exiting.", {
+            "step": "mongodb_connect"})
         return
 
     cases_collection = get_accc_cases_collection()
     if cases_collection is None:
-        _log_error_and_email("Could not access 'accc_cases' collection. Exiting.", {"step": "get_collection"})
+        _log_critical_error_and_email("Could not access 'accc_cases' collection. Exiting.", {
+            "step": "get_collection"})
         return
 
     deals_collection = get_deals_collection()
@@ -1056,10 +1056,13 @@ def process_accc_cases_updates():
     )
     cases = list(cursor)
     if not cases:
-        print("⚠️ No ACCC cases with acquisition_status 'Under Assessment' found.")
+        print(
+            "[STEP 1.4] No ACCC cases with acquisition_status 'Under Assessment' found.")
         return
 
-    print(f"📊 Found {len(cases)} ACCC cases with status 'Under Assessment'\n")
+    logger.info(
+        f"[STEP 1.5] Found {len(cases)} ACCC cases with status 'Under Assessment'")
+    logger.info(f"[STEP 1.6] Existing Cases: {cases}")
 
     total_checked = 0
     total_changed = 0
@@ -1087,6 +1090,7 @@ def process_accc_cases_updates():
             },
         )
         page = context.new_page()
+        logger.info(f"[STEP 1.7] Page: {page}")
 
         for idx, case_doc in enumerate(cases, 1):
             total_checked += 1
@@ -1094,20 +1098,21 @@ def process_accc_cases_updates():
             title = case_doc.get("title", "N/A")
             url = case_doc.get("url")
 
-            print(f"[{idx}/{len(cases)}] Case {case_number}: {title}")
+            logger.info(f"[{idx}/{len(cases)}] Case {case_number}: {title}")
             if not url:
-                print("  ⚠️ No URL stored for this case; skipping")
+                logger.warning("  No URL stored for this case; skipping")
                 continue
 
             current_case = fetch_current_case_from_page(page, url)
-            print("Accc daily monitor check: current_case:1 ", current_case)
+            logger.info(
+                f"Accc daily monitor check: current_case:1 {current_case}")
 
             if not current_case:
-                print("  ⚠️ Could not fetch current case info; skipping")
+                logger.warning("  Could not fetch current case info; skipping")
                 continue
 
-            print(f"  🔄 Case doc: {case_doc}")
-            print(f"  🔄 Current case: {current_case}")
+            logger.info(f"  Case doc: {case_doc}")
+            logger.info(f"  Current case: {current_case}")
 
             # Scrapers can occasionally omit fields due to transient DOM issues
             # or selector drift. Treat "missing from scrape" as "unknown",
@@ -1132,27 +1137,29 @@ def process_accc_cases_updates():
                 and not current_case.get("decisions_and_key_events")
                 and case_doc.get("decisions_and_key_events")
             ):
-                print("  ℹ️ decisions_and_key_events missing/empty; preserving existing")
+                logger.info(
+                    "  decisions_and_key_events missing/empty; preserving existing")
                 current_case["decisions_and_key_events"] = case_doc.get(
                     "decisions_and_key_events"
                 )
 
             changes = detect_changes(case_doc, current_case)
             if not changes:
-                print("  ✅ No changes detected")
+                logger.info("  No changes detected")
                 continue
 
             total_changed += 1
-            print(f"  🔄 Changes detected ({len(changes)} fields)")
+            logger.info(f"  Changes detected ({len(changes)} fields)")
             for label, old_val, new_val, change_type in changes:
                 if label == "Decisions and key events":
                     count = len(new_val) if isinstance(new_val, list) else 0
-                    print(f"    • {label}: {count} new event(s) (NEW)")
+                    logger.info(f"    - {label}: {count} new event(s) (NEW)")
                 else:
                     old_disp = "N/A" if old_val is None else str(old_val)
                     new_disp = "N/A" if new_val is None else str(new_val)
                     tag = "NEW" if change_type == "new" else "UPDATED"
-                    print(f"    • {label}: {old_disp} → {new_disp} ({tag})")
+                    logger.info(
+                        f"    - {label}: {old_disp} → {new_disp} ({tag})")
 
             deal = None
             # Step 6.1: if record already has deal_id, just send email + update
@@ -1162,11 +1169,11 @@ def process_accc_cases_updates():
                     oid = ObjectId(deal_id)
                     deal = deals_collection.find_one({"_id": oid})
                 except Exception as e:
-                    print(f"  ⚠️ Invalid deal_id on case: {e}")
+                    logger.warning(f"  Invalid deal_id on case: {e}")
 
                 if deal:
-                    print(
-                        "  🔗 Case already linked to a deal; sending email and updating")
+                    logger.info(
+                        "  Case already linked to a deal; sending email and updating")
                     send_update_email(case_doc, current_case, deal, changes)
                     update_case_document(
                         cases_collection, case_doc, current_case)
@@ -1175,24 +1182,24 @@ def process_accc_cases_updates():
             # Step 6.2: try to match to a deal via LLM
             matched_deal_id = match_case_to_deal(title)
 
-            print(f"  🔍 Matched: {matched_deal_id}")
+            logger.info(f"  Matched: {matched_deal_id}")
             if matched_deal_id:
                 deal_id_str = matched_deal_id
-                print(f"  🎯 LLM matched case to deal {deal_id_str}")
+                logger.info(f"  LLM matched case to deal {deal_id_str}")
 
                 # Always record the matched deal_id on the case, even if we can't
                 # resolve it to a full deal document (for traceability).
                 current_case["deal_id"] = deal_id_str
 
                 # Try to fetch the full deal document for richer email content.
-                print(f"  🔍 Deals collection: {deals_collection}")
+                logger.info(f"  Deals collection: {deals_collection}")
                 if deals_collection is not None:
                     try:
                         oid = ObjectId(deal_id_str)
                         deal = deals_collection.find_one({"_id": oid})
                     except Exception as e:
-                        print(
-                            f"  ⚠️ Invalid or unresolved deal_id from LLM: {e}")
+                        logger.warning(
+                            f"  Invalid or unresolved deal_id from LLM: {e}")
                         deal = None
                 else:
                     deal = None
@@ -1217,32 +1224,47 @@ URL: {url}
                     case_type="ACCC",
                 )
             except Exception as e:
-                print(f"  ⚠️ Error verifying USA relation: {e}")
-                _log_error_and_email(
-                    f"Error verifying USA relation: {e}",
-                    {"case_number": case_number, "step": "verify_usa_relation"},
-                )
+                logger.exception(f"Error verifying USA relation: {e}")
+                error_items.append({
+                    "case_number": case_number,
+                    "error": str(e),
+                    "step": "verify_usa_relation",
+                })
                 error_count += 1
                 is_usa = False
 
             if is_usa:
-                print("  🇺🇸 Case appears USA-related; sending email and updating")
+                logger.info(
+                    "  Case appears USA-related; sending email and updating")
                 # current_case["usa_related"] = True
                 send_update_email(case_doc, current_case,
                                   None, changes, is_usa=True)
                 update_case_document(cases_collection, case_doc, current_case)
             else:
-                print("  ℹ️ Not USA-related and no deal match; updating case only")
+                logger.info(
+                    "  Not USA-related and no deal match; updating case only")
                 update_case_document(cases_collection, case_doc, current_case)
 
         browser.close()
 
-    print("\n" + "=" * 60)
-    print("📊 Summary:")
-    print(f"   Total cases checked: {total_checked}")
-    print(f"   Cases with changes: {total_changed}")
-    print("=" * 60 + "\n")
-    print("🎉 Done!")
+    logger.info("=" * 60)
+    logger.info("Summary:")
+    logger.info(f"   Total cases checked: {total_checked}")
+    logger.info(f"   Cases with changes: {total_changed}")
+    logger.info("=" * 60)
+    logger.info("Done!")
+
+    if error_items:
+        send_error_email(
+            script_name=SCRIPT_NAME,
+            error_message=f"{len(error_items)} errors occurred during run",
+            context={
+                "error_count": len(error_items),
+                "errors": error_items[:20],
+            },
+            traceback_str=None,
+        )
+
     elapsed = round(time.time() - run_start, 1)
     logger.info("=" * 60)
     logger.info("SUMMARY")

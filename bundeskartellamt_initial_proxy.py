@@ -20,7 +20,7 @@ import sys
 import time
 import traceback
 import logging
-import builtins
+from logging.handlers import RotatingFileHandler
 import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
@@ -34,6 +34,7 @@ from mongodb_connection import (
 from html import escape as escape_html
 from llm_verification_service import verify_country_relation
 from error_email_service import send_error_email
+from log_utils import cleanup_old_logs
 
 load_dotenv(".env")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -50,6 +51,11 @@ IST = timezone(timedelta(hours=5, minutes=30))
 CUTOFF_DATE = (datetime.now() - timedelta(days=15)
                ).replace(hour=0, minute=0, second=0, microsecond=0)
 
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
+
 
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
@@ -62,7 +68,7 @@ def _get_log_file() -> str:
 LOG_FILE = _get_log_file()
 
 logger = logging.getLogger("bundeskartellamt_initial_proxy")
-logger.setLevel(logging.INFO)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 
 
 class _ISTFormatter(logging.Formatter):
@@ -78,7 +84,12 @@ class _ISTFormatter(logging.Formatter):
 
 if not logger.handlers:
     formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
     fh.setFormatter(formatter)
     logger.addHandler(fh)
     sh = logging.StreamHandler(sys.stdout)
@@ -86,22 +97,10 @@ if not logger.handlers:
     logger.addHandler(sh)
 logger.propagate = False
 
-
-def _logged_print(*args, level: str = "info", **kwargs):
-    msg = " ".join(str(a) for a in args)
-    if level == "error":
-        logger.error(msg)
-    elif level == "warning":
-        logger.warning(msg)
-    else:
-        logger.info(msg)
-    builtins.print(*args, **kwargs)
+cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 
 
-print = _logged_print  # type: ignore
-
-
-def _log_error_and_email(msg: str, context: Optional[dict] = None):
+def _log_critical_error_and_email(msg: str, context: Optional[dict] = None):
     logger.error(msg)
     send_error_email(
         script_name=SCRIPT_NAME,
@@ -143,22 +142,22 @@ def fetch_html_with_proxy(url, max_retries=3):
         for label, proxies in [("DE residential proxy", _build_proxy_dict()), ("Direct (no proxy)", None)]:
             try:
                 if attempt > 1:
-                    print(f"   🌐 [{attempt}/{max_retries}] {label}...")
+                    logger.info(f"   [{attempt}/{max_retries}] {label}...")
                 else:
-                    print(f"   🌐 Strategy: {label}...")
+                    logger.info(f"   Strategy: {label}...")
                 resp = requests.get(url, headers=FETCH_HEADERS,
                                     proxies=proxies, timeout=45)
-                print(
-                    f"   📃 HTTP {resp.status_code}, {len(resp.text):,} chars")
+                logger.info(
+                    f"   HTTP {resp.status_code}, {len(resp.text):,} chars")
                 if resp.status_code == 200 and len(resp.text) > 500:
-                    print(f"   ✅ Success via {label}\n")
+                    logger.info(f"   Success via {label}")
                     return resp.text
-                print(
-                    f"   ⚠️ Got HTTP {resp.status_code} — trying next strategy...")
+                logger.warning(
+                    f"   Got HTTP {resp.status_code} — trying next strategy...")
             except Exception as e:
-                print(f"   ❌ {label} failed: {e}")
+                logger.error(f"   {label} failed: {e}")
         if attempt < max_retries:
-            print(f"   ⏳ Retrying in 5s...")
+            logger.info(f"   Retrying in 5s...")
             time.sleep(5)
     raise RuntimeError(
         "All fetch strategies failed — could not reach Bundeskartellamt")
@@ -184,10 +183,10 @@ def fetch_open_german_cases(collection) -> Dict[str, dict]:
             fn = doc.get("file_number", "")
             if fn:
                 lookup[fn] = doc
-        print(f"✅ Loaded {len(lookup)} open german_cases for dedup")
+        logger.info(f"Loaded {len(lookup)} open german_cases for dedup")
         return lookup
     except Exception as e:
-        print(f"⚠️ Error fetching german_cases: {e}")
+        logger.warning(f"Error fetching german_cases: {e}")
         return {}
 
 
@@ -207,10 +206,10 @@ def fetch_deals() -> List[Dict[str, Any]]:
         for d in deals:
             if "_id" in d:
                 d["deal_id"] = str(d["_id"])
-        print(f"✅ Fetched {len(deals)} open/unknown deals from MongoDB")
+        logger.info(f"Fetched {len(deals)} open/unknown deals from MongoDB")
         return deals
     except Exception as e:
-        print(f"⚠️ Error fetching deals: {e}")
+        logger.warning(f"Error fetching deals: {e}")
         return []
 
 
@@ -219,7 +218,7 @@ def insert_german_case(collection, doc: Dict[str, Any]) -> Optional[str]:
         result = collection.insert_one(doc)
         return str(result.inserted_id)
     except Exception as e:
-        print(f"⚠️ Error inserting german_case: {e}")
+        logger.warning(f"Error inserting german_case: {e}")
         return None
 
 
@@ -249,7 +248,7 @@ def translate_to_english(text: str) -> str:
             if parts:
                 return " ".join(parts).strip()
     except Exception as e:
-        print(f"⚠️ Translation failed for: {text[:50]}... → {e}")
+        logger.warning(f"Translation failed for: {text[:50]}... → {e}")
     return "[Translation failed]"
 
 
@@ -272,7 +271,7 @@ def extract_raw_table_rows(html_content: str) -> List[Dict[str, str]]:
     records = []
     tables = soup.find_all("table")
     if not tables:
-        print("⚠️ No table found in HTML")
+        logger.warning("No table found in HTML")
         return records
 
     for table in tables:
@@ -291,7 +290,7 @@ def extract_raw_table_rows(html_content: str) -> List[Dict[str, str]]:
                 }
                 records.append(record)
             except Exception as e:
-                print(f"⚠️ Error extracting row: {e}")
+                logger.warning(f"Error extracting row: {e}")
                 continue
     return records
 
@@ -340,36 +339,38 @@ def fetch_all_records_with_pagination(cutoff: date) -> List[Dict]:
 
     while page_num <= max_pages:
         url = _page_url(page_num)
-        print(f"   📄 Page {page_num}: fetching...")
+        logger.info(f"   Page {page_num}: fetching...")
         try:
             html = fetch_html_with_proxy(url)
+            logger.info(f"HTML: {html}")
         except RuntimeError as e:
-            print(f"   ❌ Failed to fetch page {page_num}: {e}")
+            logger.error(f"   Failed to fetch page {page_num}: {e}")
             break
 
         raw_rows = extract_raw_table_rows(html)
+        logger.info(f"Raw rows: {raw_rows}")
         if not raw_rows:
-            print(f"   🏁 No rows on page {page_num}, stopping")
+            logger.info(f"   No rows on page {page_num}, stopping")
             break
 
         # Detect duplicate page (same rows = pagination URL not working)
         page_fns = {r.get("file_number", "") for r in raw_rows}
         new_fns = page_fns - seen_file_numbers
         if not new_fns:
-            print(
-                f"   🏁 Page {page_num} returned duplicate rows, stopping pagination")
+            logger.info(
+                f"   Page {page_num} returned duplicate rows, stopping pagination")
             break
         seen_file_numbers.update(page_fns)
 
-        print(
-            f"   📋 Page {page_num}: {len(raw_rows)} rows ({len(new_fns)} new)")
+        logger.info(
+            f"   Page {page_num}: {len(raw_rows)} rows ({len(new_fns)} new)")
 
         filtered, reached_cutoff = filter_by_cutoff(raw_rows, cutoff)
         all_records.extend(filtered)
 
         if reached_cutoff:
-            print(
-                f"   🏁 Reached cutoff date on page {page_num}, stopping pagination")
+            logger.info(
+                f"   Reached cutoff date on page {page_num}, stopping pagination")
             break
 
         page_num += 1
@@ -433,9 +434,9 @@ INSTRUCTIONS:
 5. Do not return a match if only one side is present, even if that single company is an exact match.
 6. Allow only normal name variations when they clearly refer to the same company, such as:
    - punctuation differences
-   - “Inc.” vs “Incorporated”
-   - “Corp.” vs “Corporation”
-   - “Ltd” vs “Limited”
+   - "Inc." vs "Incorporated"
+   - "Corp." vs "Corporation"
+   - "Ltd" vs "Limited"
    - obvious spacing/casing differences
 7. Do not match based only on sector, business type, article topic, indirect association, or partial deal overlap.
 8. If the German case text does not directly name both companies for the same deal, return None.
@@ -453,10 +454,10 @@ RESPONSE FORMAT:
             ]
         )
         result = response.choices[0].message.content.strip()
-        print(f"   🧠 LLM match: {result}")
+        logger.info(f"   LLM match: {result}")
         return result
     except Exception as e:
-        print(f"⚠️ LLM Error: {e}")
+        logger.warning(f"LLM Error: {e}")
         return "None"
 
 
@@ -591,10 +592,10 @@ def send_email_via_webhook(subject: str, html: str, file_number: str = "",
         resp = requests.post(webhook_url, json=payload,
                              headers={"Content-Type": "application/json"}, timeout=30)
         resp.raise_for_status()
-        print(f"   ✅ Email sent ({resp.status_code})")
+        logger.info(f"   Email sent ({resp.status_code})")
         return True
     except Exception as e:
-        print(f"   ⚠️ Email failed: {e}")
+        logger.warning(f"   Email failed: {e}")
         return False
 
 
@@ -604,61 +605,65 @@ def send_email_via_webhook(subject: str, html: str, file_number: str = "",
 
 def main():
     run_start = time.time()
+    error_items: List[Dict[str, Any]] = []
     logger.info("=" * 60)
-    logger.info("Starting Germany Cases Register")
+    logger.info("[STEP 1] Starting Germany Cases Register")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
-    print(f"\n{'='*60}\n🚀 BUNDESKARTELLAMT LAUFENDE VERFAHREN (Proxy)\n{'='*60}\n")
+    logger.info("BUNDESKARTELLAMT LAUFENDE VERFAHREN (Proxy)")
 
     # Step 1: MongoDB init
     success, message = init_mongodb_connection(".env")
     if not success:
-        _log_error_and_email(f"MongoDB init failed: {message}", {"step": "init_mongodb_connection"})
+        _log_critical_error_and_email(f"MongoDB init failed: {message}", {
+                                      "step": "init_mongodb_connection"})
         return {"success": False, "error": message}
 
     # Step 1a: Fetch deals
     deals = fetch_deals()
-    deal_by_id = {str(d.get("deal_id", ""))
-                      : d for d in deals if d.get("deal_id")}
+    deal_by_id = {str(d.get("deal_id", ""))                  : d for d in deals if d.get("deal_id")}
 
     # Step 2: Fetch german_cases (is_open=True) for dedup
     gc_collection = get_german_cases_collection()
     if gc_collection is None:
-        _log_error_and_email("german_cases collection not available", {"step": "get_german_cases_collection"})
+        _log_critical_error_and_email("german_cases collection not available", {
+                                      "step": "get_german_cases_collection"})
         return {"success": False, "error": "german_cases collection unavailable"}
 
     existing_cases = fetch_open_german_cases(gc_collection)
+    logger.info(f"Existing cases: {existing_cases}")
     existing_file_numbers: Set[str] = set(existing_cases.keys())
 
     # Step 3+4+5: Fetch HTML, extract rows, paginate until cutoff
     cutoff = CUTOFF_DATE.date() if isinstance(
         CUTOFF_DATE, datetime) else CUTOFF_DATE
-    print(f"📍 Fetching records (cutoff >= {cutoff})...")
+    logger.info(f"Fetching records (cutoff >= {cutoff})...")
     all_raw_records = fetch_all_records_with_pagination(cutoff)
-    print(f"   ✅ Total records after cutoff: {len(all_raw_records)}\n")
+    logger.info(f"All raw records: {all_raw_records}")
+    logger.info(f"   Total records after cutoff: {len(all_raw_records)}")
 
     # Save raw extracted records
     try:
         with open(EXTRACTED_RECORDS_JSON, "w", encoding="utf-8") as f:
             json.dump(all_raw_records, f, ensure_ascii=False, indent=2)
-        print(f"📁 Saved raw records to {EXTRACTED_RECORDS_JSON}\n")
+        logger.info(f"Saved raw records to {EXTRACTED_RECORDS_JSON}")
     except Exception as e:
-        print(f"⚠️ Could not save JSON: {e}\n")
+        logger.warning(f"Could not save JSON: {e}")
 
     # Step 6–10: Process each record
     stats = {"new": 0, "skipped": 0, "matched": 0,
              "usa_related": 0, "saved": 0}
 
-    print(f"{'='*60}\n🔍 Processing {len(all_raw_records)} records...\n{'='*60}\n")
+    logger.info(f"Processing {len(all_raw_records)} records...")
 
     for idx, raw in enumerate(all_raw_records, 1):
         fn = raw.get("file_number", "")
-        print(
+        logger.info(
             f"[{idx}/{len(all_raw_records)}] {fn} — {raw.get('pursue', '')[:60]}...")
 
         # Step 6: Dedup — skip if file_number exists in german_cases
         if fn in existing_file_numbers:
-            print(f"  ⏩ Already in german_cases, skipping")
+            logger.info(f"  Already in german_cases, skipping")
             stats["skipped"] += 1
             continue
 
@@ -687,7 +692,8 @@ def main():
             "updated_at": utc_now_iso(),
         }
 
-        print(f"  📋 {fn}: pursue_en={pursue_en[:50]}... | is_open={is_open}")
+        logger.info(
+            f"  {fn}: pursue_en={pursue_en[:50]}... | is_open={is_open}")
 
         # Step 8: LLM match against deals
         deal_match = None
@@ -703,7 +709,7 @@ def main():
             # Deal matched → send [FRMD] email, save with deal_id
             record["deal_id"] = deal_match.get("deal_id")
 
-            print(f"  🎯 Matched: {matched_company} ({matched_role})")
+            logger.info(f"  Matched: {matched_company} ({matched_role})")
 
             subject, html = generate_matched_email(record, deal_match)
             send_email_via_webhook(
@@ -712,7 +718,7 @@ def main():
 
         else:
             # Step 9: Not matched → check USA-related
-            print(f"  ➖ No deal match")
+            logger.info(f"  No deal match")
             try:
                 company_details = {
                     "today_date": datetime.now().strftime("%Y-%m-%d"),
@@ -722,20 +728,21 @@ def main():
                     company_details=company_details, country="USA", case_type="GERMANY"
                 )
             except Exception as e:
-                print(f"  ⚠️ USA check failed: {e}")
-                _log_error_and_email(
-                    f"USA check failed: {e}",
-                    {"step": "verify_country_relation", "file_number": fn},
-                )
+                logger.exception(f"USA check failed: {e}")
+                error_items.append({
+                    "file_number": fn,
+                    "error": str(e),
+                    "step": "verify_country_relation",
+                })
                 is_usa = False
 
             if is_usa:
-                print(f"  🇺🇸 USA-related → sending [FRUD] email")
+                logger.info(f"  USA-related → sending [FRUD] email")
                 subject, html = generate_usa_related_email(record)
                 send_email_via_webhook(subject, html, fn)
                 stats["usa_related"] += 1
             else:
-                print(f"  💾 Not USA-related → silent save")
+                logger.info(f"  Not USA-related → silent save")
 
         # Step 10: Save to german_cases
         inserted_id = insert_german_case(gc_collection, record)
@@ -743,18 +750,22 @@ def main():
             stats["saved"] += 1
             stats["new"] += 1
             existing_file_numbers.add(fn)
-            print(f"  ✅ Saved to german_cases (id={inserted_id})")
+            logger.info(f"  Saved to german_cases (id={inserted_id})")
         else:
-            print(f"  ❌ Failed to save to german_cases")
+            logger.error(f"  Failed to save to german_cases")
+
+    if error_items:
+        send_error_email(
+            script_name=SCRIPT_NAME,
+            error_message=f"{len(error_items)} errors occurred during run",
+            context={
+                "error_count": len(error_items),
+                "errors": error_items[:20],
+            },
+            traceback_str=None,
+        )
 
     # Summary
-    print(f"\n{'='*60}\n✅ DONE\n{'='*60}")
-    print(f"📊 Total extracted: {len(all_raw_records)}")
-    print(f"⏩ Skipped (existing): {stats['skipped']}")
-    print(f"🆕 New records saved: {stats['new']}")
-    print(f"🎯 Deal matches: {stats['matched']}")
-    print(f"🇺🇸 USA-related: {stats['usa_related']}")
-    print(f"📁 JSON: {EXTRACTED_RECORDS_JSON}\n")
     elapsed = round(time.time() - run_start, 1)
     logger.info("=" * 60)
     logger.info("SUMMARY")
@@ -782,5 +793,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        _log_error_and_email(f"Unhandled error in main: {e}", {"step": "main"})
+        _log_critical_error_and_email(
+            f"Unhandled error in main: {e}", {"step": "main"})
         raise

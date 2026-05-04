@@ -67,7 +67,8 @@ logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 
 if not logger.handlers:
     formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
-    fh = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8")
+    fh = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES,
+                             backupCount=LOG_BACKUP_COUNT, encoding="utf-8")
     fh.setFormatter(formatter)
     logger.addHandler(fh)
     sh = logging.StreamHandler(sys.stdout)
@@ -88,7 +89,8 @@ def _log_critical_error_and_email(msg: str, context: dict | None = None):
         traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
     )
 
-def _goto_with_retry(page, url, max_retries=3):
+
+def _goto_with_retry(page, url, max_retries=2):
     """Navigate to a URL with retries and fallback wait strategies."""
     strategies = [
         ("networkidle", 120000),
@@ -98,14 +100,15 @@ def _goto_with_retry(page, url, max_retries=3):
     for attempt in range(max_retries):
         wait_until, timeout = strategies[min(attempt, len(strategies) - 1)]
         try:
-            print(f"   Attempt {attempt + 1}/{max_retries} (wait_until={wait_until}, timeout={timeout}ms)")
+            logger.info(
+                f"   Attempt {attempt + 1}/{max_retries} (wait_until={wait_until}, timeout={timeout}ms)")
             page.goto(url, wait_until=wait_until, timeout=timeout)
             return
         except Exception as e:
-            print(f"   ⚠️ Attempt {attempt + 1} failed: {e}")
+            logger.warning(f"   Attempt {attempt + 1} failed: {e}")
             if attempt < max_retries - 1:
                 delay = 5 * (attempt + 1)
-                print(f"   ⏳ Waiting {delay}s before retry...")
+                logger.info(f"   Waiting {delay}s before retry...")
                 time.sleep(delay)
             else:
                 raise
@@ -148,7 +151,7 @@ def record_exists_in_samr_unconditional(url):
             return False
         return col.find_one({"url": url}) is not None
     except Exception as e:
-        print(f"⚠️ Error checking samr_unconditional: {e}")
+        logger.warning(f"Error checking samr_unconditional: {e}")
         return False
 
 
@@ -168,15 +171,15 @@ def save_to_samr_unconditional(record):
     try:
         col = get_samr_unconditional_collection()
         if col is None:
-            print("⚠️ samr_unconditional collection not available")
+            logger.warning("samr_unconditional collection not available")
             return False
 
         record["processed_at"] = datetime.datetime.now().isoformat()
         col.update_one({"url": record["url"]}, {"$set": record}, upsert=True)
-        print(f"💾 Saved to samr_unconditional: {record['url'][:80]}...")
+        logger.info(f"Saved to samr_unconditional: {record['url'][:80]}...")
         return True
     except Exception as e:
-        print(f"⚠️ Error saving to samr_unconditional: {e}")
+        logger.warning(f"Error saving to samr_unconditional: {e}")
         return False
 
 
@@ -185,7 +188,7 @@ def get_all_samr_cases():
     try:
         col = get_samr_cases_collection()
         if col is None:
-            print("⚠️ samr_cases collection not available")
+            logger.warning("samr_cases collection not available")
             return []
         query = {
             "$or": [
@@ -197,10 +200,10 @@ def get_all_samr_cases():
         for doc in docs:
             if "_id" in doc:
                 doc["_id_str"] = str(doc["_id"])
-        print(f"✅ Fetched {len(docs)} open samr_cases records")
+        logger.info(f"Fetched {len(docs)} open samr_cases records")
         return docs
     except Exception as e:
-        print(f"⚠️ Error fetching samr_cases: {e}")
+        logger.warning(f"Error fetching samr_cases: {e}")
         return []
 
 
@@ -212,7 +215,7 @@ def update_samr_case_unconditional(samr_case, unconditional_data, deal_id=None):
     try:
         col = get_samr_cases_collection()
         if col is None:
-            print("⚠️ samr_cases collection not available")
+            logger.warning("samr_cases collection not available")
             return False
 
         update_fields = {
@@ -227,10 +230,10 @@ def update_samr_case_unconditional(samr_case, unconditional_data, deal_id=None):
             {"$set": update_fields},
         )
         title = samr_case.get("title_en", samr_case.get("title_cn", ""))[:60]
-        print(f"✅ Updated samr_case with unconditional node: {title}...")
+        logger.info(f"Updated samr_case with unconditional node: {title}...")
         return True
     except Exception as e:
-        print(f"⚠️ Error updating samr_case: {e}")
+        logger.warning(f"Error updating samr_case: {e}")
         return False
 
 
@@ -243,7 +246,8 @@ def get_deals_from_mongodb():
     try:
         collection = get_deals_collection()
         if collection is None:
-            print("⚠️ MongoDB connection not available. Deals collection not accessible.")
+            logger.warning(
+                "MongoDB connection not available. Deals collection not accessible.")
             return []
 
         query = {
@@ -260,19 +264,17 @@ def get_deals_from_mongodb():
                 deal["deal_id"] = str(deal["_id"])
                 deal.pop("_id", None)
 
-        print(f"✅ Fetched {len(all_deals)} deals from MongoDB")
+        logger.info(f"Fetched {len(all_deals)} deals from MongoDB")
         return all_deals
     except Exception as e:
-        print(f"⚠️ Error fetching deals from MongoDB: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"Error fetching deals from MongoDB: {e}")
         return []
 
 
 def load_deals():
     global deals
     deals = get_deals_from_mongodb()
-    print(f"📊 Loaded {len(deals)} deals from MongoDB")
+    logger.info(f"Loaded {len(deals)} deals from MongoDB")
     return deals
 
 
@@ -289,7 +291,7 @@ def translate_to_english(text):
         if response.status_code == 200:
             return response.json()[0][0][0]
     except Exception as e:
-        print(f"⚠️ Translation failed for: {text[:50]}... → {e}")
+        logger.warning(f"Translation failed for: {text[:50]}... → {e}")
     return "[Translation failed]"
 
 
@@ -337,10 +339,10 @@ def extract_records_from_html(html_content):
                 "date": date_text,
             }
             records.append(record)
-            print(f"📋 Extracted: {date_text} - {title_en}")
+            logger.info(f"Extracted: {date_text} - {title_en}")
 
         except Exception as e:
-            print(f"⚠️ Error extracting record: {e}")
+            logger.warning(f"Error extracting record: {e}")
             continue
 
     return records
@@ -348,23 +350,24 @@ def extract_records_from_html(html_content):
 
 def extract_page_records(page, page_num=1):
     """Extract records from the current listing page. Returns (records_list, should_stop)."""
-    print(f"\n{'='*60}")
-    print(f"📄 PAGE {page_num}: Extracting records...")
-    print(f"{'='*60}")
+    logger.info(f"{'='*60}")
+    logger.info(f"PAGE {page_num}: Extracting records...")
+    logger.info(f"{'='*60}")
 
     page.wait_for_selector("div.page-content ul li", timeout=100000)
 
     html_content = page.content()
+    logger.info(f"HTML content: {html_content}")
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     html_path = os.path.join(
         HTML_OUTPUT_DIR, f"listing_page_{page_num}_{timestamp}.html")
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_content)
-    print(f"💾 Saved HTML: {os.path.basename(html_path)}")
+    logger.info(f"Saved HTML: {os.path.basename(html_path)}")
 
     page_records = extract_records_from_html(html_content)
-    print(f"📊 Found {len(page_records)} records on page")
+    logger.info(f"Found {len(page_records)} records on page")
 
     filtered_records = []
     should_stop = False
@@ -376,15 +379,16 @@ def extract_page_records(page, page_num=1):
             if record_date >= CUTOFF_DATE:
                 filtered_records.append(record)
             else:
-                print(
-                    f"🛑 Found record older than cutoff: {record_date.date()} < {CUTOFF_DATE.date()}")
+                logger.info(
+                    f"Found record older than cutoff: {record_date.date()} < {CUTOFF_DATE.date()}, stopping extraction")
                 should_stop = True
                 break
         except Exception as e:
-            print(f"⚠️ Error parsing date for record: {e}")
+            logger.warning(f"Error parsing date for record: {e}")
             filtered_records.append(record)
 
-    print(f"✅ Kept {len(filtered_records)} records (filtered out {len(page_records) - len(filtered_records)} old records)")
+    logger.info(
+        f"Kept {len(filtered_records)} records (filtered out {len(page_records) - len(filtered_records)} old records)")
     return filtered_records, should_stop
 
 
@@ -417,7 +421,7 @@ def extract_table_rows_from_detail(context, url):
 
         table = soup.find("table")
         if not table:
-            print("  ⚠️ No table found on detail page")
+            logger.warning("  No table found on detail page")
             return rows_out
 
         trs = table.find_all("tr")
@@ -452,12 +456,10 @@ def extract_table_rows_from_detail(context, url):
                 "operators_en": operators_en,
                 "approval_date": approval_date,
             })
-            print(f"    📋 Row {serial}: {case_name_en[:70]}")
+            logger.info(f"    Row {serial}: {case_name_en[:70]}")
 
     except Exception as e:
-        print(f"  ❌ Error extracting table from {url}: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"  Error extracting table from {url}: {e}")
     finally:
         new_page.close()
 
@@ -521,7 +523,7 @@ RESPONSE:
             ],
         )
         result = response.choices[0].message.content.strip()
-        print(f"    🧠 samr_cases match LLM: {result}")
+        logger.info(f"    samr_cases match LLM: {result}")
 
         if result.lower().startswith("match"):
             matched_id = result.replace(
@@ -532,7 +534,7 @@ RESPONSE:
                     return sc
         return None
     except Exception as e:
-        print(f"    ⚠️ LLM Error (samr_cases match): {e}")
+        logger.warning(f"    LLM Error (samr_cases match): {e}")
         return None
 
 
@@ -613,7 +615,7 @@ RESPONSE:
             ],
         )
         result = response.choices[0].message.content.strip()
-        print(f"    🧠 Deal match LLM: {result}")
+        logger.info(f"    Deal match LLM: {result}")
 
         if result.lower() != "none" and result.lower().startswith("match"):
             deal_id = result.replace(
@@ -623,12 +625,12 @@ RESPONSE:
                 if deal.get("deal_id") == deal_id:
                     return deal, result
 
-            print(
-                f"    ⚠️ LLM returned deal_id '{deal_id}' but not found in loaded deals")
+            logger.warning(
+                f"    LLM returned deal_id '{deal_id}' but not found in loaded deals")
 
         return None, "None"
     except Exception as e:
-        print(f"    ⚠️ LLM Error (deal match): {e}")
+        logger.warning(f"    LLM Error (deal match): {e}")
         return None, "None"
 
 
@@ -750,7 +752,7 @@ def send_samr_unconditional_email_via_webhook(samr_case, deal_match, uncondition
     try:
         subject, html_email = generate_samr_unconditional_email_html(
             samr_case, deal_match, unconditional_data)
-        print(f"📝 Generated email subject: {subject}")
+        logger.info(f"Generated email subject: {subject}")
 
         webhook_url = os.getenv(
             "N8N_WEBHOOK_URL",
@@ -782,15 +784,13 @@ def send_samr_unconditional_email_via_webhook(samr_case, deal_match, uncondition
             headers={'Content-Type': 'application/json'}, timeout=60,
         )
         response.raise_for_status()
-        print(f"✅ Email sent successfully! Status: {response.status_code}")
+        logger.info(f"Email sent successfully! Status: {response.status_code}")
         return True
     except requests.exceptions.RequestException as e:
-        print(f"⚠️ Error sending email via webhook: {e}")
+        logger.warning(f"Error sending email via webhook: {e}")
         return False
     except Exception as e:
-        print(f"⚠️ Error generating/sending email: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"Error generating/sending email: {e}")
         return False
 
 
@@ -881,7 +881,7 @@ def send_unmatched_unconditional_email_via_webhook(samr_case, unconditional_data
     try:
         subject, html_email = generate_unmatched_unconditional_email_html(
             samr_case, unconditional_data, usa_companies)
-        print(f"📝 Generated email subject: {subject}")
+        logger.info(f"Generated email subject: {subject}")
 
         webhook_url = os.getenv(
             "N8N_WEBHOOK_URL",
@@ -908,15 +908,13 @@ def send_unmatched_unconditional_email_via_webhook(samr_case, unconditional_data
             headers={'Content-Type': 'application/json'}, timeout=60,
         )
         response.raise_for_status()
-        print(f"✅ Email sent successfully! Status: {response.status_code}")
+        logger.info(f"Email sent successfully! Status: {response.status_code}")
         return True
     except requests.exceptions.RequestException as e:
-        print(f"⚠️ Error sending email via webhook: {e}")
+        logger.warning(f"Error sending email via webhook: {e}")
         return False
     except Exception as e:
-        print(f"⚠️ Error generating/sending email: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"Error generating/sending email: {e}")
         return False
 
 
@@ -928,12 +926,12 @@ def save_samr_unconditional_data_to_deal(deal_match, unconditional_data):
     """Save unconditional approval data to the deal under 'samr_unconditional' node."""
     try:
         if not is_connected():
-            print("⚠️ MongoDB connection not available")
+            logger.warning("MongoDB connection not available")
             return False
 
         collection = get_deals_collection()
         if collection is None:
-            print("⚠️ Deals collection not available")
+            logger.warning("Deals collection not available")
             return False
 
         query = {}
@@ -957,25 +955,25 @@ def save_samr_unconditional_data_to_deal(deal_match, unconditional_data):
                 query = {"$or": or_conds}
 
         if not query:
-            print("⚠️ Cannot identify deal, skipping save")
+            logger.warning("Cannot identify deal, skipping save")
             return False
 
         data = convert_datetime_to_string(unconditional_data)
 
         result = collection.update_one(
             query, {"$set": {"samr_unconditional": data}})
-        print(
-            f"📊 Update deals: matched={result.matched_count}, modified={result.modified_count}")
+        logger.info(
+            f"Update deals: matched={result.matched_count}, modified={result.modified_count}")
 
         if result.modified_count > 0 or result.matched_count > 0:
-            print(f"✅ Saved samr_unconditional to deal record")
+            logger.info("Saved samr_unconditional to deal record")
             return True
         else:
-            print(f"⚠️ Deal not found in MongoDB")
+            logger.warning("Deal not found in MongoDB")
             return False
 
     except Exception as e:
-        print(f"❌ Error saving unconditional to deal: {e}")
+        logger.exception(f"Error saving unconditional to deal: {e}")
         return False
 
 
@@ -994,7 +992,7 @@ def process_table_row(table_row, samr_cases_list, listing_record):
     3. If not matched → skip (no samr_cases record to link to)
     """
     row_label = f"Row {table_row['serial']}: {table_row['case_name_en'][:50]}"
-    print(f"\n  🔍 Processing {row_label}")
+    logger.info(f"  Processing {row_label}")
 
     unconditional_data = {
         "case_name_cn": table_row["case_name_cn"],
@@ -1009,19 +1007,19 @@ def process_table_row(table_row, samr_cases_list, listing_record):
     matched_case = match_table_row_to_samr_cases(table_row, samr_cases_list)
 
     if not matched_case:
-        print(f"  ➖ No samr_cases match for {row_label}")
+        logger.info(f"  No samr_cases match for {row_label}")
         return
 
     case_title = matched_case.get(
         "title_en", matched_case.get("title_cn", ""))
-    print(f"  ✅ Matched samr_case: {case_title}")
+    logger.info(f"  Matched samr_case: {case_title}")
 
     # Step 2: Update samr_case: add unconditional node + is_open=false
     existing_deal_id = matched_case.get("deal_id")
 
     if existing_deal_id:
         # Case A: samr_case already has a deal_id
-        print(f"  📌 samr_case has deal_id: {existing_deal_id}")
+        logger.info(f"  samr_case has deal_id: {existing_deal_id}")
         update_samr_case_unconditional(matched_case, unconditional_data)
 
         # Find the deal to get full info for email
@@ -1042,16 +1040,16 @@ def process_table_row(table_row, samr_cases_list, listing_record):
                 "unconditional": unconditional_data,
             })
         else:
-            print(
-                f"  ⚠️ deal_id {existing_deal_id} not found in loaded deals (may be closed)")
+            logger.warning(
+                f"  deal_id {existing_deal_id} not found in loaded deals (may be closed)")
     else:
         # Case B: no deal_id → try LLM deal matching
-        print(f"  🔎 No deal_id on samr_case, trying LLM deal match...")
+        logger.info("  No deal_id on samr_case, trying LLM deal match...")
         deal_match, match_result = match_samr_case_to_deals(matched_case)
 
         if deal_match:
             deal_id = deal_match.get("deal_id", "")
-            print(f"  ✅ Deal matched: {deal_id}")
+            logger.info(f"  Deal matched: {deal_id}")
             update_samr_case_unconditional(
                 matched_case, unconditional_data, deal_id=deal_id)
             save_samr_unconditional_data_to_deal(
@@ -1065,7 +1063,7 @@ def process_table_row(table_row, samr_cases_list, listing_record):
             })
         else:
             # Case C: no deal match → check USA-related
-            print(f"  ➖ No deal match. Checking USA relation...")
+            logger.info("  No deal match. Checking USA relation...")
             update_samr_case_unconditional(matched_case, unconditional_data)
 
             try:
@@ -1087,11 +1085,11 @@ Operators (CN): {table_row['operators_cn']}
                     usa_companies = []
 
                 if usa_companies:
-                    print(f"  🇺🇸 USA-related: {usa_companies}")
+                    logger.info(f"  USA-related: {usa_companies}")
                     send_unmatched_unconditional_email_via_webhook(
                         matched_case, unconditional_data, usa_companies)
                 else:
-                    print(f"  ℹ️ Not USA-related – no email")
+                    logger.info("  Not USA-related – no email")
             except Exception as e:
                 logger.exception(f"  Error verifying USA relation: {e}")
 
@@ -1114,51 +1112,54 @@ def main(headless=True):
     # Initialize MongoDB
     ok, msg = init_mongodb_connection(ENV_PATH)
     if ok:
-        print(f"✅ {msg}")
+        logger.info(msg)
     else:
-        _log_critical_error_and_email(f"MongoDB initialization failed: {msg}", {"step": "init_mongodb_connection"})
+        _log_critical_error_and_email(f"MongoDB initialization failed: {msg}", {
+                                      "step": "init_mongodb_connection"})
+        return {"success": False, "error": msg}
 
     # Load deals and samr_cases
-    print("📊 Loading deals from MongoDB...")
+    logger.info("Loading deals from MongoDB...")
     load_deals()
 
-    print("📊 Loading samr_cases from MongoDB...")
+    logger.info("Loading samr_cases from MongoDB...")
     samr_cases_list = get_all_samr_cases()
 
     # ------------------------------------------------------------------
     # PHASE 1: Scrape listing pages
     # ------------------------------------------------------------------
-    print(f"\n{'='*60}")
-    print(f"🚀 PHASE 1: EXTRACT UNCONDITIONAL APPROVAL LISTING RECORDS")
-    print(f"{'='*60}\n")
+    logger.info("PHASE 1: EXTRACT UNCONDITIONAL APPROVAL LISTING RECORDS")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
         context = browser.new_context()
         page = context.new_page()
 
+        logger.info(f"Page: {page}")
+
         try:
-            print(f"📍 Calling BASE_URL: {BASE_URL}")
+            logger.info(f"Calling BASE_URL: {BASE_URL}")
             _goto_with_retry(page, BASE_URL)
-            print(f"   ✅ Loaded\n")
+            logger.info("   Loaded")
 
             page_num = 1
             while True:
                 page_records, should_stop = extract_page_records(
                     page, page_num)
                 all_extracted_records.extend(page_records)
+                logger.info(f"Page records: {page_records}")
 
                 if should_stop:
-                    print(f"\n✅ Stopped: Cutoff date reached")
+                    logger.info("Stopped: Cutoff date reached")
                     break
 
                 try:
                     next_btn = page.get_by_text("下一页")
                     next_class = next_btn.get_attribute("class")
                     if next_class and "disabled" in next_class:
-                        print(f"\n✅ Stopped: No more pages")
+                        logger.info("Stopped: No more pages")
                         break
-                    print(f"\n➡️  Navigating to page {page_num + 1}...")
+                    logger.info(f"Navigating to page {page_num + 1}...")
                     next_btn.click()
                     page.wait_for_timeout(5000)
                     page_num += 1
@@ -1173,14 +1174,13 @@ def main(headless=True):
         finally:
             browser.close()
 
-    print(f"\n📊 Total listing records extracted: {len(all_extracted_records)}")
+    logger.info(
+        f"Total listing records extracted: {len(all_extracted_records)}")
 
     # ------------------------------------------------------------------
     # PHASE 2: Filter already-processed listings via samr_unconditional
     # ------------------------------------------------------------------
-    print(f"\n{'='*60}")
-    print(f"🚀 PHASE 2: FILTER ALREADY-PROCESSED LISTINGS")
-    print(f"{'='*60}\n")
+    logger.info("PHASE 2: FILTER ALREADY-PROCESSED LISTINGS")
 
     new_records = []
     skipped = 0
@@ -1191,36 +1191,36 @@ def main(headless=True):
             new_records.append(rec)
 
     if skipped:
-        print(f"⏭️ Skipped {skipped} already-processed listings")
-    print(f"🔍 {len(new_records)} new listings to process\n")
+        logger.info(f"Skipped {skipped} already-processed listings")
+    logger.info(f"{len(new_records)} new listings to process")
 
     # ------------------------------------------------------------------
     # PHASE 3: For each new listing, open detail → parse table → process rows
     # ------------------------------------------------------------------
-    print(f"{'='*60}")
-    print(f"🚀 PHASE 3: PROCESS DETAIL PAGES & TABLE ROWS")
-    print(f"{'='*60}\n")
+    logger.info("PHASE 3: PROCESS DETAIL PAGES & TABLE ROWS")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
         context = browser.new_context()
+
+        logger.info(f"Context: {context}")
 
         for idx, listing_record in enumerate(new_records, 1):
             title_en = listing_record.get("title_en", "")
             date_str = listing_record.get("date", "")
             detail_url = listing_record.get("url", "")
 
-            print(f"\n{'='*60}")
-            print(f"[{idx}/{len(new_records)}] {date_str} - {title_en[:70]}")
-            print(f"{'='*60}")
+            logger.info(
+                f"[{idx}/{len(new_records)}] {date_str} - {title_en[:70]}")
 
             if not detail_url:
-                print("  ⏩ Skipped (no URL)")
+                logger.info("  Skipped (no URL)")
                 continue
 
             # Extract table rows from detail page
             table_rows = extract_table_rows_from_detail(context, detail_url)
-            print(f"  📊 Extracted {len(table_rows)} table rows")
+            logger.info(f"  Extracted {len(table_rows)} table rows")
+            logger.info(f"Table rows: {table_rows}")
 
             # Process each row against samr_cases
             for table_row in table_rows:
@@ -1239,17 +1239,16 @@ def main(headless=True):
     # ------------------------------------------------------------------
     # Summary
     # ------------------------------------------------------------------
-    print(f"\n{'='*60}")
-    print(f"✅ ALL DONE!")
-    print(f"{'='*60}")
-    print(f"📊 Total listing records extracted: {len(all_extracted_records)}")
-    print(f"🆕 New listings processed: {len(new_records)}")
-    print(f"🎯 Total matches found: {len(matched_data)}")
-    print(f"{'='*60}\n")
+    logger.info("ALL DONE!")
+    logger.info(
+        f"Total listing records extracted: {len(all_extracted_records)}")
+    logger.info(f"New listings processed: {len(new_records)}")
+    logger.info(f"Total matches found: {len(matched_data)}")
     elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
     logger.info("=" * 60)
     logger.info("SUMMARY")
-    logger.info(f"  Total listings extracted     : {len(all_extracted_records)}")
+    logger.info(
+        f"  Total listings extracted     : {len(all_extracted_records)}")
     logger.info(f"  New listings processed       : {len(new_records)}")
     logger.info(f"  Total matches found          : {len(matched_data)}")
     logger.info(f"  Total time                   : {elapsed}s")
@@ -1273,19 +1272,20 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         if sys.argv[1] == "--headed":
             headless_mode = False
-            print("🖥️  Mode: Running with visible browser")
+            logger.info("Mode: Running with visible browser")
         elif sys.argv[1] == "--help":
-            print(
-                "\nUsage: python new_samr_unconditional_approval_db.py [OPTIONS]")
-            print("\nOptions:")
-            print("  --headed          Run browser in headed mode (visible)")
-            print("  --help            Show this help message")
-            print("\nDefault: Scrape new pages from SAMR website in headless mode\n")
+            logger.info(
+                "Usage: python new_samr_unconditional_approval_db.py [OPTIONS]")
+            logger.info(
+                "Options: --headed (visible browser), --help (this message)")
+            logger.info(
+                "Default: Scrape new pages from SAMR website in headless mode")
             sys.exit(0)
 
     logger.info("Mode: Scrape SAMR unconditional approval pages")
     try:
         main(headless=headless_mode)
     except Exception as e:
-        _log_critical_error_and_email(f"Unhandled error in main: {e}", {"step": "main"})
+        _log_critical_error_and_email(
+            f"Unhandled error in main: {e}", {"step": "main"})
         raise

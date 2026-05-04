@@ -6,11 +6,12 @@ from mongodb_connection import (
 )
 from llm_verification_service import verify_usa_relation
 from error_email_service import send_error_email
+from log_utils import cleanup_old_logs
 import os
 import json
 import sys
 import logging
-import builtins
+from logging.handlers import RotatingFileHandler
 import traceback
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
@@ -38,6 +39,11 @@ PERSISTENT_LOG_DIR = "/var/data/logs"
 SCRIPT_NAME = "australia_cases_register"
 IST = timezone(timedelta(hours=5, minutes=30))
 
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
+
 
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
@@ -49,7 +55,7 @@ def _get_log_file() -> str:
 
 LOG_FILE = _get_log_file()
 logger = logging.getLogger("accc_cases_register")
-logger.setLevel(logging.INFO)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
 
 
 class _ISTFormatter(logging.Formatter):
@@ -65,7 +71,12 @@ class _ISTFormatter(logging.Formatter):
 
 if not logger.handlers:
     formatter = _ISTFormatter("%(asctime)s | %(levelname)s | %(message)s")
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
     fh.setFormatter(formatter)
     logger.addHandler(fh)
     sh = logging.StreamHandler(sys.stdout)
@@ -73,27 +84,10 @@ if not logger.handlers:
     logger.addHandler(sh)
 logger.propagate = False
 
-
-def _logged_print(*args, level: str = "info", **kwargs):
-    """
-    Replacement for print that also logs via the module logger.
-    """
-    msg = " ".join(str(a) for a in args)
-    if level == "error":
-        logger.error(msg)
-    elif level == "warning":
-        logger.warning(msg)
-    else:
-        logger.info(msg)
-    # Still echo to original stdout for local runs
-    builtins.print(*args, **kwargs)
+cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 
 
-# Monkey-patch print in this module so existing print() calls are logged.
-print = _logged_print  # type: ignore
-
-
-def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
+def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
     logger.error(msg)
     send_error_email(
         script_name=SCRIPT_NAME,
@@ -101,6 +95,7 @@ def _log_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
         context=context,
         traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
     )
+
 
 # OpenAI client for deal matching
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -207,10 +202,10 @@ def parse_list_items(html_content: str) -> List[Dict[str, Any]]:
             if "case_number" in item and "url" in item:
                 items.append(item)
         except Exception as e:
-            print(f"⚠️ Error parsing list item #{idx + 1}: {e}")
+            logger.warning(f"Error parsing list item #{idx + 1}: {e}")
             continue
 
-    print(f"✅ Parsed {len(items)} items from list page")
+    logger.info(f"Parsed {len(items)} items from list page")
     return items
 
 
@@ -343,9 +338,9 @@ MATCHING INSTRUCTIONS:
 5. Do not return a match if only one side is present, even if that single company is an exact match.
 6. Allow only normal name variations when they clearly refer to the same company, such as:
    - punctuation differences
-   - “Inc.” vs “Incorporated”
-   - “Corp.” vs “Corporation”
-   - “Ltd” vs “Limited”
+   - "Inc." vs "Incorporated"
+   - "Corp." vs "Corporation"
+   - "Ltd" vs "Limited"
    - obvious spacing/casing differences
 7. Do not match based only on sector, business type, article topic, indirect association, or partial deal overlap.
 8. If the ACCC title does not directly name both companies for the same deal, return None.
@@ -377,7 +372,7 @@ RESPONSE FORMAT:
         except Exception:
             return None
     except Exception as e:
-        print(f"⚠️ LLM match error: {e}")
+        logger.warning(f"LLM match error: {e}")
         return None
 
 
@@ -392,7 +387,7 @@ def _post_email_payload(payload: Dict[str, Any]) -> bool:
         resp.raise_for_status()
         return True
     except Exception as e:
-        print(f"⚠️ Error sending email via webhook: {e}")
+        logger.warning(f"Error sending email via webhook: {e}")
         return False
 
 
@@ -472,7 +467,7 @@ def extract_detail_page_case(
     - Assessment completed / Waiver cases (with ACCC Determination, Determination publication date)
     """
     try:
-        print(f"  📄 Fetching detail page: {url}")
+        logger.info(f"  Fetching detail page: {url}")
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(5000)
 
@@ -520,7 +515,7 @@ def extract_detail_page_case(
             if date_elem:
                 case["effective_notification_date"] = extract_text(date_elem)
         except Exception as e:
-            print(f"  ⚠️ Error extracting summary fields: {e}")
+            logger.warning(f"  Error extracting summary fields: {e}")
 
         # Status section
         status_info: Dict[str, Any] = {}
@@ -556,7 +551,7 @@ def extract_detail_page_case(
                     pub_date_elem
                 )
         except Exception as e:
-            print(f"  ⚠️ Error extracting status section: {e}")
+            logger.warning(f"  Error extracting status section: {e}")
 
         if status_info:
             case["status"] = status_info
@@ -664,7 +659,7 @@ def extract_detail_page_case(
                     pass
                 about["description"] = extract_text(desc_elem)
         except Exception as e:
-            print(f"  ⚠️ Error extracting 'About the acquisition': {e}")
+            logger.warning(f"  Error extracting 'About the acquisition': {e}")
 
         if about:
             case["about_the_acquisition"] = about
@@ -732,19 +727,19 @@ def extract_detail_page_case(
                 except Exception:
                     continue
         except Exception as e:
-            print(f"  ⚠️ Error extracting decisions/consultation: {e}")
+            logger.warning(f"  Error extracting decisions/consultation: {e}")
 
         if events:
             case["decisions_and_key_events"] = events
 
         # Require a case_number to be useful
         if not case.get("case_number"):
-            print("  ⚠️ No case_number found on detail page; skipping")
+            logger.warning("  No case_number found on detail page; skipping")
             return None
 
         return case
     except Exception as e:
-        print(f"  ❌ Error extracting detail page {url}: {e}")
+        logger.error(f"  Error extracting detail page {url}: {e}")
         return None
 
 
@@ -755,7 +750,7 @@ def case_exists(collection, case_number: str) -> bool:
             {"case_number": case_number}, limit=1)
         return existing > 0
     except Exception as e:
-        print(f"⚠️ Error checking existing case {case_number}: {e}")
+        logger.warning(f"Error checking existing case {case_number}: {e}")
         return False
 
 
@@ -765,7 +760,7 @@ def insert_case(collection, case_info: Dict[str, Any]) -> Optional[str]:
         result = collection.insert_one(case_info)
         return str(result.inserted_id)
     except Exception as e:
-        print(f"⚠️ Error inserting case {case_info.get('case_number')}: {e}")
+        logger.warning(f"Error inserting case {case_info.get('case_number')}: {e}")
         return None
 
 
@@ -817,32 +812,35 @@ def run_accc_cases_register(test_mode: bool = False):
     """
     run_start = time.time()
     error_count = 0
+    error_items: List[Dict[str, Any]] = []
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"
     logger.info("=" * 60)
-    logger.info(f"Starting ACCC Cases Register ({mode_label})")
+    logger.info(f"[STEP 1] Starting ACCC Cases Register ({mode_label})")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
-    print(f"🚀 Starting ACCC Cases Register scraper ({mode_label})\n")
+    logger.info(f"Starting ACCC Cases Register scraper ({mode_label})")
 
     # Initialize MongoDB (still connect in test mode so we exercise full path,
     # but skip writes later)
-    print("🔌 Initializing MongoDB connection...")
+    logger.info("[STEP 1.1] Initializing MongoDB connection...")
     success, message = init_mongodb_connection(ENV_PATH)
     if not success:
-        _log_error_and_email(
+        _log_critical_error_and_email(
             f"MongoDB connection failed: {message}",
             {"step": "mongodb_connect"},
         )
         return
-    print(f"✅ {message}\n")
+    logger.info(f"[STEP 1.2] {message}")
 
     if not is_connected():
-        _log_error_and_email("MongoDB not connected. Exiting.", {"step": "mongodb_connect"})
+        _log_critical_error_and_email("MongoDB not connected. Exiting.", {
+                             "step": "mongodb_connect"})
         return
 
     collection = get_accc_cases_collection()
     if collection is None:
-        _log_error_and_email("Could not access 'accc_cases' collection. Exiting.", {"step": "get_collection"})
+        _log_critical_error_and_email("Could not access 'accc_cases' collection. Exiting.", {
+                             "step": "get_collection"})
         return
 
     new_cases: List[Dict[str, Any]] = []
@@ -850,8 +848,8 @@ def run_accc_cases_register(test_mode: bool = False):
     # ------------------------------------------------------------------
     # Step 1: Fetch list page HTML via residential proxy (requests)
     # ------------------------------------------------------------------
-    print(f"📄 Loading ACCC acquisitions register list page:\n   {LIST_URL}")
-    print(f"   🌐 Using residential proxy: {PROXY_HOST}:{PROXY_PORT}")
+    logger.info(f"Loading ACCC acquisitions register list page: {LIST_URL}")
+    logger.info(f"Using residential proxy: {PROXY_HOST}:{PROXY_PORT}")
 
     list_headers = {
         "User-Agent": (
@@ -876,19 +874,18 @@ def run_accc_cases_register(test_mode: bool = False):
             )
             resp.raise_for_status()
             items = parse_list_items(resp.text)
+            logger.info(f"[STEP 1.3] Items: {items}")
             if not items:
                 raise Exception("HTML fetched but no .views-row items found")
-            print(
-                f"✅ Found {len(items)} list items from acquisitions register")
+            logger.info(f"Found {len(items)} list items from acquisitions register")
             break
         except Exception as e:
-            print(
-                f"⚠️ Attempt {attempt}/{max_retries} failed loading list page: {e}")
+            logger.warning(f"Attempt {attempt}/{max_retries} failed loading list page: {e}")
             if attempt == max_retries:
-                print("❌ All retries exhausted; exiting")
+                logger.error("All retries exhausted; exiting")
                 return
             wait_time = 5 * attempt
-            print(f"   Retrying in {wait_time}s...")
+            logger.info(f"Retrying in {wait_time}s...")
             time.sleep(wait_time)
 
     # ------------------------------------------------------------------
@@ -917,7 +914,7 @@ def run_accc_cases_register(test_mode: bool = False):
             },
         )
         page = context.new_page()
-
+        logger.info(f"[STEP 2.1] Page: {page}")
         # Process each list item
         for idx, item in enumerate(items, 1):
             try:
@@ -925,22 +922,22 @@ def run_accc_cases_register(test_mode: bool = False):
                 url = item.get("url")
                 title = item.get("title", "")
 
-                print(f"\n[{idx}/{len(items)}] Case {case_number}: {title}")
+                logger.info(f"[{idx}/{len(items)}] Case {case_number}: {title}")
 
                 if not case_number or not url:
-                    print("  ⚠️ Missing case_number or url; skipping")
+                    logger.warning("  Missing case_number or url; skipping")
                     continue
 
                 # Step 2: skip if already in accc_cases (for live mode)
                 if not test_mode and case_exists(collection, case_number):
-                    print("  ⏩ Case already exists in accc_cases; skipping")
+                    logger.info("  Case already exists in accc_cases; skipping")
                     continue
 
                 # Step 3: fetch and parse detail page into case_info
                 case_info = extract_detail_page_case(page, url)
-                print("Accc daily check: case_info: ", case_info)
+                logger.info(f"Accc daily check: case_info: {case_info}")
                 if not case_info:
-                    print("  ⚠️ Could not extract case info; skipping")
+                    logger.warning("  Could not extract case info; skipping")
                     continue
 
                 # Ensure summary fields from list are preserved if missing from detail
@@ -973,23 +970,24 @@ def run_accc_cases_register(test_mode: bool = False):
                             case_info.get("title", "") or title
                         )
                     except Exception as e:
-                        print(f"  ⚠️ Error during deal matching: {e}")
-                        _log_error_and_email(
-                            f"Error during deal matching: {e}",
-                            {"case_number": case_number, "step": "match_case_to_deal"},
-                        )
+                        logger.exception(f"Error during deal matching: {e}")
+                        error_items.append({
+                            "case_number": case_number,
+                            "error": str(e),
+                            "step": "match_case_to_deal",
+                        })
                         error_count += 1
                         matched_deal_id = None
 
                     if matched_deal_id:
                         case_info["deal_id"] = matched_deal_id
-                        print(
-                            f"  🎯 Deal match found (deal_id={matched_deal_id})"
+                        logger.info(
+                            f"  Deal match found (deal_id={matched_deal_id})"
                         )
 
                     action = upsert_case_by_case_number(collection, case_info)
-                    print(
-                        f"  🧪 [TEST MODE] Upserted case into accc_cases ({action})"
+                    logger.info(
+                        f"  [TEST MODE] Upserted case into accc_cases ({action})"
                     )
 
                     backup_case = dict(case_info)
@@ -1001,13 +999,13 @@ def run_accc_cases_register(test_mode: bool = False):
                             case_info.get("title", "") or title
                         )
                     except Exception as e:
-                        print(f"  ⚠️ Error during deal matching: {e}")
+                        logger.warning(f"  Error during deal matching: {e}")
                         matched_deal_id = None
 
                     if matched_deal_id:
                         case_info["deal_id"] = matched_deal_id
-                        print(
-                            f"  🎯 Deal match found (deal_id={matched_deal_id}); sending email"
+                        logger.info(
+                            f"  Deal match found (deal_id={matched_deal_id}); sending email"
                         )
                         send_new_case_email(case_info, matched_deal_id)
                     else:
@@ -1022,37 +1020,39 @@ def run_accc_cases_register(test_mode: bool = False):
                                 )
                             )
                         except Exception as e:
-                            print(f"  ⚠️ Error verifying USA relation: {e}")
-                            _log_error_and_email(
-                                f"Error verifying USA relation: {e}",
-                                {"case_number": case_number, "step": "verify_usa_relation"},
-                            )
+                            logger.exception(f"Error verifying USA relation: {e}")
+                            error_items.append({
+                                "case_number": case_number,
+                                "error": str(e),
+                                "step": "verify_usa_relation",
+                            })
                             error_count += 1
                             is_usa = False
 
                         if is_usa:
                             # case_info["usa_related"] = True
-                            print(
-                                "  🇺🇸 Case appears USA-related (unmatched); sending email"
+                            logger.info(
+                                "  Case appears USA-related (unmatched); sending email"
                             )
                             send_unmatched_usa_related_email(case_info)
 
                     inserted_id = insert_case(collection, case_info)
                     if inserted_id:
-                        print(
-                            f"  ✅ Inserted new case into accc_cases (id={inserted_id})"
+                        logger.info(
+                            f"  Inserted new case into accc_cases (id={inserted_id})"
                         )
                         backup_case = dict(case_info)
                         backup_case.pop("_id", None)
                         new_cases.append(backup_case)
                     else:
-                        print("  ⚠️ Insert failed")
+                        logger.warning("  Insert failed")
             except Exception as e:
-                print(f"❌ Error processing list item #{idx}: {e}")
-                _log_error_and_email(
-                    f"Error processing list item #{idx}: {e}",
-                    {"index": idx, "step": "process_list_item"},
-                )
+                logger.exception(f"Error processing list item #{idx}: {e}")
+                error_items.append({
+                    "case_number": item.get("case_number", "N/A"),
+                    "error": str(e),
+                    "step": "process_list_item",
+                })
                 error_count += 1
                 continue
 
@@ -1071,16 +1071,28 @@ def run_accc_cases_register(test_mode: bool = False):
 
             with open(BACKUP_JSON, "w", encoding="utf-8") as f:
                 json.dump(serializable_cases, f, indent=2, ensure_ascii=False)
-            print(
-                f"\n💾 Saved {len(serializable_cases)} new cases to backup JSON: {BACKUP_JSON}"
+            logger.info(
+                f"Saved {len(serializable_cases)} new cases to backup JSON: {BACKUP_JSON}"
             )
         except Exception as e:
-            print(f"⚠️ Error writing backup JSON: {e}")
+            logger.warning(f"Error writing backup JSON: {e}")
 
-    print("\n🎉 ACCC Cases Register scraper finished")
+    if error_items:
+        send_error_email(
+            script_name=SCRIPT_NAME,
+            error_message=f"{len(error_items)} errors occurred during run",
+            context={
+                "error_count": len(error_items),
+                "errors": error_items[:20],
+            },
+            traceback_str=None,
+        )
+
+    logger.info("ACCC Cases Register scraper finished")
     elapsed = round(time.time() - run_start, 1)
     logger.info("=" * 60)
     logger.info("SUMMARY")
+    logger.info(f"Total cases checked: {len(items)}")
     logger.info(f"  New cases inserted           : {len(new_cases)}")
     logger.info(f"  Errors encountered           : {error_count}")
     logger.info(f"  Total time                   : {elapsed}s")
