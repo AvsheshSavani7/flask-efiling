@@ -26,6 +26,7 @@ from typing import Any
 from openai import OpenAI
 from PyPDF2 import PdfReader
 from dotenv import load_dotenv
+from aws_utils import build_docket_key, upload_bytes_to_s3
 
 # e360 API endpoints (from nm api doc.json)
 BASE_URL = "https://e360.prc.nm.gov/core"
@@ -223,12 +224,25 @@ def download_and_extract(param: dict[str, Any], session: requests.Session | None
     try:
         token = get_download_token(session, str(document_id))
         pdf_bytes = download_document(session, token)
+        filename = f"{param.get('documentnumber') or document_id}.pdf"
+        s3_key = build_docket_key(filename)
+        try:
+            s3_upload_result = upload_bytes_to_s3(
+                file_bytes=pdf_bytes,
+                key=s3_key,
+                content_type="application/pdf",
+            )
+            result["s3_key"] = s3_upload_result["key"]
+            result["s3_url"] = s3_upload_result["url"]
+        except Exception as s3_exc:
+            result["s3_upload_error"] = str(s3_exc)
+
         text = extract_text_from_pdf(pdf_bytes)
         extraction_method = "pypdf2"
 
         # Fallback for scanned/non-selectable PDFs.
         if not (text or "").strip():
-            doc_name = f"{param.get('documentnumber') or document_id}.pdf"
+            doc_name = filename
             llm_text = extract_text_with_llm_from_pdf(
                 pdf_bytes, document_name=doc_name)
             if llm_text:
@@ -254,6 +268,8 @@ def download_and_extract(param: dict[str, Any], session: requests.Session | None
     except Exception as e:
         result["extracted_text_error"] = str(e)
 
+    print(f"Result: {result}")
+
     return result
 
 
@@ -262,59 +278,57 @@ def main():
     import json
 
     sample = {
-        "row_number": 2,
         "Docket Number": "25-00060-UT",
-        "caseId": "df8795c2-9498-457d-a78a-0e47e11cf20b",
-        "id": "99663142-93a3-476d-bba5-b41a013adf07",
-        "documentnumber": "DOC-000246487-26",
-        "documentname": "Parties' Request for Guidance in Advance of Show Cause Proceeding",
-        "docname": "DOC-000246487-26 [Parties' Request for Guidance in Advance of Show Cause Proceeding]",
-        "documenttype": "Request",
+        "IsLegacy": True,
         "accesstype": "PUBLIC",
         "audiencetype": "PUBLIC",
-        "typeCode": "REQUEST",
-        "storageSite": "",
-        "storagesitevalue": "",
-        "IsLegacy": True,
-        "shortdescription": "25-00060-UT 3.27.2026 request for guidance, COS",
-        "remarks": "25-00060-UT 3.27.2026 request for guidance, COS",
-        "confidential": "No",
-        "source": "Online",
-        "islinked": "No",
-        "islinkedparent": "No",
-        "documentRole": "",
-        "companyparties": "NEW ENERGY ECONOMY",
+        "author": "Caitlin  Evans",
+        "canAnnotate": None,
+        "canBatesNumber": None,
+        "canEdit": None,
+        "canEditLegacyDocument": None,
+        "canMakeInternal": None,
+        "canRedact": None,
+        "cancheckin": None,
+        "cancheckout": True,
+        "candownload": True,
+        "canpreview": "Yes",
+        "caseId": "df8795c2-9498-457d-a78a-0e47e11cf20b",
         "caseid": "df8795c2-9498-457d-a78a-0e47e11cf20b",
         "casenumber": "25-00060-UT",
-        "companypartyid": "4bc37f26-a269-4c21-bb48-8c23fc5fc7a0",
-        "company": "PUBLIC SERVICE COMPANY OF NEW MEXICO",
-        "filedby": "Mariel Nanasi",
-        "filedon": "2026-03-27T19:07:04.853796",
-        "fileddate": "2026-03-27T19:07:04.853796",
-        "canEdit": "",
-        "canAnnotate": "",
-        "canRedact": "",
-        "canBatesNumber": "",
         "checkout": "No",
         "checkoutby": " ",
-        "checkouton": "",
-        "hasdeletepermission": "",
-        "cancheckout": True,
-        "cancheckin": "",
-        "docType": "application/pdf",
-        "candownload": True,
-        "canMakeInternal": "",
-        "canpreview": "Yes",
+        "checkouton": None,
+        "company": "PUBLIC SERVICE COMPANY OF NEW MEXICO",
+        "companyparties": "PROSPERITY WORKS",
+        "companypartyid": "4bc37f26-a269-4c21-bb48-8c23fc5fc7a0",
+        "companypartylist": ["PROSPERITY WORKS"],
+        "confidential": "No",
         "contenttype": "application/pdf",
-        "entityType": "cms.casex",
+        "docType": "application/pdf",
+        "docname": "DOC-000267471-26 [Prosperity Works' Errata]",
+        "documentRole": "",
+        "documentname": "Prosperity Works' Errata",
+        "documentnumber": "DOC-000267471-26",
+        "documenttype": "Errata Notice",
         "entityId": "df8795c2-9498-457d-a78a-0e47e11cf20b",
+        "entityType": "cms.casex",
+        "fieldchanges": {},
+        "filedby": "Steven Michel",
+        "fileddate": "2026-04-21T19:13:55.13106",
+        "filedon": "2026-04-21T19:13:55.13106",
+        "hasdeletepermission": None,
+        "id": "ddca095e-6432-4273-aac2-b432017fcaff",
         "isLegacy": False,
-        "author": "Mariel Nanasi",
-        "canEditLegacyDocument": "",
-        "companypartylist": [
-            "NEW ENERGY ECONOMY"
-        ],
-        "fieldchanges": {}
+        "islinked": "No",
+        "islinkedparent": "No",
+        "remarks": "",
+        "row_number": 2,
+        "shortdescription": "",
+        "source": "Online",
+        "storageSite": None,
+        "storagesitevalue": None,
+        "typeCode": "ERRATA_NOTICES",
     }
     out = download_and_extract(sample)
     print(out)
