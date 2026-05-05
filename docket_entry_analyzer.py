@@ -464,6 +464,13 @@ def analyze_docket_entry(
             date_value = dt
         # If conversion fails, keep the original string value
 
+    if metadata.get("url"):
+        url_value = metadata["url"]
+    elif "http" in (doc_number or ""):
+        url_value = doc_number
+    else:
+        url_value = ""
+
     entry_metadata = {
         "date": date_value,
         "document_type": metadata.get("document_type", "N/A"),
@@ -473,6 +480,7 @@ def analyze_docket_entry(
         "document_id": doc_number,
         "docket_type": docket_type,
         "target_company_name": target_company_name,
+        "url": url_value,
     }
 
     # Estimate token count (rough estimate: 1 token ≈ 4 characters)
