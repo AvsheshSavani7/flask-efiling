@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import mimetypes
 import os
 import sys
 import time
@@ -33,6 +34,7 @@ from dotenv import load_dotenv
 from playwright.sync_api import Page, sync_playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from tier1_summary_generator import generate_tier1_summary
+from aws_utils import build_docket_key, upload_bytes_to_s3
 
 load_dotenv(".env")
 
@@ -724,6 +726,8 @@ def _flatten_filings(filings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "document_filename": doc.get("filename", ""),
                 "extracted_text": doc.get("extracted_text", ""),
                 "docket_number": filing.get("docket_number", ""),
+                "s3_key": doc.get("s3_key", ""),
+                "s3_url": doc.get("s3_url", ""),
             })
     return flat
 
@@ -798,7 +802,8 @@ def _extract_text_from_pptx(file_path: str) -> str:
                             parts.append(text)
                 if shape.has_table:
                     for row in shape.table.rows:
-                        cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                        cells = [c.text.strip()
+                                 for c in row.cells if c.text.strip()]
                         if cells:
                             parts.append("\t".join(cells))
         return "\n".join(parts)
@@ -826,7 +831,8 @@ def _extract_text_from_zip(zip_path: str) -> str:
                 if os.path.splitext(n)[1].lower() in extractors
             ]
             if not supported:
-                logger.info(f"  No supported files inside {os.path.basename(zip_path)}")
+                logger.info(
+                    f"  No supported files inside {os.path.basename(zip_path)}")
                 return ""
             with tempfile.TemporaryDirectory() as tmpdir:
                 for name in sorted(supported):
@@ -853,7 +859,8 @@ def _extract_text(file_path: str) -> str:
     extractor = extractors.get(ext)
     if extractor:
         return extractor(file_path)
-    logger.info(f"  Unsupported file type ({ext}): {os.path.basename(file_path)}")
+    logger.info(
+        f"  Unsupported file type ({ext}): {os.path.basename(file_path)}")
     return ""
 
 
@@ -935,6 +942,23 @@ def _download_all_documents(
                                 f"  {doc_id}: extracted {len(extracted)} chars")
                         else:
                             logger.info(f"  {doc_id}: no text extracted")
+
+                        try:
+                            with open(save_path, "rb") as f:
+                                file_bytes = f.read()
+                            content_type = mimetypes.guess_type(
+                                save_path)[0] or "application/octet-stream"
+                            s3_key = build_docket_key(safe_name)
+                            s3_result = upload_bytes_to_s3(
+                                file_bytes, s3_key, content_type=content_type)
+                            doc["s3_key"] = s3_result["key"]
+                            doc["s3_url"] = s3_result["url"]
+                            logger.info(
+                                f"  {doc_id}: uploaded to S3 → {s3_result['url']}")
+                        except Exception as s3_exc:
+                            doc["s3_upload_error"] = str(s3_exc)
+                            logger.warning(
+                                f"  {doc_id}: S3 upload failed: {s3_exc}")
                     else:
                         logger.warning(
                             f"  {doc_id}: Download button not visible")
@@ -1104,6 +1128,7 @@ def scrape_mt_psc(
         finally:
             context.close()
             browser.close()
+    print(f"Flat records: {flat_records}")
 
     return flat_records[::-1]
 
@@ -1121,7 +1146,7 @@ def main():
         help="REDDI Case ID to open (default: DCKT-3556)",
     )
     parser.add_argument(
-        "--last-id", default="",
+        "--last-id", default="FIL-38345_DOC-69778",
         help="Watermark: FIL-xxxxx_DOC-xxxxx. Only process filings BEFORE this.",
     )
     parser.add_argument(
