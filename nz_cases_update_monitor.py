@@ -220,7 +220,6 @@ def fetch_case_detail_page(page, url: str) -> Optional[Dict[str, Any]]:
             pass
 
         html = page.content()
-        logger.info(f"[STEP 2.3.1] HTML: {html}")
         soup = BeautifulSoup(html, "html.parser")
         desc_el = soup.select_one(".content-block__content p")
         description = desc_el.get_text(strip=True) if desc_el else ""
