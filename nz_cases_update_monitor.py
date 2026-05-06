@@ -210,7 +210,7 @@ def fetch_case_detail_page(page, url: str) -> Optional[Dict[str, Any]]:
     try:
         page.goto(url, wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
-        logger.info(f"[STEP 2.3.1] page.content(): {page.content()}")
+        # logger.info(f"[STEP 2.3.1] page.content(): {page.content()[]}")
         try:
             view_all = page.get_by_role("button", name="View All")
             if view_all.count() > 0:
@@ -244,7 +244,7 @@ def fetch_case_detail_page(page, url: str) -> Optional[Dict[str, Any]]:
             except Exception:
                 pass
             doc_soup = BeautifulSoup(page.content(), "html.parser")
-            logger.info(f"[STEP 2.3.2] doc_soup: {doc_soup}")
+            # logger.info(f"[STEP 2.3.2] doc_soup: {doc_soup}")
             for link in doc_soup.select(".project-block__content a[href]"):
                 href = link.get("href")
                 if href and (href.endswith(".pdf") or "document" in href.lower() or "documents" in href):

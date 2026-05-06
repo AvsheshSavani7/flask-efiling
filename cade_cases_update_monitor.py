@@ -998,7 +998,6 @@ def process_brazil_cases_updates(headless: bool = True):
         return
 
     logger.info(f"[STEP 1.6] Found {len(cases)} open records in brazil_cases")
-    logger.info(f"[STEP 1.7] Found open cases: {cases}")
 
     total_checked = 0
     total_changed = 0
@@ -1024,15 +1023,23 @@ def process_brazil_cases_updates(headless: bool = True):
 
         try:
             for idx, case_doc in enumerate(cases, 1):
+                logger.info(
+                    f"[STEP 2] Checking case: {case_doc.get('process', 'N/A')}")
+                logger.info(
+                    f"[STEP 2.1] Detail URL: {case_doc.get('detail_url', 'N/A')}")
+                logger.info(f"[STEP 2.2]  type: {case_doc.get('type', 'N/A')}")
+                logger.info(
+                    f"[STEP 2.3]  interessados: {case_doc.get('interessados', 'N/A')}")
+
                 total_checked += 1
                 process_num = case_doc.get("process", "N/A")
                 detail_url = case_doc.get("detail_url")
 
                 logger.info(
-                    f"[STEP 2] [{idx}/{len(cases)}] Process {process_num}")
+                    f"[STEP 2.4] [{idx}/{len(cases)}] Process {process_num}")
 
                 if not detail_url:
-                    logger.warning("[STEP 2.1] No detail_url; skipping")
+                    logger.warning("[STEP 2.5] No detail_url; skipping")
                     continue
 
                 # Step 3: extract fresh data from live page
@@ -1042,7 +1049,7 @@ def process_brazil_cases_updates(headless: bool = True):
 
                 live_table, live_historico = extract_tables(
                     page, context, detail_url)
-                logger.info(f"[STEP 2.2] Live: type={live_type[:50]}..., "
+                logger.info(f"[STEP 2.6] Live: type={live_type[:50]}..., "
                             f"table_records={len(live_table)}, historico={len(live_historico)}")
 
                 should_close = any(
@@ -1052,7 +1059,7 @@ def process_brazil_cases_updates(headless: bool = True):
                 )
                 if should_close:
                     logger.info(
-                        "[STEP 2.3] 'Certidão de Trânsito em Julgado' found — will set is_open=False")
+                        "[STEP 2.7] 'Certidão de Trânsito em Julgado' found — will set is_open=False")
 
                 # Step 4: detect changes
                 changes = detect_changes(
@@ -1060,12 +1067,12 @@ def process_brazil_cases_updates(headless: bool = True):
                 )
 
                 if not changes and not should_close:
-                    logger.info("[STEP 2.4] No changes detected")
+                    logger.info("[STEP 2.8] No changes detected")
                     continue
 
                 if not changes and should_close:
                     logger.info(
-                        "[STEP 2.5] No field changes but closing case (is_open → False)")
+                        "[STEP 2.9] No field changes but closing case (is_open → False)")
                     update_case_in_db(
                         cases_collection, case_doc, changes,
                         live_table, live_historico,
@@ -1074,14 +1081,14 @@ def process_brazil_cases_updates(headless: bool = True):
                     continue
 
                 total_changed += 1
-                logger.info(f"[STEP 2.6] {len(changes)} change(s) detected:")
+                logger.info(f"[STEP 2.10] {len(changes)} change(s) detected:")
                 for field, old_val, new_val, ctype in changes:
                     if ctype == "new_items":
                         logger.info(
-                            f"[STEP 2.7]    {field}: {len(new_val)} new item(s)")
+                            f"[STEP 2.11]    {field}: {len(new_val)} new item(s)")
                     else:
                         logger.info(
-                            f"[STEP 2.8]    {field}: {old_val} → {new_val} ({ctype})")
+                            f"[STEP 2.12]    {field}: {old_val} → {new_val} ({ctype})")
 
                 # Step 5: branch on deal_id
                 deal = None
@@ -1094,12 +1101,12 @@ def process_brazil_cases_updates(headless: bool = True):
                             {"_id": ObjectId(deal_id), **deals_status_filter}
                         )
                     except Exception as e:
-                        logger.exception(f"[STEP 2.9] Invalid deal_id: {e}")
+                        logger.exception(f"[STEP 2.13] Invalid deal_id: {e}")
                         error_items.append(
                             {"process": process_num, "error": str(e), "step": "resolve_deal"})
 
                     if deal:
-                        logger.info("[STEP 2.10] Deal linked — sending email")
+                        logger.info("[STEP 2.14] Deal linked — sending email")
                         send_update_email(case_doc, changes, deal)
                         update_case_in_db(
                             cases_collection, case_doc, changes,
@@ -1121,13 +1128,13 @@ def process_brazil_cases_updates(headless: bool = True):
                             interessados_text, translated_text)
                     except Exception as e:
                         logger.exception(
-                            f"[STEP 2.11] Error during deal matching: {e}")
+                            f"[STEP 2.15] Error during deal matching: {e}")
                         error_items.append(
                             {"process": process_num, "error": str(e), "step": "match_case_to_deal"})
 
                 if matched_deal_id:
                     logger.info(
-                        f"[STEP 2.12] Deal match found (deal_id={matched_deal_id})")
+                        f"[STEP 2.16] Deal match found (deal_id={matched_deal_id})")
                     matched_deal = None
                     if deals_collection is not None:
                         try:
@@ -1136,7 +1143,7 @@ def process_brazil_cases_updates(headless: bool = True):
                             )
                         except Exception as e:
                             logger.exception(
-                                f"[STEP 2.13] Error resolving matched deal: {e}")
+                                f"[STEP 2.17] Error resolving matched deal: {e}")
                             error_items.append({"process": process_num, "error": str(
                                 e), "step": "resolve_matched_deal"})
 
@@ -1166,12 +1173,12 @@ def process_brazil_cases_updates(headless: bool = True):
                             ))
                         except Exception as e:
                             logger.exception(
-                                f"[STEP 2.14] Error verifying USA relation: {e}")
+                                f"[STEP 2.18] Error verifying USA relation: {e}")
                             error_items.append(
                                 {"process": process_num, "error": str(e), "step": "verify_usa_relation"})
 
                     if is_usa:
-                        logger.info("[STEP 2.15] USA-related — sending email")
+                        logger.info("[STEP 2.19] USA-related — sending email")
                         send_update_email(case_doc, changes, None)
 
                     update_case_in_db(
@@ -1189,14 +1196,14 @@ def process_brazil_cases_updates(headless: bool = True):
             )
         finally:
             browser.close()
-            logger.info("Browser closed")
+            logger.info("[STEP 2.20] Browser closed")
 
     if error_items:
         logger.warning(
-            f"{len(error_items)} per-case errors collected — sending summary email")
+            f"[STEP 2.21] {len(error_items)} per-case errors collected — sending summary email")
         send_error_email(
             script_name=SCRIPT_NAME,
-            error_message=f"{len(error_items)} errors occurred during run",
+            error_message=f"[STEP 2.22] {len(error_items)} errors occurred during run",
             context={
                 "error_count": len(error_items),
                 "errors": error_items[:20],
@@ -1208,11 +1215,11 @@ def process_brazil_cases_updates(headless: bool = True):
     logger.info("")
     logger.info("=" * 60)
     logger.info("SUMMARY")
-    logger.info(f"[STEP 2.17] Total records checked        : {total_checked}")
-    logger.info(f"[STEP 2.18] Records with changes         : {total_changed}")
+    logger.info(f"[STEP 2.23] Total records checked        : {total_checked}")
+    logger.info(f"[STEP 2.24] Records with changes         : {total_changed}")
     logger.info(
-        f"[STEP 2.19] Errors encountered           : {len(error_items)}")
-    logger.info(f"[STEP 2.20] Total time                   : {elapsed}s")
+        f"[STEP 2.25] Errors encountered           : {len(error_items)}")
+    logger.info(f"[STEP 2.26] Total time                   : {elapsed}s")
     logger.info("=" * 60)
 
 
