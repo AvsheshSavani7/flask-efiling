@@ -18,10 +18,11 @@ from __future__ import annotations
 import base64
 import copy
 import os
+import time
 import requests
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from openai import OpenAI
 from PyPDF2 import PdfReader
@@ -32,6 +33,12 @@ from aws_utils import build_docket_key, upload_bytes_to_s3
 BASE_URL = "https://e360.prc.nm.gov/core"
 DOWNLOAD_TOKEN_URL = f"{BASE_URL}/api/apiflow/v1/prc/nm/cms/document/downloadToken"
 DOWNLOAD_URL = f"{BASE_URL}/api/document/v1/download-chunked"
+
+E360_PAGE_URL = "https://e360.prc.nm.gov"
+
+# 2captcha API endpoints (same as other scrapers in this project)
+CAPTCHA_SOLVER_URL = "http://2captcha.com/in.php"
+CAPTCHA_RESULT_URL = "http://2captcha.com/res.php"
 
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -48,17 +55,72 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _LOCAL_ENV_PATH = _SCRIPT_DIR / ".env"
 # On platforms like Render, OPENAI_API_KEY is provided as an environment variable.
 # Only load local .env when the key is not already present.
-if not os.getenv("OPENAI_API_KEY") and _LOCAL_ENV_PATH.exists():
-    load_dotenv(_LOCAL_ENV_PATH)
+if _LOCAL_ENV_PATH.exists():
+    load_dotenv(_LOCAL_ENV_PATH, override=False)
+
+# Read after dotenv is loaded so .env values are available
+E360_RECAPTCHA_SITE_KEY = os.getenv(
+    "E360_RECAPTCHA_SITE_KEY", "6LcotqMsAAAAAPhCa9sbeV45_2mr4G43V1BkvYQJ")
 
 
-def get_download_token(session: requests.Session, document_id: str) -> str:
+def solve_recaptcha_v2(site_key: str, page_url: str, api_key: str) -> Optional[str]:
+    """
+    Solve reCAPTCHA v2 using 2captcha service.
+    Reuses same pattern as cade_cases_update_monitor.py.
+
+    Returns:
+        Solved reCAPTCHA token string, or None if solving failed.
+    """
+    if not api_key or not site_key:
+        print("[2captcha] Missing api_key or site_key — skipping captcha solve")
+        return None
+    print("[2captcha] Submitting reCAPTCHA to 2captcha...")
+    try:
+        resp = requests.post(CAPTCHA_SOLVER_URL, data={
+            "key": api_key,
+            "method": "userrecaptcha",
+            "googlekey": site_key,
+            "pageurl": page_url,
+            "json": 1,
+        })
+        result = resp.json()
+        if result.get("status") != 1:
+            print(f"[2captcha] Submission failed: {result.get('request')}")
+            return None
+        task_id = result.get("request")
+        print(f"[2captcha] Task ID: {task_id} — waiting for solution...")
+        for attempt in range(30):
+            time.sleep(5)
+            r = requests.get(CAPTCHA_RESULT_URL, params={
+                "key": api_key, "action": "get", "id": task_id, "json": 1,
+            })
+            res = r.json()
+            if res.get("status") == 1:
+                token = res.get("request")
+                print(f"[2captcha] Solved! Token: {token[:30]}...")
+                return token
+            elif res.get("request") != "CAPCHA_NOT_READY":
+                print(f"[2captcha] Unexpected response: {res}")
+                break
+            if attempt % 3 == 0:
+                print(
+                    f"[2captcha] Waiting for solution... (attempt {attempt + 1}/30)")
+        return None
+    except Exception as e:
+        print(f"[2captcha] Error: {e}")
+        return None
+
+
+def get_download_token(session: requests.Session, document_id: str, file_name: str = "") -> str:
     """
     Step 1: POST to get download token for a document.
+    Solves reCAPTCHA via 2captcha and includes token in payload
+    (required by e360 API as of 2026).
 
     Args:
         session: requests Session (with optional cookies/headers)
         document_id: The document id (param["id"])
+        file_name: Document file name for payload (param["documentname"] or similar)
 
     Returns:
         JWT token string for download
@@ -67,14 +129,34 @@ def get_download_token(session: requests.Session, document_id: str) -> str:
         requests.RequestException: If API call fails
         ValueError: If token not in response
     """
+    captcha_api_key = os.getenv("CAPTCHA_API_KEY")
+    site_key = E360_RECAPTCHA_SITE_KEY
+    recaptcha_token = ""
+
+    if captcha_api_key and site_key:
+        recaptcha_token = solve_recaptcha_v2(
+            site_key, E360_PAGE_URL, captcha_api_key) or ""
+    else:
+        print("[captcha] CAPTCHA_API_KEY or E360_RECAPTCHA_SITE_KEY not set — sending empty recaptcha token")
+
     payload = {
         "context": "File",
+        "casexRecaptchaToken": recaptcha_token,
+        "casexRecaptcha": True,
         "documentId": document_id,
+        "fileName": file_name,
+        "annotationType": "",
     }
+    print(f"[API] POST {DOWNLOAD_TOKEN_URL}")
+    print(
+        f"[API] Payload (token truncated): {{ ...documentId: {document_id}, fileName: {file_name}, casexRecaptchaToken: {recaptcha_token[:20]}... }}")
     r = session.post(DOWNLOAD_TOKEN_URL, json=payload, timeout=30)
+    print(f"[API] Status: {r.status_code}")
+    print(f"[API] Response headers: {dict(r.headers)}")
+    print(f"[API] Response body: {r.text[:500]}")
     r.raise_for_status()
     data = r.json()
-
+    print(f"[API] Parsed JSON: {data}")
     if data.get("statusCode") != 200:
         raise ValueError(
             f"Download token API returned statusCode {data.get('statusCode')}: {data.get('message', 'unknown')}"
@@ -100,7 +182,12 @@ def download_document(session: requests.Session, token: str) -> bytes:
         requests.RequestException: If download fails
     """
     url = f"{DOWNLOAD_URL}?token={token}"
+    print(f"[API] GET {url}")
     r = session.get(url, timeout=60, stream=True)
+    print(f"[API] Status: {r.status_code}")
+    print(f"[API] Response headers: {dict(r.headers)}")
+    if not r.ok:
+        print(f"[API] Error body: {r.text[:500]}")
     r.raise_for_status()
     return r.content
 
@@ -213,6 +300,7 @@ def download_and_extract(param: dict[str, Any], session: requests.Session | None
     result = copy.deepcopy(param)
     result["extracted_text"] = ""
     document_id = param.get("id")
+    print(f"Document ID: {document_id}")
     if not document_id:
         result["extracted_text_error"] = "param missing 'id' (documentId)"
         return result
@@ -221,8 +309,13 @@ def download_and_extract(param: dict[str, Any], session: requests.Session | None
         session = requests.Session()
         session.headers.update(DEFAULT_HEADERS)
 
+    print(f"Session: {session}")
+
     try:
-        token = get_download_token(session, str(document_id))
+        file_name = param.get("documentname") or param.get("docname") or ""
+        token = get_download_token(session, str(
+            document_id), file_name=file_name)
+        print(f"Token: {token}")
         pdf_bytes = download_document(session, token)
         filename = f"{param.get('documentnumber') or document_id}.pdf"
         s3_key = build_docket_key(filename)
@@ -306,11 +399,11 @@ def main():
         "confidential": "No",
         "contenttype": "application/pdf",
         "docType": "application/pdf",
-        "docname": "DOC-000267471-26 [Prosperity Works' Errata]",
+        "docname": "DOC-000282281-26 [Order Vacating Scheduling Conference]",
         "documentRole": "",
         "documentname": "Prosperity Works' Errata",
-        "documentnumber": "DOC-000267471-26",
-        "documenttype": "Errata Notice",
+        "documentnumber": "DOC-000282281-26",
+        "documenttype": "Confidentiality Agreement",
         "entityId": "df8795c2-9498-457d-a78a-0e47e11cf20b",
         "entityType": "cms.casex",
         "fieldchanges": {},
@@ -318,7 +411,7 @@ def main():
         "fileddate": "2026-04-21T19:13:55.13106",
         "filedon": "2026-04-21T19:13:55.13106",
         "hasdeletepermission": None,
-        "id": "ddca095e-6432-4273-aac2-b432017fcaff",
+        "id": "709710c0-1a4d-4970-a1a1-b4410127332a",
         "isLegacy": False,
         "islinked": "No",
         "islinkedparent": "No",
