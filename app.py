@@ -28,6 +28,7 @@ from fs_case_register import run_fs_case_register as fs_case_register_main
 from accc_acquisitions import main as accc_acquisitions_main
 from accc_case_update_monitor import process_accc_case_updates
 from accc_cases_register import run_accc_cases_register
+from accc_waiver_register import run_accc_waiver_register
 from cade_cases_register import run_cade_cases_register
 from cade_cases_update_monitor import process_brazil_cases_updates
 from accc_cases_update_monitor import process_accc_cases_updates
@@ -2128,6 +2129,56 @@ def accc_cases_register_endpoint():
         }), 500
 
 
+@app.route('/new-accc-waiver-register', methods=['GET'])
+def accc_waiver_register_endpoint():
+    """
+    Scrape ACCC Acquisitions Register (Waiver type) and store cases in
+    the 'accc_cases' collection.
+    Process runs in background - returns immediately.
+
+    Query params:
+        test_mode=1  — paginate all pages (backfill). Default is live mode (page 0 only).
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        test_mode = request.args.get("test_mode", "").lower() in ("1", "true", "yes")
+
+        def run_register():
+            try:
+                mode_label = "TEST" if test_mode else "LIVE"
+                logger.info(
+                    f"Starting ACCC waiver register scraper in background ({mode_label})")
+                run_accc_waiver_register(test_mode=test_mode)
+                logger.info(
+                    "✅ ACCC waiver register scraper completed successfully")
+            except Exception as e:
+                logger.exception("Error in ACCC waiver register scraper")
+
+        submitted, msg = submit_unique_task(
+            "accc-waiver-register", run_register)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting ACCC waiver register scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 @app.route('/new-cade-cases-register', methods=['GET'])
 def cade_cases_register_endpoint():
     """
@@ -2632,6 +2683,7 @@ KNOWN_LOG_SCRIPTS = {
     "newzealand_cases_update_monitor",
     "australia_cases_register",
     "australia_cases_update_monitor",
+    "australia_waiver_register",
     "uk_cases_register",
     "uk_cases_update_monitor",
     "germany_cases_register",
