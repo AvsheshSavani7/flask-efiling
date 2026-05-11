@@ -35,6 +35,7 @@ import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from openai import OpenAI
+from playwright.sync_api import sync_playwright
 import os
 import json
 import sys
@@ -148,25 +149,40 @@ def get_canada_cases_collection():
     return db["canada_cases"]
 
 
-def fetch_report_html(url: str = REPORT_URL) -> Optional[str]:
-    """Fetch HTML from the Competition Bureau report page."""
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
+def fetch_report_html(url: str = REPORT_URL, headless: bool = True) -> Optional[str]:
+    """Fetch HTML from the Competition Bureau report page using Playwright.
+
+    The site serves a JS anti-bot challenge that plain requests cannot solve,
+    so we use a real browser to execute the challenge and return the rendered HTML.
+    """
     try:
-        print(f"📥 Fetching Competition Bureau report: {url}")
-        resp = requests.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        print(f"✅ Fetched HTML ({len(resp.text)} bytes)")
-        return resp.text
-    except requests.RequestException as e:
-        print(f"❌ Error fetching report page: {e}", level="error")
+        logger.info(f"📥 Fetching Competition Bureau report: {url}")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=headless,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
+            context = browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            )
+            page = context.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_selector(
+                "div.table-responsive table", timeout=30000
+            )
+            html = page.content()
+            browser.close()
+        logger.info(f"✅ Fetched HTML ({len(html)} bytes)")
+        return html
+    except Exception as e:
+        logger.error(f"❌ Error fetching report page: {e}")
         return None
 
 
@@ -211,7 +227,7 @@ def parse_merger_table(html_content: str) -> List[Dict[str, Any]]:
             break
 
     if table is None:
-        print("⚠️ Could not locate merger reviews table", level="warning")
+        logger.warning("⚠️ Could not locate merger reviews table")
         return []
 
     rows = table.find_all("tr")
@@ -242,7 +258,7 @@ def parse_merger_table(html_content: str) -> List[Dict[str, Any]]:
             }
             data_rows.append(row_data)
         except Exception as e:
-            print(f"⚠️ Error parsing table row: {e}", level="warning")
+            logger.warning(f"⚠️ Error parsing table row: {e}")
             continue
 
     print(f"✅ Parsed {len(data_rows)} merger rows from table")
@@ -257,7 +273,7 @@ def case_exists(collection, parties: str, opened_date: str) -> bool:
         )
         return existing > 0
     except Exception as e:
-        print(f"⚠️ Error checking existing case: {e}", level="warning")
+        logger.warning(f"⚠️ Error checking existing case: {e}")
         return False
 
 
@@ -355,7 +371,7 @@ RESPONSE FORMAT:
         except Exception:
             return None
     except Exception as e:
-        print(f"⚠️ LLM match error: {e}", level="warning")
+        logger.warning(f"⚠️ LLM match error: {e}")
         return None
 
 
@@ -515,7 +531,7 @@ def send_email_via_webhook(
         print(f"  ✅ Email sent successfully! Status: {resp.status_code}")
         return True
     except Exception as e:
-        print(f"  ⚠️ Error sending email: {e}", level="warning")
+        logger.warning(f"⚠️ Error sending email: {e}")
         return False
 
 
@@ -525,11 +541,11 @@ def insert_case(collection, case_info: Dict[str, Any]) -> Optional[str]:
         result = collection.insert_one(case_info)
         return str(result.inserted_id)
     except Exception as e:
-        print(f"⚠️ Error inserting case: {e}", level="error")
+        logger.error(f"⚠️ Error inserting case: {e}")
         return None
 
 
-def run_canada_cases_register():
+def run_canada_cases_register(headless: bool = True):
     """Main entrypoint for Canada cases registration."""
     run_start = datetime.now()
     error_items: List[Dict[str, Any]] = []
@@ -562,7 +578,7 @@ def run_canada_cases_register():
     logger.info(
         f"[STEP 1.3] CUTOFF_DATE: {CUTOFF_DATE.strftime('%Y-%m-%d')} (3 days ago)")
 
-    html = fetch_report_html(REPORT_URL)
+    html = fetch_report_html(REPORT_URL, headless=headless)
     logger.info(f"[STEP 1.4] HTML: {html}")
     if not html:
         logger.error(f"[STEP 1.5] Failed to fetch report HTML. Exiting.")

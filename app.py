@@ -1965,10 +1965,13 @@ def canada_cases_register():
     }
     """
     try:
+        headless_str = request.args.get('headless', 'true')
+        headless = headless_str.lower() in ('true', '1', 'yes')
+
         def run_register():
             try:
                 logger.info("Starting Canada cases register in background")
-                run_canada_cases_register()
+                run_canada_cases_register(headless=headless)
                 logger.info("✅ Canada cases register completed successfully")
             except Exception as e:
                 logger.exception("Error in Canada cases register")
@@ -2147,7 +2150,8 @@ def accc_waiver_register_endpoint():
     }
     """
     try:
-        test_mode = request.args.get("test_mode", "").lower() in ("1", "true", "yes")
+        test_mode = request.args.get(
+            "test_mode", "").lower() in ("1", "true", "yes")
 
         def run_register():
             try:
@@ -2761,7 +2765,8 @@ def get_log_content():
                 backup_paths.append(os.path.join(script_log_dir, fname))
         backup_paths.sort(reverse=True)
 
-    all_paths = backup_paths + ([active_path] if os.path.isfile(active_path) else [])
+    all_paths = backup_paths + \
+        ([active_path] if os.path.isfile(active_path) else [])
     all_names = [os.path.basename(p) for p in all_paths]
 
     if not all_paths:
