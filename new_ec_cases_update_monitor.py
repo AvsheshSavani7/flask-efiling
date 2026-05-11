@@ -54,7 +54,7 @@ import traceback
 
 from ec_html_scraper import parse_case_html
 from new_ec_cases_html import match_case_to_deal
-from log_utils import cleanup_old_logs
+from log_utils import cleanup_old_logs, refresh_log_file
 
 load_dotenv(".env")
 
@@ -795,6 +795,8 @@ def _build_usa_banner(case_number: str) -> str:
 # ---------------------------------------------------------------------------
 
 def run(headed: bool = False, max_cases: Optional[int] = None):
+    global LOG_FILE
+    LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = time.time()
     error_items: List[Dict[str, Any]] = []
     changed_count = 0

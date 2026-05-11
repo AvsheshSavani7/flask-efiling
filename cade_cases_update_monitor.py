@@ -29,7 +29,7 @@ from mongodb_connection import (
 )
 from cade_cases_register import match_case_to_deal
 from html import escape as escape_html
-from log_utils import cleanup_old_logs
+from log_utils import cleanup_old_logs, refresh_log_file
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -953,6 +953,8 @@ def process_brazil_cases_updates(headless: bool = True):
 
     Change-detection fields: type, interessados, table_records, historico_records.
     """
+    global LOG_FILE
+    LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = time.time()
     error_items: List[Dict[str, Any]] = []
 

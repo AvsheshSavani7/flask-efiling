@@ -17,7 +17,7 @@ from openai import OpenAI
 from pymongo import MongoClient
 from typing import Optional, Tuple
 from error_email_service import send_error_email
-from log_utils import cleanup_old_logs
+from log_utils import cleanup_old_logs, refresh_log_file
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -934,6 +934,8 @@ def process_record(record, existing_urls):
 # ===================================================================
 
 def main():
+    global LOG_FILE
+    LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = datetime.datetime.now()
     logger.info("=" * 60)
     logger.info("STEP 1: Starting UK CMA Cases Register")

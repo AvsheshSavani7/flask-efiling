@@ -41,7 +41,7 @@ import json
 import sys
 
 
-from log_utils import cleanup_old_logs
+from log_utils import cleanup_old_logs, refresh_log_file
 
 load_dotenv(".env")
 
@@ -547,6 +547,8 @@ def insert_case(collection, case_info: Dict[str, Any]) -> Optional[str]:
 
 def run_canada_cases_register(headless: bool = True):
     """Main entrypoint for Canada cases registration."""
+    global LOG_FILE
+    LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = datetime.now()
     error_items: List[Dict[str, Any]] = []
     logger.info("=" * 60)

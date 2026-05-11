@@ -31,7 +31,7 @@ from mongodb_connection import (
     is_connected,
 )
 
-from log_utils import cleanup_old_logs
+from log_utils import cleanup_old_logs, refresh_log_file
 
 load_dotenv(".env")
 
@@ -635,6 +635,8 @@ def build_case_document(list_item: Dict[str, Any], detail: Dict[str, Any]) -> Di
 
 def run():
     """Main: build list URL, scrape list, for each item fetch detail, check nz_cases by detail_url, insert if new."""
+    global LOG_FILE
+    LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = time.time()
     error_items: List[Dict[str, Any]] = []
     env_flag = os.getenv("NZ_CASES_TEST_MODE", "").lower()

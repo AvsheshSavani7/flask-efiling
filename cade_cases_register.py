@@ -27,7 +27,7 @@ from mongodb_connection import (
     is_connected,
 )
 from html import escape as escape_html
-from log_utils import cleanup_old_logs
+from log_utils import cleanup_old_logs, refresh_log_file
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -1189,6 +1189,8 @@ def run_cade_cases_register(
     - USA-related (unmatched): extract table data, ``are_we_follow=True``, send email
     - Other: save basic info only, ``are_we_follow=False``, no email
     """
+    global LOG_FILE
+    LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = time.time()
     error_items: List[Dict[str, Any]] = []
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"

@@ -35,7 +35,7 @@ from mongodb_connection import (
     is_connected,
 )
 
-from log_utils import cleanup_old_logs
+from log_utils import cleanup_old_logs, refresh_log_file
 
 load_dotenv(".env")
 
@@ -836,6 +836,8 @@ def get_deal_by_id(deal_id: str) -> Optional[Dict[str, Any]]:
 
 # ---------- Main ----------
 def run():
+    global LOG_FILE
+    LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = time.time()
     error_items: List[Dict[str, Any]] = []
 

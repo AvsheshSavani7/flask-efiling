@@ -22,7 +22,7 @@ from mongodb_connection import (
 from html import escape as escape_html
 from llm_verification_service import verify_usa_relation
 from error_email_service import send_error_email
-from log_utils import cleanup_old_logs
+from log_utils import cleanup_old_logs, refresh_log_file
 
 # Configuration
 CUTOFF_DATE = (datetime.datetime.now() - datetime.timedelta(days=15)).replace(
@@ -1019,6 +1019,8 @@ def process_record(record, samr_cases_list):
 # ---------------------------------------------------------------------------
 
 def main(headless=True):
+    global LOG_FILE
+    LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     global all_extracted_records, matched_data, deals
     run_start = datetime.datetime.now()
 

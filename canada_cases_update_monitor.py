@@ -38,7 +38,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 
-from log_utils import cleanup_old_logs
+from log_utils import cleanup_old_logs, refresh_log_file
 
 load_dotenv(".env")
 
@@ -453,6 +453,8 @@ def update_case_document(
 
 def process_canada_cases_updates():
     """Main entrypoint for Canada cases update monitoring."""
+    global LOG_FILE
+    LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = datetime.now()
     error_items: List[Dict[str, Any]] = []
     logger.info("=" * 60)

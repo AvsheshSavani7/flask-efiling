@@ -22,7 +22,7 @@ from mongodb_connection import (
 from llm_verification_service import verify_usa_relation
 from accc_cases_register import match_case_to_deal
 from error_email_service import send_error_email
-from log_utils import cleanup_old_logs
+from log_utils import cleanup_old_logs, refresh_log_file
 
 
 load_dotenv(".env")
@@ -1017,6 +1017,8 @@ def update_case_document(
 
 
 def process_accc_cases_updates():
+    global LOG_FILE
+    LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     logger.info("[STEP 1] Starting ACCC Cases Update Monitor")
     run_start = time.time()
     error_count = 0

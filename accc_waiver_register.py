@@ -6,7 +6,7 @@ from mongodb_connection import (
 )
 from llm_verification_service import verify_usa_relation
 from error_email_service import send_error_email
-from log_utils import cleanup_old_logs
+from log_utils import cleanup_old_logs, refresh_log_file
 import os
 import json
 import sys
@@ -927,6 +927,8 @@ def run_accc_waiver_register(test_mode: bool = False):
                  (no LLM calls, no emails).
     Live mode  — first page only; deal match → USA check → email → insert.
     """
+    global LOG_FILE
+    LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = time.time()
     error_count = 0
     error_items: List[Dict[str, Any]] = []

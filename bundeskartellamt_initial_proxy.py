@@ -34,7 +34,7 @@ from mongodb_connection import (
 from html import escape as escape_html
 from llm_verification_service import verify_country_relation
 from error_email_service import send_error_email
-from log_utils import cleanup_old_logs
+from log_utils import cleanup_old_logs, refresh_log_file
 
 load_dotenv(".env")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -604,6 +604,8 @@ def send_email_via_webhook(subject: str, html: str, file_number: str = "",
 # ---------------------------------------------------------------------------
 
 def main():
+    global LOG_FILE
+    LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = time.time()
     error_items: List[Dict[str, Any]] = []
     logger.info("=" * 60)

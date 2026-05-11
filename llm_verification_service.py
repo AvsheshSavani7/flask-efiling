@@ -56,14 +56,13 @@ def verify_country_relation(
 
         try:
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5.2",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0,
-                max_tokens=10,
+
             )
             result = response.choices[0].message.content.strip().lower()
 
@@ -106,14 +105,12 @@ def verify_country_relation(
 
         try:
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5.2",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
                     {"role": "user", "content": prompt},
-                ],
-                temperature=0,
-                max_tokens=10,
+                ]
             )
             result = response.choices[0].message.content.strip().lower()
 
@@ -154,14 +151,12 @@ def verify_country_relation(
 
         try:
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5.2",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0,
-                max_tokens=10,
             )
 
             print(f"🔍 SAMR prompt: {prompt}")
@@ -204,14 +199,12 @@ def verify_country_relation(
 
         try:
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5.2",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Return ONLY a JSON array of company names related to {country}."},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0,
-                max_tokens=200,
             )
 
             print(f"🔍 SAMR prompt: {prompt}")
@@ -282,7 +275,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 
         try:
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5.2",
                 messages=[
                     {
                         "role": "system",
@@ -290,8 +283,6 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
                     },
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0,
-                max_tokens=10,
             )
 
             result = response.choices[0].message.content.strip().lower()
@@ -329,14 +320,12 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 
         try:
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5.2",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0,
-                max_tokens=10,
             )
             result = response.choices[0].message.content.strip().lower()
 
@@ -355,6 +344,168 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
             print(f"⚠️ LLM Verification Error: {e}")
             # Default to False on error to avoid false positives
             return False
+
+    elif case_type.upper() == "ACCC":
+
+        context_info = "Australian Competition and Consumer Commission (ACCC) merger case"
+
+        prompt = f"""
+            You are a business analyst specializing in M&A and competition law cases.
+
+            Given the following companies from a {context_info}, determine if this deal or these companies are related to {country}.
+
+            Company Details:
+            {company_details}
+
+            Consider the following when determining if this is related to {country}:
+            - Are any of these companies headquartered in {country}?
+            - Do any of these companies have significant operations, subsidiaries, or business presence in {country}?
+            - Is this deal likely to have material impact on {country} markets?
+            - Are any of these companies publicly traded in {country}?
+
+            Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanation).
+            """
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-5.2",
+                messages=[
+                    {"role": "system",
+                        "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0
+            )
+
+            result = response.choices[0].message.content.strip().lower()
+
+            # Parse boolean result
+            if result == "true":
+                return True
+            elif result == "false":
+                return False
+            else:
+                # If LLM returns something unexpected, default to False for safety
+                print(
+                    f"⚠️ LLM returned unexpected result: '{result}', defaulting to False")
+                return False
+
+        except Exception as e:
+            print(f"⚠️ LLM Verification Error: {e}")
+
+            # Default to False on error to avoid false positives
+            return False
+
+    elif case_type.upper() == "NZ":
+        context_info = "New Zealand Commerce Commission (ComCom) case register"
+
+        prompt = f"""
+            You are a business analyst specializing in M&A and competition law cases.
+
+            Given the following companies from a {context_info}, determine if this deal or these companies are related to {country}.
+
+            Company Details:
+            {company_details}
+
+            Consider the following when determining if this is related to {country}:
+            - Are any of these companies headquartered in {country}?
+            - Do any of these companies have significant operations, subsidiaries, or business presence in {country}?
+            - Is this deal likely to have material impact on {country} markets?
+            - Are any of these companies publicly traded in {country}?
+
+            Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanation).
+            """
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-5.2",
+                messages=[
+                    {"role": "system",
+                        "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            result = response.choices[0].message.content.strip().lower()
+
+            if result == "true":
+                return True
+            elif result == "false":
+                return False
+            else:
+                print(
+                    f"⚠️ LLM returned unexpected result: '{result}', defaulting to False")
+                return False
+
+        except Exception as e:
+            print(f"⚠️ LLM Verification Error: {e}")
+            return False
+
+    elif case_type.upper() == "CANADA":
+        context_info = "Canada Competition Bureau merger case"
+
+        prompt = f"""
+            You are a business analyst specializing in M&A and competition law cases.
+
+            Given the following companies from a {context_info}, determine if this deal or these companies are related to {country}.    
+
+            Company Details:
+            {company_details}
+
+            Consider the following when determining if this is related to {country}:
+            - Are any of these companies headquartered in {country}?
+            - Do any of these companies have significant operations, subsidiaries, or business presence in {country}?
+            - Is this deal likely to have material impact on {country} markets?
+            - Are any of these companies publicly traded in {country}?
+
+            Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanation).
+            """
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-5.2",
+                messages=[
+                    {"role": "system",
+                        "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+
+            print(f"🔍 Canada prompt: {prompt}")
+            result = response.choices[0].message.content.strip().lower()
+
+            if result == "true":
+                return True
+            elif result == "false":
+                return False
+            else:
+                print(
+                    f"⚠️ LLM returned unexpected result: '{result}', defaulting to False")
+                return False
+
+        except Exception as e:
+            print(f"⚠️ LLM Verification Error: {e}")
+            return False
+
+    elif case_type.upper() == "FS":
+        context_info = "Foreign Subsidies Regulatory Commission (FSRC) case"
+
+        prompt = f"""
+            You are a business analyst specializing in M&A and competition law cases.
+
+            Given the following companies from a {context_info}, determine if this deal or these companies are related to {country}.
+
+            Company Details:
+            {company_details}
+
+            Consider the following when determining if this is related to {country}:
+            - Are any of these companies headquartered in {country}?
+            - Do any of these companies have significant operations, subsidiaries, or business presence in {country}?
+            - Is this deal likely to have material impact on {country} markets?
+            - Are any of these companies publicly traded in {country}?
+
+            Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanation).
+        """
+
     else:
         context_info = f"{case_type} merger case"
         prompt = f"""
@@ -376,14 +527,12 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 
         try:
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5.2",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0,
-                max_tokens=10,
             )
             result = response.choices[0].message.content.strip().lower()
 

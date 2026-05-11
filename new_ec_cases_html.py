@@ -50,7 +50,7 @@ import time
 import traceback
 
 from ec_html_scraper import parse_case_html
-from log_utils import cleanup_old_logs
+from log_utils import cleanup_old_logs, refresh_log_file
 
 load_dotenv(".env")
 
@@ -823,6 +823,8 @@ def generate_usa_email(case: Dict[str, Any]) -> Tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 def run(start_url: str, max_pages: Optional[int], headed: bool):
+    global LOG_FILE
+    LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = time.time()
     error_items: List[Dict[str, Any]] = []
     new_count = 0
