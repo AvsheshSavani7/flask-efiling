@@ -2257,12 +2257,9 @@ def cade_cases_update_monitor_endpoint():
     Query parameters:
         headless: string (optional, "true" or "false", default: "true")
 
-    Returns:
-    {
-        "success": bool,
-        "message": "string",
-        "status": "string"
-    }
+    Returns JSON with success true for normal handling (including when the job is
+    already running — HTTP 200 so callers like n8n do not treat the call as failed).
+    Fields: message, status ("running" or "already_running"), job_started (bool).
     """
     try:
         headless_str = request.args.get('headless', 'true')
@@ -2280,12 +2277,20 @@ def cade_cases_update_monitor_endpoint():
         submitted, msg = submit_unique_task(
             "cade-cases-update-monitor", run_monitor)
         if not submitted:
-            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
+            # HTTP 200 so orchestration tools (e.g. n8n) treat the call as success;
+            # use job_started + status to branch in the workflow.
+            return jsonify({
+                "success": True,
+                "message": msg,
+                "status": "already_running",
+                "job_started": False,
+            }), 200
 
         return jsonify({
             "success": True,
             "message": msg,
             "status": "running",
+            "job_started": True,
         }), 200
 
     except Exception as e:
