@@ -10,6 +10,7 @@ import sys
 import traceback
 from logging.handlers import RotatingFileHandler
 from openai import OpenAI
+import anthropic
 from bs4 import BeautifulSoup
 import re
 from mongodb_connection import (
@@ -126,6 +127,7 @@ os.makedirs(HTML_OUTPUT_DIR, exist_ok=True)
 
 load_dotenv(ENV_PATH)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 # Global state
 deals = []
@@ -255,6 +257,62 @@ def translate_to_english(text):
     return "[Translation failed]"
 
 
+def translate_with_openai(text):
+    """Translate Chinese text to English using GPT-4o mini."""
+    try:
+        response = client.responses.create(
+            model="gpt-5.2",
+            tools=[
+                {"type": "web_search"}
+            ],
+            input=[
+                {
+                    "role": "system",
+                    "content": """
+You are a professional Chinese-to-English translator for merger control and regulatory case titles.
+
+Rules:
+1. Return ONLY the translated English title.
+2. Use web search to identify official English company names when possible.
+3. Do NOT explain.
+4. Do NOT provide alternatives.
+5. Do NOT invent company names.
+6. If the official English company name cannot be verified, use a simple transliteration.
+7. Preserve legal/regulatory meaning naturally.
+"""
+                },
+                {
+                    "role": "user",
+                    "content": f"Translate this Simplified Chinese regulatory title to English:\n{text}"
+                }
+            ],
+        )
+
+        return response.output_text.strip()
+    except Exception as e:
+        logger.warning(f"OpenAI translation failed for: {text[:50]}... → {e}")
+    return "[Translation failed]"
+
+
+def translate_with_claude(text):
+    """Translate Chinese text to English using Claude opus-4-0."""
+    try:
+        response = anthropic_client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=512,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"You are a translator. Translate the following Simplified Chinese text to English. Return ONLY the translated text, nothing else.\n\n{text}",
+                },
+            ],
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        logger.warning(f"Claude translation failed for: {text[:50]}... → {e}")
+    return "[Translation failed]"
+
+
 # ---------------------------------------------------------------------------
 # Listing-page HTML parsing
 # ---------------------------------------------------------------------------
@@ -285,7 +343,8 @@ def extract_records_from_html(html_content):
             date_div = item.find("div", class_="contentRight01time")
             date_str = date_div.get_text(strip=True) if date_div else ""
 
-            title_en = translate_to_english(title_cn)
+            title_en = translate_with_claude(title_cn)
+            logger.info(f"Title EN: {title_en}")
 
             record = {
                 "title_cn": title_cn,
@@ -762,8 +821,8 @@ def main(headless=True):
     if success:
         logger.info(msg)
     else:
-        _log_critical_error_and_email(f"MongoDB initialization failed: {msg}", {
-                                      "step": "init_mongodb_connection"})
+        # _log_critical_error_and_email(f"MongoDB initialization failed: {msg}", {
+        #                               "step": "init_mongodb_connection"})
         return {"success": False, "error": msg}
 
     logger.info("[STEP 1.1] Loading deals from MongoDB...")
@@ -817,10 +876,11 @@ def main(headless=True):
                     break
 
         except Exception as e:
-            _log_critical_error_and_email(
-                f"Scraping error: {e}",
-                {"step": "scrape_listing", "base_url": BASE_URL},
-            )
+            logger.exception(f"Scraping error: {e}")
+            # _log_critical_error_and_email(
+            #     f"Scraping error: {e}",
+            #     {"step": "scrape_listing", "base_url": BASE_URL},
+            # )
         finally:
             browser.close()
 
@@ -969,7 +1029,7 @@ def main(headless=True):
 if __name__ == "__main__":
     import sys
 
-    headless_mode = True
+    headless_mode = False
 
     if len(sys.argv) > 1:
         if sys.argv[1] == "--headed":
@@ -987,6 +1047,6 @@ if __name__ == "__main__":
     try:
         main(headless=headless_mode)
     except Exception as e:
-        _log_critical_error_and_email(
-            f"Unhandled error in main: {e}", {"step": "main"})
+        # _log_critical_error_and_email(
+        #     f"Unhandled error in main: {e}", {"step": "main"})
         raise

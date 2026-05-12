@@ -295,6 +295,43 @@ def translate_to_english(text):
     return "[Translation failed]"
 
 
+def translate_with_openai(text):
+    """Translate Chinese text to English using GPT-5.2 with web search."""
+    try:
+        response = client.responses.create(
+            model="gpt-5.2",
+            tools=[
+                {"type": "web_search"}
+            ],
+            input=[
+                {
+                    "role": "system",
+                    "content": """
+You are a professional Chinese-to-English translator for merger control and regulatory case titles.
+
+Rules:
+1. Return ONLY the translated English title.
+2. Use web search to identify official English company names when possible.
+3. Do NOT explain.
+4. Do NOT provide alternatives.
+5. Do NOT invent company names.
+6. If the official English company name cannot be verified, use a simple transliteration.
+7. Preserve legal/regulatory meaning naturally.
+"""
+                },
+                {
+                    "role": "user",
+                    "content": f"Translate this Simplified Chinese regulatory title to English:\n{text}"
+                }
+            ],
+        )
+
+        return response.output_text.strip()
+    except Exception as e:
+        logger.warning(f"OpenAI translation failed for: {text[:50]}... → {e}")
+    return "[Translation failed]"
+
+
 # ---------------------------------------------------------------------------
 # Listing-page HTML parsing
 # ---------------------------------------------------------------------------
@@ -330,7 +367,7 @@ def extract_records_from_html(html_content):
                 base_domain = "https://www.samr.gov.cn"
                 href = requests.compat.urljoin(base_domain, href)
 
-            title_en = translate_to_english(title_cn)
+            title_en = translate_with_openai(title_cn)
 
             record = {
                 "title_cn": title_cn,
@@ -443,9 +480,9 @@ def extract_table_rows_from_detail(context, url):
             if match:
                 approval_date = f"{match.group(1)}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
 
-            case_name_en = translate_to_english(case_name_cn)
+            case_name_en = translate_with_openai(case_name_cn)
             time.sleep(0.2)
-            operators_en = translate_to_english(operators_cn)
+            operators_en = translate_with_openai(operators_cn)
             time.sleep(0.2)
 
             rows_out.append({
