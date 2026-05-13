@@ -9,7 +9,7 @@ process NEW filings/documents since that watermark. Everything before the
 matching Filing+Document combination is considered new and gets downloaded.
 
 Install:
-    pip install playwright python-dotenv
+    pip install -r requirements.txt
     playwright install chromium
 
 Run:
@@ -21,6 +21,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import logging
 import mimetypes
@@ -37,6 +38,12 @@ from tier1_summary_generator import generate_tier1_summary
 from aws_utils import build_docket_key, upload_bytes_to_s3
 
 load_dotenv(".env")
+
+# OpenAI fallback for image-only / scanned PDFs (same idea as nm_prc_document_download_extract).
+_PDF_OPENAI_OCR_MODEL = os.getenv("MT_PSC_PDF_OCR_MODEL", "gpt-4.1-mini")
+_PDF_OPENAI_OCR_MAX_BYTES = int(
+    os.getenv("MT_PSC_PDF_OCR_MAX_BYTES", str(15 * 1024 * 1024))
+)
 
 LOG_LEVEL = (os.getenv("LOG_LEVEL") or "INFO").upper()
 logger = logging.getLogger("mt_psc_scraper")
@@ -736,7 +743,7 @@ def _flatten_filings(filings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # Text Extraction (PDF, DOCX, XLSX, PPTX, ZIP)
 # ---------------------------------------------------------------------------
 
-def _extract_text_from_pdf(file_path: str) -> str:
+def _extract_pdf_text_pypdf2(file_path: str) -> str:
     try:
         from PyPDF2 import PdfReader
         reader = PdfReader(file_path)
@@ -750,8 +757,103 @@ def _extract_text_from_pdf(file_path: str) -> str:
                 continue
         return "\n".join(parts)
     except Exception as e:
-        logger.warning(f"PDF extraction failed for {file_path}: {e}")
+        logger.warning(f"PyPDF2 extraction failed for {file_path}: {e}")
         return ""
+
+
+def _extract_pdf_text_pymupdf(file_path: str) -> str:
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        return ""
+    try:
+        doc = fitz.open(file_path)
+        parts: List[str] = []
+        try:
+            for page in doc:
+                t = page.get_text()
+                if t and t.strip():
+                    parts.append(t)
+        finally:
+            doc.close()
+        return "\n".join(parts)
+    except Exception as e:
+        logger.debug("PyMuPDF extraction failed for %s: %s", file_path, e)
+        return ""
+
+
+def _extract_pdf_text_openai_ocr(file_path: str) -> str:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return ""
+    try:
+        with open(file_path, "rb") as f:
+            pdf_bytes = f.read()
+    except OSError as e:
+        logger.debug("Could not read PDF for OpenAI OCR %s: %s", file_path, e)
+        return ""
+    if not pdf_bytes.startswith(b"%PDF"):
+        return ""
+    if len(pdf_bytes) > _PDF_OPENAI_OCR_MAX_BYTES:
+        logger.info(
+            "  OpenAI PDF OCR skipped (file too large): %s bytes > %s",
+            len(pdf_bytes),
+            _PDF_OPENAI_OCR_MAX_BYTES,
+        )
+        return ""
+    doc_name = os.path.basename(file_path)
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key)
+        pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+        response = client.responses.create(
+            model=_PDF_OPENAI_OCR_MODEL,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "Extract all readable text from this PDF. "
+                                "Return only extracted text, preserving order as best as possible. "
+                                "Do not summarize."
+                            ),
+                        },
+                        {
+                            "type": "input_file",
+                            "filename": doc_name,
+                            "file_data": f"data:application/pdf;base64,{pdf_b64}",
+                        },
+                    ],
+                }
+            ],
+        )
+        return (response.output_text or "").strip()
+    except Exception as e:
+        logger.warning("OpenAI PDF OCR failed for %s: %s", doc_name, e)
+        return ""
+
+
+def _extract_text_from_pdf(file_path: str) -> str:
+    short = os.path.basename(file_path)
+    text = _extract_pdf_text_pypdf2(file_path)
+    if (text or "").strip():
+        return text
+    text = _extract_pdf_text_pymupdf(file_path)
+    if (text or "").strip():
+        logger.info(
+            "  PDF text via PyMuPDF fallback: %s (%s chars)", short, len(text)
+        )
+        return text
+    text = _extract_pdf_text_openai_ocr(file_path)
+    if (text or "").strip():
+        logger.info(
+            "  PDF text via OpenAI OCR fallback: %s (%s chars)", short, len(text)
+        )
+        return text
+    return ""
 
 
 def _extract_text_from_docx(file_path: str) -> str:
@@ -1146,7 +1248,7 @@ def main():
         help="REDDI Case ID to open (default: DCKT-3556)",
     )
     parser.add_argument(
-        "--last-id", default="FIL-38345_DOC-69778",
+        "--last-id", default="FIL-38392_DOC-69839",
         help="Watermark: FIL-xxxxx_DOC-xxxxx. Only process filings BEFORE this.",
     )
     parser.add_argument(
