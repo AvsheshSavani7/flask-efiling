@@ -486,6 +486,59 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
             print(f"⚠️ LLM Verification Error: {e}")
             return False
 
+    elif case_type.upper() == "FTC":
+        context_info = (
+            "U.S. Federal Trade Commission (FTC) Hart-Scott-Rodino (HSR) "
+            "early termination notice"
+        )
+
+        prompt = f"""
+            You are a business analyst specializing in M&A and competition law cases.
+
+            Given the following parties from an {context_info}, determine if this transaction or these companies are related to {country}.
+
+            Company Details:
+            {company_details}
+
+            The filing appears on a U.S. federal register, but the parties may be foreign. Focus on named acquirers, targets, and entities in the text.
+
+            Consider the following when determining if this is related to {country}:
+            - Are any of these companies headquartered in {country}?
+            - Do any of these companies have significant operations, subsidiaries, or business presence in {country}?
+            - Is this deal likely to have material impact on {country} markets?
+            - Are any of these companies publicly traded in {country}?
+
+            Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanation).
+            """
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-5.2",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0,
+            )
+
+            result = response.choices[0].message.content.strip().lower()
+
+            if result == "true":
+                return True
+            elif result == "false":
+                return False
+            else:
+                print(
+                    f"⚠️ LLM returned unexpected result: '{result}', defaulting to False")
+                return False
+
+        except Exception as e:
+            print(f"⚠️ LLM Verification Error: {e}")
+            return False
+
     elif case_type.upper() == "FS":
         context_info = "Foreign Subsidies Regulatory Commission (FSRC) case"
 
@@ -505,6 +558,28 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 
             Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanation).
         """
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-5.2",
+                messages=[
+                    {"role": "system",
+                        "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            result = response.choices[0].message.content.strip().lower()
+
+            if result == "true":
+                return True
+            if result == "false":
+                return False
+            print(
+                f"⚠️ LLM returned unexpected result: '{result}', defaulting to False")
+            return False
+        except Exception as e:
+            print(f"⚠️ LLM Verification Error: {e}")
+            return False
 
     else:
         context_info = f"{case_type} merger case"
@@ -562,7 +637,7 @@ def verify_usa_relation(
 
     Args:
         company_details: Company details to verify (can be string, list, dict, etc.) - passed as-is to LLM
-        case_type: Type of case (EC, China, Brazil, etc.) for context
+        case_type: Type of case (EC, China, Brazil, FTC, ACCC, etc.) for context
         additional_context: Optional additional context to provide to LLM
 
     Returns:

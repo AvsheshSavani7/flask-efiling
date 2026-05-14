@@ -32,7 +32,7 @@ from accc_waiver_register import run_accc_waiver_register
 from cade_cases_register import run_cade_cases_register
 from cade_cases_update_monitor import process_brazil_cases_updates
 from accc_cases_update_monitor import process_accc_cases_updates
-from ftc_early_termination_scraper import main as ftc_early_termination_main
+from ftc_cases_scraper import run_ftc_cases_scraper
 from nz_comcom_case_register import main as nz_comcom_case_register_main
 from nz_comcom_case_register_to_db import run as nz_comcom_case_register_to_db_run
 from competition_bureau_canada_mergers import main as competition_bureau_canada_main
@@ -151,7 +151,7 @@ def home():
             "/new-cade-cases-register": "GET - Scrape CADE Brazil public notices and store in brazil_cases collection (query params: headless, days)",
             "/new-cade-cases-update-monitor": "GET - Monitor brazil_cases for updates and send email notifications (query param: headless)",
             "/new-accc-cases-update-monitor": "GET - Monitor ACCC acquisition cases for updates and send email notifications",
-            "/ftc-early-termination-scraper": "GET - Scrape FTC early termination notices and match with deals",
+            "/ftc-early-termination-scraper": "GET - FTC early termination list scrape → ftc_cases collection, deal match, emails (logs: /logs?script=ftc_cases)",
             "/nz-comcom-case-register": "GET - Scrape NZ ComCom case register and match with deals",
             "/nz-comcom-case-update-monitor": "GET - Monitor NZ ComCom cases for updates and send email notifications",
             "/nz-comcom-case-register-to-db": "GET - Scrape NZ ComCom case register and save new records to nz_cases collection",
@@ -1817,10 +1817,12 @@ def accc_acquisitions_scraper():
 @app.route('/ftc-early-termination-scraper', methods=['GET'])
 def ftc_early_termination_scraper():
     """
-    Scrape FTC early termination notices and match with deals.
-    Fetches page 0 and 1 of FTC legal library early termination notices,
-    filters by current date, matches with deals via LLM, saves to deals and sends emails.
-    Process runs in background - returns immediately.
+    Run ``ftc_cases_scraper.run_ftc_cases_scraper``: scrape the FTC early-termination
+    list (no detail pages), filter by cutoff date, insert new rows into MongoDB
+    ``ftc_cases``, LLM match to deals (deal_id on document only), USA check +
+    emails for unmatched. Logs under ``ftc_cases`` (see ``KNOWN_LOG_SCRIPTS``).
+
+    Process runs in background — returns immediately.
 
     Returns:
     {
@@ -1833,15 +1835,15 @@ def ftc_early_termination_scraper():
         def run_scraper():
             try:
                 logger.info(
-                    "Starting FTC early termination scraper in background")
-                ftc_early_termination_main()
+                    "Starting FTC cases scraper in background")
+                run_ftc_cases_scraper()
                 logger.info(
-                    "✅ FTC early termination scraper completed successfully")
+                    "✅ FTC cases scraper completed successfully")
             except Exception as e:
-                logger.exception("Error in FTC early termination scraper")
+                logger.exception("Error in FTC cases scraper")
 
         submitted, msg = submit_unique_task(
-            "ftc-early-termination-scraper", run_scraper)
+            "ftc-cases-scraper", run_scraper)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
 
@@ -1852,7 +1854,7 @@ def ftc_early_termination_scraper():
         }), 200
 
     except Exception as e:
-        logger.error(f"Error starting FTC early termination scraper: {str(e)}")
+        logger.error(f"Error starting FTC cases scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -2700,6 +2702,7 @@ KNOWN_LOG_SCRIPTS = {
     "samr-cases-public",
     "samr-cases-conditional",
     "samr-cases-unconditional",
+    "ftc_cases"
 }
 
 
