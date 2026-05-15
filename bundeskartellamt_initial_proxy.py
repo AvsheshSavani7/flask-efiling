@@ -3,14 +3,13 @@ Bundeskartellamt Laufende Verfahren (Ongoing Proceedings) scraper — Proxy vers
 
 Workflow:
 1. Fetch deals from MongoDB (Open/Unknown/null/missing status)
-2. Fetch german_cases collection (is_open=True) for dedup by file_number
+2. Fetch all german_cases file_numbers for dedup (any is_open — avoids re-processing closed rows)
 3. Fetch HTML via German residential proxy, paginate until cutoff date
 4. Extract table rows (raw — no translation yet)
 5. For each row: skip if file_number already in german_cases
-6. New records only: translate to English, determine is_open from Abschluss column
-7. LLM match against deals → matched: send [FRMD] email, save with deal_id
-8. Not matched → LLM check USA-related → true: send [FRUD] email
-9. All records saved to german_cases collection
+6. New file_numbers only: translate to English, determine is_open from Abschluss column
+7. LLM match against deals; upsert to german_cases by file_number (preserves created_at on updates)
+8. On newly inserted doc only: matched → [FRMD] email; else USA-related → [FRUD] email
 """
 
 import json
@@ -55,6 +54,11 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
+
+N8N_WEBHOOK_URL = os.getenv(
+    "N8N_WEKHOOK_INTERNAL_WITH_JOSH",
+    "https://n8n-xwx1.onrender.com/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
+)
 
 
 def _get_log_file() -> str:
@@ -174,20 +178,23 @@ def get_german_cases_collection():
     return db["german_cases"]
 
 
-def fetch_open_german_cases(collection) -> Dict[str, dict]:
-    """Return {file_number: doc} for all is_open=True records in german_cases."""
+def fetch_existing_german_case_file_numbers(collection) -> Set[str]:
+    """All non-empty file_number values in german_cases (open or closed) for dedup."""
     try:
-        docs = list(collection.find({"is_open": True}))
-        lookup = {}
-        for doc in docs:
-            fn = doc.get("file_number", "")
-            if fn:
-                lookup[fn] = doc
-        logger.info(f"Loaded {len(lookup)} open german_cases for dedup")
-        return lookup
+        cursor = collection.find(
+            {"file_number": {"$exists": True, "$nin": [None, ""]}},
+            {"file_number": 1, "_id": 0},
+        )
+        out: Set[str] = set()
+        for doc in cursor:
+            fn = doc.get("file_number")
+            if isinstance(fn, str) and fn.strip():
+                out.add(fn.strip())
+        logger.info(f"Loaded {len(out)} german_cases file_numbers for dedup")
+        return out
     except Exception as e:
-        logger.warning(f"Error fetching german_cases: {e}")
-        return {}
+        logger.warning(f"Error fetching german_cases file_numbers: {e}")
+        return set()
 
 
 def fetch_deals() -> List[Dict[str, Any]]:
@@ -213,13 +220,36 @@ def fetch_deals() -> List[Dict[str, Any]]:
         return []
 
 
-def insert_german_case(collection, doc: Dict[str, Any]) -> Optional[str]:
+def upsert_german_case(collection, doc: Dict[str, Any]) -> Tuple[Optional[str], bool]:
+    """Upsert by file_number. Returns (MongoDB _id as str, inserted_new)."""
+    fn = doc.get("file_number")
+    if not fn or not str(fn).strip():
+        logger.warning("upsert_german_case: missing file_number")
+        return None, False
+    fn = str(fn).strip()
+    now = utc_now_iso()
+    payload = {
+        k: v for k, v in doc.items()
+        if k not in ("_id", "created_at")
+    }
+    payload["file_number"] = fn
+    payload["updated_at"] = now
     try:
-        result = collection.insert_one(doc)
-        return str(result.inserted_id)
+        result = collection.update_one(
+            {"file_number": fn},
+            {"$set": payload, "$setOnInsert": {"created_at": now}},
+            upsert=True,
+        )
+        inserted_new = result.upserted_id is not None
+        if inserted_new:
+            oid = result.upserted_id
+        else:
+            row = collection.find_one({"file_number": fn}, {"_id": 1})
+            oid = row["_id"] if row else None
+        return (str(oid) if oid is not None else None), inserted_new
     except Exception as e:
-        logger.warning(f"Error inserting german_case: {e}")
-        return None
+        logger.warning(f"Error upserting german_case: {e}")
+        return None, False
 
 
 def utc_now_iso() -> str:
@@ -589,7 +619,7 @@ def send_email_via_webhook(subject: str, html: str, file_number: str = "",
         }
         if deal_id:
             payload["deal_id"] = deal_id
-        resp = requests.post(webhook_url, json=payload,
+        resp = requests.post(N8N_WEBHOOK_URL, json=payload,
                              headers={"Content-Type": "application/json"}, timeout=30)
         resp.raise_for_status()
         logger.info(f"   Email sent ({resp.status_code})")
@@ -623,18 +653,17 @@ def main():
 
     # Step 1a: Fetch deals
     deals = fetch_deals()
-    deal_by_id = {str(d.get("deal_id", ""))                  : d for d in deals if d.get("deal_id")}
+    deal_by_id = {str(d.get("deal_id", "")): d for d in deals if d.get("deal_id")}
 
-    # Step 2: Fetch german_cases (is_open=True) for dedup
+    # Step 2: Fetch all german_cases file_numbers for dedup (open + closed)
     gc_collection = get_german_cases_collection()
     if gc_collection is None:
         _log_critical_error_and_email("german_cases collection not available", {
                                       "step": "get_german_cases_collection"})
         return {"success": False, "error": "german_cases collection unavailable"}
 
-    existing_cases = fetch_open_german_cases(gc_collection)
-    logger.info(f"Existing cases: {existing_cases}")
-    existing_file_numbers: Set[str] = set(existing_cases.keys())
+    existing_file_numbers = fetch_existing_german_case_file_numbers(
+        gc_collection)
 
     # Step 3+4+5: Fetch HTML, extract rows, paginate until cutoff
     cutoff = CUTOFF_DATE.date() if isinstance(
@@ -659,11 +688,15 @@ def main():
     logger.info(f"Processing {len(all_raw_records)} records...")
 
     for idx, raw in enumerate(all_raw_records, 1):
-        fn = raw.get("file_number", "")
+        fn = (raw.get("file_number") or "").strip()
         logger.info(
             f"[{idx}/{len(all_raw_records)}] {fn} — {raw.get('pursue', '')[:60]}...")
 
-        # Step 6: Dedup — skip if file_number exists in german_cases
+        if not fn:
+            logger.warning("  Missing file_number, skipping row")
+            continue
+
+        # Step 6: Dedup — skip if file_number exists in german_cases (any is_open)
         if fn in existing_file_numbers:
             logger.info(f"  Already in german_cases, skipping")
             stats["skipped"] += 1
@@ -690,8 +723,6 @@ def main():
             "diploma_en": diploma_en,
             "is_open": is_open,
             "deal_id": None,
-            "created_at": utc_now_iso(),
-            "updated_at": utc_now_iso(),
         }
 
         logger.info(
@@ -707,19 +738,11 @@ def main():
             deal_match, matched_company, matched_role = parse_llm_match(
                 match_result, deal_by_id)
 
+        is_usa = False
         if deal_match:
-            # Deal matched → send [FRMD] email, save with deal_id
             record["deal_id"] = deal_match.get("deal_id")
-
             logger.info(f"  Matched: {matched_company} ({matched_role})")
-
-            subject, html = generate_matched_email(record, deal_match)
-            send_email_via_webhook(
-                subject, html, fn, deal_id=deal_match.get("deal_id"))
-            stats["matched"] += 1
-
         else:
-            # Step 9: Not matched → check USA-related
             logger.info(f"  No deal match")
             try:
                 company_details = {
@@ -739,20 +762,29 @@ def main():
                 is_usa = False
 
             if is_usa:
-                logger.info(f"  USA-related → sending [FRUD] email")
-                subject, html = generate_usa_related_email(record)
-                send_email_via_webhook(subject, html, fn)
-                stats["usa_related"] += 1
+                logger.info(f"  USA-related (notify only if new insert)")
             else:
                 logger.info(f"  Not USA-related → silent save")
 
-        # Step 10: Save to german_cases
-        inserted_id = insert_german_case(gc_collection, record)
-        if inserted_id:
+        # Step 9: Upsert to german_cases (one doc per file_number)
+        doc_id, inserted_new = upsert_german_case(gc_collection, record)
+        if doc_id:
             stats["saved"] += 1
-            stats["new"] += 1
             existing_file_numbers.add(fn)
-            logger.info(f"  Saved to german_cases (id={inserted_id})")
+            logger.info(
+                f"  Saved to german_cases (id={doc_id}, new_insert={inserted_new})")
+            if inserted_new:
+                stats["new"] += 1
+                if deal_match:
+                    subject, html = generate_matched_email(record, deal_match)
+                    send_email_via_webhook(
+                        subject, html, fn, deal_id=deal_match.get("deal_id"))
+                    stats["matched"] += 1
+                elif is_usa:
+                    logger.info(f"  Sending [FRUD] email (first insert)")
+                    subject, html = generate_usa_related_email(record)
+                    send_email_via_webhook(subject, html, fn)
+                    stats["usa_related"] += 1
         else:
             logger.error(f"  Failed to save to german_cases")
 
