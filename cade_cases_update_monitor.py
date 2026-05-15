@@ -639,6 +639,41 @@ def extract_tables(page, context, url: str, max_retries: int = 2) -> Tuple[List[
 # Change detection
 # ---------------------------------------------------------------------------
 
+def live_detail_scrape_looks_incomplete(
+    stored: Dict[str, Any],
+    live_type: str,
+    live_interessados: str,
+    live_table_records: List[Dict[str, Any]],
+    live_historico_records: List[Dict[str, Any]],
+) -> bool:
+    """
+    Heuristic: live HTML is probably a failed or partially rendered fetch.
+
+    When both SEI tables are empty but we expect real content, treating the
+    snapshot as authoritative causes false interessados removals and DB churn.
+    """
+    n_tab, n_hist = len(live_table_records), len(live_historico_records)
+    if n_tab > 0 or n_hist > 0:
+        return False
+
+    stored_tab = stored.get("table_records") or []
+    stored_hist = stored.get("historico_records") or []
+    had_tabular = len(stored_tab) > 0 or len(stored_hist) > 0
+
+    stored_type = (stored.get("type") or "").strip()
+    stored_inter = (stored.get("interessados") or "").strip()
+    live_ty = (live_type or "").strip()
+    live_inter = (live_interessados or "").strip()
+
+    if had_tabular:
+        return True
+    if stored_inter and not live_inter:
+        return True
+    if (stored_type or stored_inter) and not live_ty and not live_inter:
+        return True
+    return False
+
+
 def detect_changes(
     stored: Dict[str, Any],
     live_type: str,
@@ -1053,6 +1088,19 @@ def process_brazil_cases_updates(headless: bool = True):
                     page, context, detail_url)
                 logger.info(f"[STEP 2.6] Live: type={live_type[:50]}..., "
                             f"table_records={len(live_table)}, historico={len(live_historico)}")
+
+                if live_detail_scrape_looks_incomplete(
+                    case_doc,
+                    live_type,
+                    live_interessados,
+                    live_table,
+                    live_historico,
+                ):
+                    logger.warning(
+                        "[STEP 2.6b] Live scrape looks incomplete (empty tables vs stored "
+                        "expectations); skipping updates and notifications — retry next run"
+                    )
+                    continue
 
                 should_close = any(
                     rec.get("tipo_documento", "").strip(
