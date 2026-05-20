@@ -1267,7 +1267,7 @@ def run_cade_cases_register(
                     f"[STEP 2.1] Searching: {type_name} (id={type_id})")
 
                 page.goto(BASE_URL, wait_until="domcontentloaded",
-                          timeout=30000)
+                          timeout=50000)
                 time.sleep(3)
 
                 if not submit_search_form(page, start_date, end_date, process_type_id=type_id):
