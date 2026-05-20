@@ -695,17 +695,11 @@ def detect_changes(
     if old_type and new_type and old_type != new_type:
         changes.append(("type", old_type, new_type, "updated"))
 
-    # 2) interessados
+    # 2) interessados — only compare when stored value is empty (waiting to fill)
     old_inter = (stored.get("interessados") or "").strip()
     new_inter = (live_interessados or "").strip()
-    if old_inter != new_inter:
-        if old_inter and not new_inter:
-            change_t = "removed"
-        elif not old_inter and new_inter:
-            change_t = "new"
-        else:
-            change_t = "updated"
-        changes.append(("interessados", old_inter, new_inter, change_t))
+    if not old_inter and new_inter:
+        changes.append(("interessados", old_inter, new_inter, "new"))
 
     # 3) table_records — keyed by documento_processo
     existing_doc_ids = set()
