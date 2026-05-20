@@ -11,6 +11,7 @@ Workflow:
 7. LLM match against deals; upsert to german_cases by file_number (preserves created_at on updates)
 8. On newly inserted doc only: matched → [FRMD] email; else USA-related → [FRUD] email
 """
+# dummay comment for deployment check in hostinger
 
 import json
 import os
@@ -653,7 +654,8 @@ def main():
 
     # Step 1a: Fetch deals
     deals = fetch_deals()
-    deal_by_id = {str(d.get("deal_id", "")): d for d in deals if d.get("deal_id")}
+    deal_by_id = {str(d.get("deal_id", ""))
+                      : d for d in deals if d.get("deal_id")}
 
     # Step 2: Fetch all german_cases file_numbers for dedup (open + closed)
     gc_collection = get_german_cases_collection()

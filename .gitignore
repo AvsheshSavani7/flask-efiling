@@ -1,0 +1,16 @@
+.env
+*.html
+*.json
+*.log
+*.txt
+*.pdf
+*.docx
+*.doc
+*.xls
+*.xlsx
+*.csv
+*.zip
+*.rar
+*.7z
+*.pyc
+*.md
