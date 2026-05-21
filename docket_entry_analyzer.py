@@ -9,14 +9,18 @@ Only returns new entries that are analyzed and added to the database.
 """
 
 import json
+import logging
 import os
 import tempfile
 import time
+from logging.handlers import RotatingFileHandler
 from typing import Dict, Any, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import anthropic
 from openai import OpenAI
 from pymongo import MongoClient
+
+from log_utils import cleanup_old_logs, refresh_log_file
 
 ENV_FILE = ".env"
 COMPREHENSIVE_SUMMARY_MODEL = "gpt-5-mini-2025-08-07"
@@ -40,6 +44,69 @@ def _load_env_file(env_path: str) -> None:
                 key = key.strip()
                 value = value.strip().strip('"').strip("'")
                 os.environ[key] = value
+
+
+_load_env_file(ENV_FILE)
+
+# -----------------------------------------------------------------------------
+# Logging — date-wise log files under /var/data/logs/ (persistent disk)
+# Timestamps in IST (UTC+5:30)
+# -----------------------------------------------------------------------------
+PERSISTENT_LOG_DIR = "/var/data/logs"
+SCRIPT_NAME = "docket_entry_analyzer"
+LOGGER_NAME = "docket_entry_analyzer"
+IST = timezone(timedelta(hours=5, minutes=30))
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
+
+
+def _get_log_file() -> str:
+    base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
+    log_dir = os.path.join(base, SCRIPT_NAME)
+    os.makedirs(log_dir, exist_ok=True)
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    return os.path.join(log_dir, f"{today}.log")
+
+
+LOG_FILE = _get_log_file()
+
+logger = logging.getLogger(LOGGER_NAME)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+
+if not logger.handlers:
+    class _ISTFormatter(logging.Formatter):
+        def converter(self, timestamp):
+            return datetime.fromtimestamp(timestamp, tz=IST)
+
+        def formatTime(self, record, datefmt=None):
+            ct = self.converter(record.created)
+            if datefmt:
+                return ct.strftime(datefmt)
+            return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
+
+    formatter = _ISTFormatter(fmt="%(asctime)s | %(levelname)s | %(message)s")
+
+    file_handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+
+logger.propagate = False
+
+cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 
 
 def convert_date_to_datetime(date_str: str) -> Optional[datetime]:
@@ -103,7 +170,7 @@ def _generate_comprehensive_summary_with_file_upload(
     Returns:
         Dictionary with summary, tokens, and cost information
     """
-    print("Using file upload approach for comprehensive summary...")
+    logger.info("Using file upload approach for comprehensive summary...")
 
     # Create a temporary text file
     with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tmp_file:
@@ -112,7 +179,8 @@ def _generate_comprehensive_summary_with_file_upload(
 
     try:
         # Upload file to OpenAI
-        print(f"Uploading file to OpenAI ({len(full_text):,} characters)...")
+        logger.info(
+            f"Uploading file to OpenAI ({len(full_text):,} characters)...")
         with open(tmp_file_path, 'rb') as file:
             uploaded_file = openai_client.files.create(
                 file=file,
@@ -120,10 +188,10 @@ def _generate_comprehensive_summary_with_file_upload(
             )
 
         file_id = uploaded_file.id
-        print(f"✓ File uploaded with ID: {file_id}")
+        logger.info(f"✓ File uploaded with ID: {file_id}")
 
         # Create an assistant
-        print("Creating assistant...")
+        logger.info("Creating assistant...")
         assistant = openai_client.beta.assistants.create(
             name="Document Summarizer",
             instructions="""You are a legal document summarizer. Create comprehensive summaries that preserve all important details for further analysis.""",
@@ -131,10 +199,10 @@ def _generate_comprehensive_summary_with_file_upload(
             tools=[{"type": "file_search"}]
         )
 
-        print(f"✓ Assistant created with ID: {assistant.id}")
+        logger.info(f"✓ Assistant created with ID: {assistant.id}")
 
         # Create a thread with the file
-        print("Creating thread with file...")
+        logger.info("Creating thread with file...")
         thread = openai_client.beta.threads.create(
             messages=[
                 {
@@ -179,10 +247,10 @@ Target length: 1000-2000 words depending on complexity.""",
             ]
         )
 
-        print(f"✓ Thread created with ID: {thread.id}")
+        logger.info(f"✓ Thread created with ID: {thread.id}")
 
         # Run the assistant
-        print("Running assistant...")
+        logger.info("Running assistant...")
         run = openai_client.beta.threads.runs.create(
             thread_id=thread.id,
             assistant_id=assistant.id
@@ -201,12 +269,12 @@ Target length: 1000-2000 words depending on complexity.""",
                 thread_id=thread.id,
                 run_id=run.id
             )
-            print(f"  Status: {run.status}")
+            logger.info(f"  Status: {run.status}")
 
         if run.status != 'completed':
             raise Exception(f"Assistant run failed with status: {run.status}")
 
-        print(f"✓ Assistant run completed")
+        logger.info("✓ Assistant run completed")
 
         # Get the messages
         messages = openai_client.beta.threads.messages.list(
@@ -236,21 +304,23 @@ Target length: 1000-2000 words depending on complexity.""",
             ASSISTANTS_API_MODEL
         )
 
-        print(
+        logger.info(
             f"✓ Generated comprehensive summary: {len(comprehensive_summary_text):,} characters")
 
         # Clean up
         try:
             openai_client.files.delete(file_id)
-            print(f"✓ Cleaned up uploaded file")
+            logger.info("✓ Cleaned up uploaded file")
         except Exception as e:
-            print(f"Warning: Could not delete uploaded file: {str(e)}")
+            logger.warning(
+                "Could not delete uploaded file: %s", str(e))
 
         try:
             openai_client.beta.assistants.delete(assistant.id)
-            print(f"✓ Cleaned up assistant")
+            logger.info("✓ Cleaned up assistant")
         except Exception as e:
-            print(f"Warning: Could not delete assistant: {str(e)}")
+            logger.warning(
+                "Could not delete assistant: %s", str(e))
 
         return {
             "summary": comprehensive_summary_text,
@@ -270,7 +340,8 @@ Target length: 1000-2000 words depending on complexity.""",
         try:
             os.unlink(tmp_file_path)
         except Exception as e:
-            print(f"Warning: Could not delete temp file: {str(e)}")
+            logger.warning(
+                "Could not delete temp file: %s", str(e))
 
 
 def analyze_docket_entry(
@@ -291,7 +362,9 @@ def analyze_docket_entry(
     Returns:
         Dictionary containing analysis results with tier1, tier2 and tier3 responses
     """
+    global LOG_FILE
 
+    LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     _load_env_file(ENV_FILE)
 
     mongodb_uri = os.environ.get("MONGODB_CONNECTION_STRING")
@@ -331,11 +404,17 @@ def analyze_docket_entry(
                     }
                 })
                 if merger:
-                    target_company_name = merger.get("target_company_name", "")
-                    print(
-                        f"Found target company: {target_company_name} for docket {docket_type}/{docket_number}")
+                    target_company_name = merger.get(
+                        "target_company_name", "")
+                    logger.info(
+                        "Found target company: %s for docket %s/%s",
+                        target_company_name,
+                        docket_type,
+                        docket_number,
+                    )
             except Exception as e:
-                print(f"Warning: Could not query mergers collection: {str(e)}")
+                logger.warning(
+                    "Could not query mergers collection: %s", str(e))
 
         existing_entry = collection.find_one(
             {"metadata.document_id": doc_number})
@@ -405,7 +484,7 @@ def analyze_docket_entry(
         for entry in all_entries:
             entry.pop("_id", None)
 
-        print(f"All entries: length {len(all_entries)}")
+        logger.info("All entries: length %s", len(all_entries))
 
         # Calculate next hash_id: filter by docket_type only, sort by date
         # Use the same query_filter as all_entries (filters by docket_type)
@@ -454,7 +533,7 @@ def analyze_docket_entry(
     # Next entry number is simply the count of filtered entries + 1
     next_entry_number = len(all_entries) + 1
 
-    print(f"Next entry number: {next_entry_number}")
+    logger.info("Next entry number: %s", next_entry_number)
 
     # Convert date to datetime object if it exists and is a string
     date_value = metadata.get("date", "N/A")
@@ -485,7 +564,7 @@ def analyze_docket_entry(
 
     # Estimate token count (rough estimate: 1 token ≈ 4 characters)
     estimated_tokens = len(full_text) // 4
-    print(f"Estimated tokens: {estimated_tokens}")
+    logger.info("Estimated tokens: %s", estimated_tokens)
 
     comprehensive_summary_data = None
     content_for_tier2 = full_text
@@ -548,15 +627,17 @@ Based on the COMPLETE docket history above and this new entry, provide:
 Be specific and cite entry numbers when referencing prior events."""
 
     try:
-        print("Attempting to generate tier2 analysis directly...")
+        logger.info("Attempting to generate tier2 analysis directly...")
         tier2_message = client.messages.create(
             model=TIER2_MODEL,
             max_tokens=1000,
             temperature=0.3,
             messages=[{"role": "user", "content": tier2_prompt}]
         )
+        logger.info("Tier2 prompt: %s", tier2_prompt)
+        logger.info("Tier2 message: %s", tier2_message)
 
-        print(f"✓ Tier2 analysis generated directly")
+        logger.info("✓ Tier2 analysis generated directly")
 
         tier2_response = tier2_message.content[0].text
         tier2_input_tokens = tier2_message.usage.input_tokens
@@ -565,8 +646,9 @@ Be specific and cite entry numbers when referencing prior events."""
             tier2_input_tokens, tier2_output_tokens, TIER2_MODEL)
 
     except Exception as tier2_error:
-        print(f"⚠ Direct tier2 generation failed: {str(tier2_error)}")
-        print("Falling back to comprehensive summary approach...")
+        logger.warning(
+            "Direct tier2 generation failed: %s", str(tier2_error))
+        logger.info("Falling back to comprehensive summary approach...")
 
         # FALLBACK: Generate comprehensive summary first
         comprehensive_summary_prompt = f"""You are summarizing a legal docket entry for further analysis. Create a comprehensive summary that preserves all important details.
@@ -607,7 +689,7 @@ Target length: 1000-2000 words depending on complexity."""
 
         try:
             # Always try direct comprehensive summary first
-            print("Generating comprehensive summary...")
+            logger.info("Generating comprehensive summary...")
             try:
                 comprehensive_summary_message = openai_client.chat.completions.create(
                     model=COMPREHENSIVE_SUMMARY_MODEL,
@@ -639,17 +721,22 @@ Target length: 1000-2000 words depending on complexity."""
                     "reason": f"Fallback: Direct tier2 generation failed with error: {str(tier2_error)}"
                 }
 
-                print(
-                    f"✓ Generated comprehensive summary: {estimated_tokens:,} tokens → {len(comprehensive_summary_text)} chars")
+                logger.info(
+                    "✓ Generated comprehensive summary: %s tokens → %s chars",
+                    f"{estimated_tokens:,}",
+                    len(comprehensive_summary_text),
+                )
 
             except Exception as direct_error:
                 error_str = str(direct_error)
-                print("err", error_str)
+                logger.error("err %s", error_str)
                 # Check if it's a token limit error
                 if "context_length_exceeded" in error_str or "tokens exceed" in error_str.lower() or "string too long" in error_str.lower():
-                    print(
-                        f"⚠ Direct API call failed due to token limit: {error_str}")
-                    print("Switching to file upload approach...")
+                    logger.warning(
+                        "Direct API call failed due to token limit: %s",
+                        error_str)
+                    logger.info(
+                        "Switching to file upload approach...")
 
                     comprehensive_summary_data = _generate_comprehensive_summary_with_file_upload(
                         openai_client=openai_client,
@@ -661,8 +748,11 @@ Target length: 1000-2000 words depending on complexity."""
                     comprehensive_summary_data["reason"] = f"Fallback + File Upload: Token limit exceeded in direct call"
                     comprehensive_summary_text = comprehensive_summary_data["summary"]
 
-                    print(
-                        f"✓ Generated comprehensive summary: {estimated_tokens:,} tokens → {len(comprehensive_summary_text)} chars")
+                    logger.info(
+                        "✓ Generated comprehensive summary: %s tokens → %s chars",
+                        f"{estimated_tokens:,}",
+                        len(comprehensive_summary_text),
+                    )
                 else:
                     # If it's not a token error, re-raise
                     raise
@@ -700,7 +790,8 @@ Based on the COMPLETE docket history above and this new entry, provide:
 
 Be specific and cite entry numbers when referencing prior events."""
 
-            print("Generating tier2 analysis from comprehensive summary...")
+            logger.info(
+                "Generating tier2 analysis from comprehensive summary...")
             tier2_message = client.messages.create(
                 model=TIER2_MODEL,
                 max_tokens=1000,
@@ -708,7 +799,15 @@ Be specific and cite entry numbers when referencing prior events."""
                 messages=[{"role": "user", "content": tier2_prompt_fallback}]
             )
 
-            print(f"✓ Tier2 analysis generated from comprehensive summary")
+            logger.info(
+                "Tier2 message from comprehensive summary: %s",
+                tier2_message)
+            logger.info(
+                "Tier2 prompt from comprehensive summary: %s",
+                tier2_prompt_fallback)
+
+            logger.info(
+                "✓ Tier2 analysis generated from comprehensive summary")
 
             tier2_response = tier2_message.content[0].text
             tier2_input_tokens = tier2_message.usage.input_tokens
@@ -717,7 +816,7 @@ Be specific and cite entry numbers when referencing prior events."""
                 tier2_input_tokens, tier2_output_tokens, TIER2_MODEL)
 
         except Exception as e:
-            print(f"Error in fallback generation: {str(e)}")
+            logger.error("Error in fallback generation: %s", str(e))
             return {
                 "error": f"Both direct and fallback tier2 generation failed. Direct error: {str(tier2_error)}, Fallback error: {str(e)}",
                 "doc_number": doc_number,
@@ -794,7 +893,8 @@ CRITICAL: You must provide numerical scores (0-100) for both risks. Be decisive 
         temperature=0.2,
         messages=[{"role": "user", "content": tier3_prompt}]
     )
-    print(f"Tier 3 prompt: {tier3_prompt}")
+    logger.info("Tier 3 prompt: %s", tier3_prompt)
+    logger.info("Tier 3 response: %s", tier3_message)
 
     tier3_response = tier3_message.content[0].text
     tier3_input_tokens = tier3_message.usage.input_tokens
@@ -830,6 +930,8 @@ Be factual and concise. Focus on substantive content, not procedural details."""
         temperature=0.1,
         messages=[{"role": "user", "content": tier1_prompt}]
     )
+    logger.info("Tier1 message: %s", tier1_message)
+    logger.info("Tier1 prompt: %s", tier1_prompt)
 
     tier1_summary = tier1_message.content[0].text.strip()
     tier1_input_tokens = tier1_message.usage.input_tokens
@@ -882,9 +984,10 @@ Be factual and concise. Focus on substantive content, not procedural details."""
     if not test_mode:
         try:
             collection.insert_one(new_entry)
-            print(f"✓ Saved entry to MongoDB")
+            logger.info("✓ Saved entry to MongoDB")
         except Exception as e:
-            print(f"Warning: Failed to save to MongoDB: {str(e)}")
+            logger.warning(
+                "Failed to save to MongoDB: %s", str(e))
 
     result = {
         "doc_number": doc_number,
@@ -979,7 +1082,7 @@ if __name__ == "__main__":
     import sys
 
     doc_num = "202510-224026-01"
-    text = "Surface Transportation BoardWashington, D.C. 20423-0001Office of EconomicsDecember 10, 2025Re: Waybill Request WB25-55I have approved the addition of the following individual to the waybill access letter inWB25-55.a) Kim Hillenbrand - Berkley Research GroupPrior payment of processing and mailing cost of $72 ($72 per signature) is required andreceived.Sincerely,Francis X. O’ConnorActing DirectorOffice of EconomicsFRANCISO'CONNORDigitally signed byFRANCIS O'CONNORDate: 2025.12.1107:57:06 -05'00'y FD 36873 310490 ENTEREDOffice of Chief Counsel December 11, 2025 Part of Public Record Waybill Agreement WB25-55I have read and understand the conditions for release of the CCWS data. I agree tocomply fully with these conditions and the provisions of this confidentiality agreement. No laterthan thirty days before the agreement expires, I will request an extension of this agreement, ifnecessary. If no extension is requested, I will return or destroy all CCWS data and certify that Ihave done so. I have the authority to sign this agreement._______________"
+    text = "Office of the City Council  \n                                         8650 California Av enue, South Gate, CA 90280  \nP: (323) 563 -9543 F: (323) 569 -2678  \nwww.cityofsouthgate.org         \n  \n \n \nJOSHUA BARRON  \n  Mayor          \n \nMay 13, 2026  \n \n \nVIA ELECTRONIC FILING  \nSurface Transportation Board  \n395 E Street SW  \nWashington, DC 20423  \n \nRe: Docket No. FD 36873 - Union Pacific Corporation and Union Pacific Railroad Company  \n– Control  – Norfolk Southern Corporation and Norfolk Southern Railway Company  –  \nRequest for conditions protecting environmental justice communities and facilitating \npublic reuse of inactive rail corridors  \n \nDear Members of the Board:  \n \nOn behalf of a coalition of Gateway and Southeast Los Angeles County cities, including the cities \nof South Gate, Cerritos, Cudahy , Downey , Huntington Park , Industry, Lakewood, La Mirada, \nLong Beach, Lynwood, Maywood, Paramount,  Pico Rivera , and  Santa Fe Springs  (collectively, \n“Gateway Cities”) , we respectfully submit these comments regarding the proposed transaction \nbetween Union Pacific Railroad (“Union Pacific”) and Norfolk Southern Railway (“Norfolk \nSouthern”) (collectively, “Applicants”).   On behalf of the Gateway Cities, we oppose the \nproposed transaction unless and until the concerns raised herein are addressed and effective \nenforcement mechanism is established.  \n \nAs Mayor of the City of South Gate, I submit these comments in collaboration with neighboring \njurisdictions that share longstanding concerns regarding the impacts of inactive, abandoned, and \nunderutilized rail corridors throughout  Southeast Los Angeles County and the Gateway Cities \nregion.  \n \nOur coalition respectfully requests that the Board impose conditions necessary to ensure that the \nproposed transaction satisfies the public interest requirements established under federal law, \nincluding mitigation measures addressing neglected rail infrast ructure, environmental justice \nconcerns, and the public reuse of inactive rail corridors within densely populated urban \ncommunities.  \n \nI.  PUBLIC INTEREST STANDARD AND BOARD AUTHORITY  \nUnder 49 U.S.C. § 11324(c), the Board may approve a transaction only if it determines that \nthe proposal is consistent with the public interest. The Board additionally retains broad soITth Gate·· \n          311345 \n \n        ENTERED \nOffice of Chief Counsel \n   May 13, 2026 \n          Part of  \n    Public Record \nSurface Transportation Board  \nMay 12, 2026  \nPage 2 of 4 \n \n \n \nauthority under 49 U.S.C. § 10101 to impose conditions necessary to mitigate adverse \nimpacts and further national transportation policy objectives, including:  \n• Ensuring safe and efficient rail transportation  \n• Promoting sound economic conditions  \n• Encouraging environmental protection and energy conservation  \n• Reducing adverse environmental and community impacts  \n• Fostering coordination between rail carriers and local communities  \n \nThe coalition respectfully submits that the Applicants’ management of inactive and \nunderutilized rail corridors throughout Southeast Los Angeles County raises concerns \ndirectly relevant to these statutory obligations.  \n \nII.  CONDITIONS WITHIN GATEWAY CITIES AND SOUTHEAST LOS ANGELES \nCOMMUNITIES  \nAcross our communities, segments of Union Pacific -owned rail corridors that are inactive, \nabandoned, or underutilized have become recurring sites of:  \n• Illegal dumping of solid and hazardous waste  \n• Fire hazards and criminal activity  \n• Encampments and public nuisance conditions  \n• Visual blight and environmental degradation  \n• Barriers to connectivity, mobility, and community reinvestment  \n \nThese impacts disproportionately burden densely populated working -class communities that \nare predominantly Latino and already experience some of the highest cumulative \nenvironmental burdens in California due to freight movement, industrial activity, and \ntransportation infrastructure.  \n \nThe continued neglect of these corridors undermines public safety, environmental quality, \nand economic revitalization efforts across the region and is inconsistent with the national rail \ntransportation policy goals established by Congress.  \n \nIII. REQUEST FOR CONDITIONS: PUBLIC USE, RAIL BANKING, AND \nCOMMUNITY REINVESTMENT  \nIn light of the foregoing, the coalition respectfully requests that the Board condition any \napproval of the proposed transaction upon the Applicants’ agreement to the following:  \n \nA.  Inventory and Public Disclosure  \nConduct and publicly disclose a comprehensive inventory identifying:  \n• All inactive, abandoned, or underutilized rail corridors located within urbanized \nareas served by the Applicants  \n• Current operational status and future operational plans for such corridors  \n• Corridors suitable for interim public use or rail banking opportunities  \nSurface Transportation Board  \nMay 12, 2026  \nPage 3 of 4 \n \n \n \n \nB.  Good Faith Negotiations with Local Jurisdictions  \nEngage in good faith negotiations with affected municipalities regarding:  \n• Interim public use under 49 C.F.R. § 1152.28 (Public Use Condition)  \n• Long -term corridor preservation pursuant to the National Trails System Act, \n16 U.S.C. § 1247(d) (“rail banking”)  \n• Potential transfer, lease, or joint -use agreements for community -serving \ninfrastructure projects  \n \nC. Facilitation of Greenway and Active Transportation Projects  \nProvide reasonable accommodation and cooperation to facilitate conversion of inactive \ncorridors into:  \n• Bicycle paths and regional bike networks  \n• Pedestrian walkways and greenways  \n• Open space, recreational corridors, and climate -resilient infrastructure  \n• Multi -use mobility corridors connecting underserved communities   \nThese projects directly support regional, state, and federal goals relating to:  \no Climate resilience and greenhouse gas reduction  \no Active transportation and public health  \no Environmental remediation and sustainable land use  \no Equitable infrastructure investment in disadvantaged communities  \n \nD.  Maintenance and Interim Mitigation Measures  \nUntil reuse or redevelopment occurs, require Applicants to:  \n• Maintain inactive corridors in a condition that prevents illegal dumping and \nnuisance activity  \n• Implement appropriate fencing, signage, vegetation management, and security \nmeasures  \n• Coordinate with local governments regarding corridor maintenance and public \nsafety concerns  \n• Establish dedicated regional points of contact for municipal coordination  \n \nIV. ENVIRONMENTAL JUSTICE AND EQUITABLE INFRASTRUCTURE \nINVESTMENT  \nThe Board has increasingly recognized the importance of environmental justice \nconsiderations in evaluating major rail transactions. The communities represented by this \ncoalition have historically borne disproportionate impacts associated with freight movem ent, \nindustrial land uses, rail infrastructure, and transportation emissions.  \n \nThis transaction presents an opportunity not only to consolidate rail operations, but also to \nadvance equitable community investment by transforming neglected infrastructure into \nSurface Transportation Board  \nMay 12, 2026  \nPage 4 of 4 \n \n \n \npublic assets that improve quality of life, mobility, environmental conditions, and \nneighborhood connectivity.  \n \nCommunities that have long hosted the burdens associated with freight transportation should \nalso share in the benefits of reinvestment and infrastructure modernization.  \n \nV.  CONCLUSION  \nThe coalition of Gateway and Southeast Los Angeles County cities respectfully urges the \nBoard to condition any approval of the proposed transaction on meaningful commitments \nthat: \n• Address the impacts of inactive and neglected rail infrastructure  \n• Facilitate public reuse and rail banking opportunities  \n• Advance environmental justice objectives  \n• Improve safety, environmental conditions, and mobility within affected \ncommunities  \n \nAbsent such conditions, the proposed transaction risks perpetuating longstanding harms while \nfurther consolidating control over critical transportation infrastructure without corresponding \ncommunity accountability.  \n \nWe appreciate the Board’s consideration of these comments and stand ready to engage further \nregarding these matters.  Please feel free to contact me at jbarron@sogate.org  or via phone at (323) \n563-9543.  \n \nRespectfully submitted,  \n \n \nJoshua Barron  \nMayor, City of South Gate  on behalf of the coalition of the cities of:  \n \nCerritos  Lakewood  Paramount  \nCudahy  La Mirada  Pico Rivera  \nDowney  Long Breach  Santa Fe Springs  \nHuntington Park  Lynwood  South Gate  \nIndustry  Maywood   \n \ncc: U.S. Department of Transportation  \n U.S. Department of Justice (Antitrust Division)  \n UP & NS respective legal counsels  \n Parties of Record._______________"
     # metadata ={
     #     "docket_type": "PUC",
     #     "date": "2025-10-15",
@@ -994,11 +1097,12 @@ if __name__ == "__main__":
         "date": "2025-12-11T00:00:00.000Z",
         "document_type": "Filing",
         "additional_info": "UNION PACIFIC CORPORATION AND UNION PACIFIC RAILROAD COMPANY &mdash;CONTROL&mdash; NORFOLK SOUTHERN CORPORATION AND NORFOLK SOUTHERN RAILWAY COMPANY",
-        "on_behalf_of": "Surface Transportation Board",
+        "on_behalf_of": "Gateway Cities of Southeast Los Angeles",
         "docket_number": "FD-36873",
-        "document_id": "https://dcms-external.s3.amazonaws.com/DCMS_External_PROD/416/310490.pdf",
+        "document_id": "https://dcms-external.s3.amazonaws.com/DCMS_External_PROD/1778713213720/311345.pdf",
         "docket_type": "stb-document"
     }
 
-    result = analyze_docket_entry(doc_num, text, metadata)
-    print(json.dumps(result, indent=2))
+
+result = analyze_docket_entry(doc_num, text, metadata)
+# logger.info(json.dumps(result, indent=2))

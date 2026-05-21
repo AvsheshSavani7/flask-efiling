@@ -105,7 +105,7 @@
         Route:"/ec-cases-html-register"
 
         File: new_ec_cases_update_monitor.py
-        Route:"ec-cases-html-update-monitor"
+        Route:"/ec-cases-html-update-monitor"
 
     FS:
         File: new_fs_cases_html.py
@@ -119,8 +119,11 @@
         File: accc_cases_register
         Route:"/new-accc-cases-register"
 
-        File: accc_case_update_monitor.py
-        Route:"/accc-case-update-monitor"
+        File: accc_cases_update_monitor.py
+        Route:"/new-accc-cases-update-monitor"
+
+        File: accc_waiver_register.py
+        Route:"/new-accc-waiver-register"
 
 
     CADE Brazil:
@@ -132,7 +135,7 @@
         Route:"/new-cade-cases-update-monitor"
 
     FTC:
-        File: ftc_early_termination_scraper.py
+        File: ftc_cases_scraper.py
         Route:"/ftc-early-termination-scraper"
 
     NZ ComCom:
@@ -148,3 +151,56 @@
 
         File: canada_cases_update_monitor.py
         Route:"/new-canada-cases-update-monitor"
+
+    UK :
+        File: new_uk_cma_mergers_scraper_atom.py
+        Route:"/new-uk-cma-scraper"
+
+        File: new_uk_cma_mergers_update_monitor.py
+        Route:"/new-uk-cma-update-monitor"
+
+    German Bundeskartellamt:
+        File: bundeskartellamt_initial_proxy.py
+        Route:"/bundeskartellamt-initial"
+
+        File: bundeskartellamt_update_monitor.py
+        Route:"/bundeskartellamt-update-monitor"
+
+        #Old way
+        File: bundeskartellamt_press_release.py
+        Route:"/bundeskartellamt-press-release"
+
+
+    China SAMR:
+        File: new-samr-unconditional-scraper.py
+        Route:"/new-samr-unconditional-scraper"
+
+        File: new_samr_conditional_approval_db.py
+        Route:"/new-samr-conditional-scraper"
+
+        File: new_samr_public_notice_db.py
+        Route:"/new-samr-public-scraper"
+
+
+
+Docket:
+  STB:
+   /scrape/
+   /analyze-docket
+
+  FCC:
+  /analyze-docket
+  /fcc-scraper
+
+  NE_PSC:
+  /ne-psc-scraper
+  /analyze-docket
+
+  NM_PRC:
+  /nm-prc-download-extract
+
+  MT_PSC:
+  /mt-psc-scraper
+
+  SD_PUC:
+  /sd-puc-scraper

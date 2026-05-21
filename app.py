@@ -11,35 +11,23 @@ from mergers_manager import get_all_mergers
 from nm_prc_service import login_nm_prc, get_html_from_nm_prc, extract_pdf_text_from_nm_prc
 from nm_prc_document_download_extract import download_and_extract
 from nm_prc_document_download_extract_copy import temp_download_and_extract
-from cade_public_notice_brazil import main as cade_main
-from cade_brazil_update_monitor import monitor_brazil_deals
 from new_samr_public_notice_db import main as new_samr_public_notice_main
 from new_samr_conditional_approval_db import main as new_samr_conditional_approval_main
 from new_samr_unconditional_approval_db import main as new_samr_unconditional_approval_main
-from uk_cma_mergers_scraper_atom import main as uk_cma_main
 from new_uk_cma_mergers_scraper_atom import main as new_uk_cma_main
 from new_uk_cma_mergers_update_monitor import main as new_uk_cma_update_monitor_main
-from bundeskartellamt_scraper import main as bundeskartellamt_main
 from bundeskartellamt_initial_proxy import main as bundeskartellamt_initial_proxy_main
 from bundeskartellamt_update_monitor import main as bundeskartellamt_update_monitor_main
 from bundeskartellamt_press_release import main as bundeskartellamt_press_release_main
-from ec_case_register import run_ec_case_register as ec_case_register_main
-from fs_case_register import run_fs_case_register as fs_case_register_main
-from accc_acquisitions import main as accc_acquisitions_main
-from accc_case_update_monitor import process_accc_case_updates
 from accc_cases_register import run_accc_cases_register
 from accc_waiver_register import run_accc_waiver_register
 from cade_cases_register import run_cade_cases_register
 from cade_cases_update_monitor import process_brazil_cases_updates
 from accc_cases_update_monitor import process_accc_cases_updates
 from ftc_cases_scraper import run_ftc_cases_scraper
-from nz_comcom_case_register import main as nz_comcom_case_register_main
 from nz_comcom_case_register_to_db import run as nz_comcom_case_register_to_db_run
-from competition_bureau_canada_mergers import main as competition_bureau_canada_main
-from canada_competition_bureau_case_update_monitor import process_canada_case_updates
 from canada_cases_register import run_canada_cases_register
 from canada_cases_update_monitor import process_canada_cases_updates
-from nz_comcom_case_update_monitor import process_nz_case_updates
 from nz_cases_update_monitor import run as nz_cases_update_monitor_run
 from mt_psc_scraper import scrape_mt_psc
 from ne_psc_scraper import scrape_ne_psc
@@ -134,30 +122,20 @@ def home():
             "/nm-prc-extract-pdf": "POST - Fetch PDF from protected NM PRC eDocket URL and extract text (requires login first)",
             "/nm-prc-download-extract": "POST - Download NM PRC e360 document by document param and extract text",
             "/brazil-scraper": "GET - Scrape CADE public notices and match with deals (date range: yesterday to today, query param: headless)",
-            "/cade-brazil-monitor": "GET - Monitor existing Brazil deals for new table records updates (query param: headless)",
             "/new-samr-public-scraper": "GET - Scrape SAMR China public notices and match with deals (query param: headless)",
             "/new-samr-conditional-scraper": "GET - Scrape SAMR China conditional approval notices and match with deals (query params: headless, use_html)",
             "/new-samr-unconditional-scraper": "GET - Scrape SAMR China unconditional approval notices and match with deals (query params: headless, use_html)",
-            "/uk-cma-scraper": "GET - Scrape UK CMA merger cases and match with deals (query params: use_html)",
             "/bundeskartellamt-scraper": "GET - Scrape Bundeskartellamt German merger cases and match with deals",
             "/bundeskartellamt-initial": "GET - Scrape Bundeskartellamt Laufende Verfahren (initial filing) — new cases to german_cases collection",
             "/bundeskartellamt-update-monitor": "GET - Monitor open german_cases for changes, match deals, send update emails",
             "/bundeskartellamt-press-release": "GET - Scrape Bundeskartellamt press releases and match with deals",
-            "/new-ec-case-register": "GET - Filter and match EC merger cases with deals",
-            "/new-fs-case-register": "GET - Filter and match EC Foreign Subsidies cases with deals",
-            "/new-ec-case-update-monitor": "GET - Monitor EC merger cases for updates and send email notifications",
-            "/new-fs-case-update-monitor-new": "GET - Monitor EC Foreign Subsidies cases for updates and send email notifications",
             "/new-accc-cases-register": "GET - Scrape ACCC acquisitions and match with deals",
             "/new-cade-cases-register": "GET - Scrape CADE Brazil public notices and store in brazil_cases collection (query params: headless, days)",
             "/new-cade-cases-update-monitor": "GET - Monitor brazil_cases for updates and send email notifications (query param: headless)",
             "/new-accc-cases-update-monitor": "GET - Monitor ACCC acquisition cases for updates and send email notifications",
             "/ftc-early-termination-scraper": "GET - FTC early termination list scrape → ftc_cases collection, deal match, emails (logs: /logs?script=ftc_cases)",
-            "/nz-comcom-case-register": "GET - Scrape NZ ComCom case register and match with deals",
-            "/nz-comcom-case-update-monitor": "GET - Monitor NZ ComCom cases for updates and send email notifications",
             "/nz-comcom-case-register-to-db": "GET - Scrape NZ ComCom case register and save new records to nz_cases collection",
             "/nz-cases-update-monitor": "GET - Monitor nz_cases collection for updates, match to deals, and send emails",
-            "/competition-bureau-canada-scraper": "GET - Scrape Canada Competition Bureau merger reviews and match with deals",
-            "/canada-competition-bureau-case-update-monitor": "GET - Monitor Canada Competition Bureau cases for updates and send email notifications",
             "/new-canada-cases-register": "GET - Register new Canada Competition Bureau cases into canada_cases collection",
             "/new-canada-cases-update-monitor": "GET - Monitor canada_cases collection for updates and send email notifications",
             "/system-check": "GET - Check system dependencies for document extraction",
@@ -875,62 +853,6 @@ def brazil_scraper():
         }), 500
 
 
-@app.route('/cade-brazil-monitor', methods=['GET'])
-def brazil_monitor():
-    """
-    Monitor existing Brazil deals for new table records updates.
-    Process runs in background - returns immediately.
-
-    Query parameters:
-        headless: string (optional, "true" or "false", default: "true") - Run browser in headless mode
-
-    Returns:
-    {
-        "success": bool,
-        "message": "string",
-        "status": "string"
-    }
-    """
-    try:
-        # Get headless parameter from query
-        headless_str = request.args.get('headless', 'true')
-        headless = headless_str.lower() in ('true', '1', 'yes')
-
-        # Run the monitoring process in background thread
-        def run_monitor():
-            try:
-                logger.info("Starting CADE Brazil deal monitor in background")
-                result = monitor_brazil_deals(headless=headless)
-                if result.get("success"):
-                    logger.info(
-                        f"CADE Brazil monitor completed. Checked {result.get('total_deals_checked', 0)} deals, "
-                        f"found updates in {result.get('deals_with_updates', 0)} deals "
-                        f"({result.get('total_new_records', 0)} new records total).")
-                else:
-                    logger.warning(
-                        f"CADE Brazil monitor completed with errors: {result.get('error', 'Unknown error')}")
-            except Exception as e:
-                logger.error(
-                    f"Error in background CADE Brazil monitor: {str(e)}")
-
-        submitted, msg = submit_unique_task("cade-brazil-monitor", run_monitor)
-        if not submitted:
-            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
-
-        return jsonify({
-            "success": True,
-            "message": msg,
-            "status": "running"
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Error starting CADE Brazil monitor: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
 @app.route('/new-samr-public-scraper', methods=['GET'])
 def new_samr_public_scraper():
     """
@@ -1110,58 +1032,6 @@ def new_samr_unconditional_scraper():
         }), 500
 
 
-@app.route('/uk-cma-scraper', methods=['GET'])
-def uk_cma_scraper():
-    """
-    Scrape UK CMA merger cases and match with deals.
-    Extracts records from CMA website with cutoff date filtering.
-    Process runs in background - returns immediately.
-
-    Query parameters:
-        use_html: string (optional, "true" or "false", default: "false") - Extract from existing HTML files instead of scraping
-
-    Returns:
-    {
-        "success": bool,
-        "message": "string",
-        "status": "string"
-    }
-    """
-    try:
-        # Get query parameters
-        use_html_str = request.args.get('use_html', 'false')
-        use_html = use_html_str.lower() in ('true', '1', 'yes')
-
-        # Run the scraping process in background thread
-        def run_scraper():
-            try:
-                logger.info(
-                    f"Starting CMA merger cases scraper in background (use_html={use_html})")
-                uk_cma_main()
-                logger.info(
-                    f"CMA merger cases scraper completed successfully.")
-            except Exception as e:
-                logger.exception("Error in background CMA scraper")
-
-        submitted, msg = submit_unique_task("uk-cma-scraper", run_scraper)
-        if not submitted:
-            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
-
-        return jsonify({
-            "success": True,
-            "message": msg,
-            "status": "running",
-            "use_html": use_html
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Error starting CMA scraper: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
 @app.route('/new-uk-cma-scraper', methods=['GET'])
 def new_uk_cma_scraper():
     """
@@ -1247,57 +1117,6 @@ def new_uk_cma_update_monitor():
         }), 500
 
 # German Bundeskartellamt Scraper
-
-
-@app.route('/bundeskartellamt-scraper', methods=['GET'])
-def bundeskartellamt_scraper():
-    """
-    Scrape Bundeskartellamt German merger cases and match with deals.
-    Extracts records from Bundeskartellamt website.
-    Process runs in background - returns immediately.
-
-    Returns:
-    {
-        "success": bool,
-        "message": "string",
-        "status": "string"
-    }
-    """
-    try:
-        # Run the scraping process in background thread
-        def run_scraper():
-            try:
-                logger.info(
-                    f"Starting Bundeskartellamt scraper in background")
-                result = bundeskartellamt_main()
-                if result.get("success"):
-                    logger.info(
-                        f"Bundeskartellamt scraper completed successfully. Extracted {result.get('total_extracted', 0)} records, "
-                        f"found {result.get('total_matched', 0)} matches.")
-                else:
-                    logger.warning(
-                        f"Bundeskartellamt scraper completed with errors: {result.get('error', 'Unknown error')}")
-            except Exception as e:
-                logger.exception(
-                    "Error in background Bundeskartellamt scraper")
-
-        submitted, msg = submit_unique_task(
-            "bundeskartellamt-scraper", run_scraper)
-        if not submitted:
-            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
-
-        return jsonify({
-            "success": True,
-            "message": msg,
-            "status": "running"
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Error starting Bundeskartellamt scraper: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
 
 
 @app.route('/bundeskartellamt-initial', methods=['GET'])
@@ -1421,152 +1240,6 @@ def bundeskartellamt_press_release():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-@app.route('/new-ec-case-register', methods=['GET'])
-def new_ec_case_register():
-    """
-    Filter and match EC merger cases with deals.
-    Downloads EC case data, filters by criteria, and matches with MongoDB deals.
-    Process runs in background - returns immediately.
-
-    Returns:
-    {
-        "success": bool,
-        "message": "string",
-        "status": "string"
-    }
-    """
-    try:
-        # Run the filtering process in background thread
-        def run_filter():
-            try:
-                logger.info("Starting EC case filter in background")
-                result = ec_case_register_main()
-                if result and result.get("success"):
-                    logger.info(
-                        f"EC case filter completed successfully. Filtered {result.get('total_filtered', 0)} cases, "
-                        f"matched {result.get('total_matched', 0)} with deals.")
-                else:
-                    error_msg = result.get(
-                        'error', 'Unknown error') if result else 'No result returned'
-                    logger.warning(
-                        f"EC case filter completed with errors: {error_msg}")
-            except Exception as e:
-                logger.exception("Error in background EC case filter")
-
-        submitted, msg = submit_unique_task("ec-case-register", run_filter)
-        if not submitted:
-            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
-
-        return jsonify({
-            "success": True,
-            "message": msg,
-            "status": "running"
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Error starting EC case filter: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
-@app.route('/new-fs-case-register', methods=['GET'])
-def fs_case_register():
-    """
-    Filter and match EC Foreign Subsidies cases with deals.
-    Downloads FS case data, filters by caseInstrument + empty decisions + cutoff date,
-    matches with MongoDB deals via LLM (company names from caseTitle), saves to fs_ec_cases.
-    Process runs in background - returns immediately.
-
-    Returns:
-    {
-        "success": bool,
-        "message": "string",
-        "status": "string"
-    }
-    """
-    try:
-        def run_filter():
-            try:
-                logger.info(
-                    "Starting FS (Foreign Subsidies) case register in background")
-                result = fs_case_register_main()
-                if result and result.get("success"):
-                    logger.info(
-                        f"FS case register completed successfully. Filtered {result.get('total_filtered', 0)} cases, "
-                        f"matched {result.get('total_matched', 0)} with deals.")
-                else:
-                    error_msg = result.get(
-                        'error', 'Unknown error') if result else 'No result returned'
-                    logger.warning(
-                        f"FS case register completed with errors: {error_msg}")
-            except Exception as e:
-                logger.exception("Error in background FS case register")
-
-        submitted, msg = submit_unique_task("fs-case-register", run_filter)
-        if not submitted:
-            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
-
-        return jsonify({
-            "success": True,
-            "message": msg,
-            "status": "running"
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Error starting FS case filter: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
-@app.route('/new-ec-case-update-monitor', methods=['GET'])
-def new_ec_case_update_monitor():
-    """
-    Monitor EC merger cases for updates.
-    Compares latest EC case data with stored MongoDB records and sends email notifications for changes.
-    Process runs in background - returns immediately.
-
-    Returns:
-    {
-        "success": bool,
-        "message": "string",
-        "status": "string"
-    }
-    """
-    try:
-        from ec_case_update_monitor_new import process_ec_case_updates
-
-        # Run the monitor process in background thread
-        def run_monitor():
-            try:
-                logger.info("Starting EC case update monitor in background")
-                process_ec_case_updates()
-                logger.info("✅ EC case update monitor completed successfully")
-            except Exception as e:
-                logger.exception("Error in EC case update monitor")
-
-        submitted, msg = submit_unique_task(
-            "ec-case-update-monitor", run_monitor)
-        if not submitted:
-            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
-
-        return jsonify({
-            "success": True,
-            "message": msg,
-            "status": "running"
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Error starting EC case update monitor: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
 @app.route('/ec-cases-html-register', methods=['GET'])
 def ec_cases_html_register():
     """
@@ -1640,51 +1313,6 @@ def ec_cases_html_update_monitor():
 
     except Exception as e:
         logger.error(f"Error starting EC cases HTML update monitor: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
-@app.route('/new-fs-case-update-monitor-new', methods=['GET'])
-def new_fs_case_update_monitor_new():
-    """
-    Monitor EC Foreign Subsidies cases for updates.
-    Compares latest FS case data with stored fs_ec_cases on deals, sends email notifications for changes.
-    Process runs in background - returns immediately.
-
-    Returns:
-    {
-        "success": bool,
-        "message": "string",
-        "status": "string"
-    }
-    """
-    try:
-        from fs_case_update_monitor_new import process_fs_case_updates
-
-        def run_monitor():
-            try:
-                logger.info(
-                    "Starting FS (Foreign Subsidies) case update monitor in background")
-                process_fs_case_updates()
-                logger.info("✅ FS case update monitor completed successfully")
-            except Exception as e:
-                logger.exception("Error in FS case update monitor")
-
-        submitted, msg = submit_unique_task(
-            "fs-case-update-monitor", run_monitor)
-        if not submitted:
-            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
-
-        return jsonify({
-            "success": True,
-            "message": msg,
-            "status": "running"
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Error starting FS case update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -1770,50 +1398,6 @@ def fs_cases_html_update_monitor():
         }), 500
 
 
-@app.route('/accc-acquisitions-scraper', methods=['GET'])
-def accc_acquisitions_scraper():
-    """
-    Scrape ACCC acquisitions and match with deals.
-    Fetches latest ACCC acquisition records and matches them with deals in MongoDB.
-    Process runs in background - returns immediately.
-
-    Returns:
-    {
-        "success": bool,
-        "message": "string",
-        "status": "string"
-    }
-    """
-    try:
-        # Run the scraper process in background thread
-        def run_scraper():
-            try:
-                logger.info("Starting ACCC acquisitions scraper in background")
-                accc_acquisitions_main()
-                logger.info(
-                    "✅ ACCC acquisitions scraper completed successfully")
-            except Exception as e:
-                logger.exception("Error in ACCC acquisitions scraper")
-
-        submitted, msg = submit_unique_task(
-            "accc-acquisitions-scraper", run_scraper)
-        if not submitted:
-            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
-
-        return jsonify({
-            "success": True,
-            "message": msg,
-            "status": "running"
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Error starting ACCC acquisitions scraper: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
 @app.route('/ftc-early-termination-scraper', methods=['GET'])
 def ftc_early_termination_scraper():
     """
@@ -1855,95 +1439,6 @@ def ftc_early_termination_scraper():
 
     except Exception as e:
         logger.error(f"Error starting FTC cases scraper: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
-@app.route('/competition-bureau-canada-scraper', methods=['GET'])
-def competition_bureau_canada_scraper():
-    """
-    Scrape Canada Competition Bureau merger reviews and match with deals.
-    Scrapes the Competition Bureau Canada report of merger reviews table,
-    matches party names with deals via LLM, saves matched cases to MongoDB
-    under 'canada_competition_bureau_cases', sends email notifications for
-    matched and USA-related cases, and writes a JSON backup file.
-
-    Process runs in a background thread – this endpoint returns immediately.
-
-    Returns:
-    {
-        "success": bool,
-        "message": "string",
-        "status": "string"
-    }
-    """
-    try:
-        def run_scraper():
-            try:
-                logger.info(
-                    "Starting Canada Competition Bureau scraper in background")
-                competition_bureau_canada_main()
-                logger.info(
-                    "✅ Canada Competition Bureau scraper completed successfully")
-            except Exception as e:
-                logger.exception("Error in Canada Competition Bureau scraper")
-
-        submitted, msg = submit_unique_task(
-            "competition-bureau-canada-scraper", run_scraper)
-        if not submitted:
-            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
-
-        return jsonify({
-            "success": True,
-            "message": msg,
-            "status": "running"
-        }), 200
-
-    except Exception as e:
-        logger.error(
-            f"Error starting Canada Competition Bureau scraper: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
-@app.route('/canada-competition-bureau-case-update-monitor', methods=['GET'])
-def canada_competition_bureau_case_update_monitor():
-    """
-    Monitor Canada Competition Bureau cases for updates.
-    Fetches current report HTML, compares with stored canada_competition_bureau_cases
-    on deals; if concluded_date, industry, or outcome changed, sends email and updates DB.
-    Process runs in background - returns immediately.
-    """
-    try:
-        def run_monitor():
-            try:
-                logger.info(
-                    "Starting Canada Competition Bureau case update monitor in background")
-                process_canada_case_updates()
-                logger.info(
-                    "✅ Canada Competition Bureau case update monitor completed")
-            except Exception as e:
-                logger.exception(
-                    "Error in Canada Competition Bureau case update monitor")
-
-        submitted, msg = submit_unique_task(
-            "canada-competition-bureau-update-monitor", run_monitor)
-        if not submitted:
-            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
-
-        return jsonify({
-            "success": True,
-            "message": msg,
-            "status": "running"
-        }), 200
-
-    except Exception as e:
-        logger.error(
-            f"Error starting Canada Competition Bureau case update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -2035,55 +1530,6 @@ def canada_cases_update_monitor():
 
     except Exception as e:
         logger.error(f"Error starting Canada cases update monitor: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
-@app.route('/accc-case-update-monitor', methods=['GET'])
-def accc_case_update_monitor():
-    """
-    Monitor ACCC acquisition cases for updates.
-    Checks existing ACCC cases in MongoDB for changes in:
-    - Acquisition status
-    - Stage
-    - Determination publication date
-    - ACCC Determination
-    Sends email notifications when changes are detected.
-    Process runs in background - returns immediately.
-
-    Returns:
-    {
-        "success": bool,
-        "message": "string",
-        "status": "string"
-    }
-    """
-    try:
-        # Run the monitor process in background thread
-        def run_monitor():
-            try:
-                logger.info("Starting ACCC case update monitor in background")
-                process_accc_case_updates()
-                logger.info(
-                    "✅ ACCC case update monitor completed successfully")
-            except Exception as e:
-                logger.exception("Error in ACCC case update monitor")
-
-        submitted, msg = submit_unique_task(
-            "accc-case-update-monitor", run_monitor)
-        if not submitted:
-            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
-
-        return jsonify({
-            "success": True,
-            "message": msg,
-            "status": "running"
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Error starting ACCC case update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
@@ -2347,93 +1793,6 @@ def accc_cases_update_monitor_endpoint():
 
     except Exception as e:
         logger.error(f"Error starting ACCC cases update monitor: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
-@app.route('/nz-comcom-case-register', methods=['GET'])
-def nz_comcom_case_register():
-    """
-    Scrape NZ ComCom case register and match with deals.
-    Fetches cases from the NZ Commerce Commission case register, matches with deals in MongoDB,
-    saves to nz_cases, and sends email notifications. Process runs in background.
-
-    Returns:
-    {
-        "success": bool,
-        "message": "string",
-        "status": "string"
-    }
-    """
-    try:
-        def run_register():
-            try:
-                logger.info("Starting NZ ComCom case register in background")
-                nz_comcom_case_register_main()
-                logger.info("✅ NZ ComCom case register completed successfully")
-            except Exception as e:
-                logger.exception("Error in NZ ComCom case register")
-
-        submitted, msg = submit_unique_task(
-            "nz-comcom-case-register", run_register)
-        if not submitted:
-            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
-
-        return jsonify({
-            "success": True,
-            "message": msg,
-            "status": "running"
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Error starting NZ ComCom case register: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
-@app.route('/nz-comcom-case-update-monitor', methods=['GET'])
-def nz_comcom_case_update_monitor():
-    """
-    Monitor NZ ComCom cases for updates.
-    Checks existing nz_cases in MongoDB for changes in case details, timeline,
-    documents, and updates_media. Sends email notifications when changes are detected.
-    Process runs in background.
-
-    Returns:
-    {
-        "success": bool,
-        "message": "string",
-        "status": "string"
-    }
-    """
-    try:
-        def run_monitor():
-            try:
-                logger.info(
-                    "Starting NZ ComCom case update monitor in background")
-                process_nz_case_updates()
-                logger.info(
-                    "✅ NZ ComCom case update monitor completed successfully")
-            except Exception as e:
-                logger.exception("Error in NZ ComCom case update monitor")
-
-        submitted, msg = submit_unique_task(
-            "nz-comcom-case-update-monitor", run_monitor)
-        if not submitted:
-            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
-
-        return jsonify({
-            "success": True,
-            "message": msg,
-            "status": "running"
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Error starting NZ ComCom case update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
