@@ -1103,6 +1103,5 @@ if __name__ == "__main__":
         "docket_type": "stb-document"
     }
 
-
-result = analyze_docket_entry(doc_num, text, metadata)
+    result = analyze_docket_entry(doc_num, text, metadata)
 # logger.info(json.dumps(result, indent=2))
