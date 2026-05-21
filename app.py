@@ -74,7 +74,7 @@ CORS(app, origins=["http://localhost:8080",
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
 
 # --- Memory-safe background task infrastructure ---
-scraper_pool = ThreadPoolExecutor(max_workers=6)
+scraper_pool = ThreadPoolExecutor(max_workers=20)
 _running_tasks = {}
 _running_lock = Lock()
 
