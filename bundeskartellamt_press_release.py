@@ -33,6 +33,12 @@ EXTRACTED_RECORDS_JSON = "bundeskartellamt_press_release_extracted.json"
 
 SOURCE_PRESS_RELEASE = "press_release"
 
+BASE_URL = os.getenv("BASE_URL")
+N8N_WEBHOOK_URL = os.getenv(
+    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
+    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
+)
+
 # CUTOFF_DATE: Only process records with date >= this date.
 CUTOFF_DATE = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 # CUTOFF_DATE = datetime.strptime("2026-01-25", "%Y-%m-%d")
@@ -342,11 +348,8 @@ def send_press_release_email_via_webhook(record_data, deal_match, updated_fields
             record_data, deal_match, updated_fields)
         print(f"📝 Generated email subject: {subject}")
 
-        webhook_url = os.getenv(
-            "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6")
-        # Test webhook
-        # webhook_url = os.getenv(
-        #     "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/80830c6d-ff5b-45e3-9ef3-a061db1fbf0c")
+        webhook_url = N8N_WEBHOOK_URL
+
         print(f"📤 Sending email via n8n webhook: {webhook_url}")
         target = deal_match.get("target") or deal_match.get(
             "target_name", "N/A")

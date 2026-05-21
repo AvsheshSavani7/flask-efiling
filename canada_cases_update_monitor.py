@@ -118,10 +118,10 @@ REPORT_URL = (
     "https://competition-bureau.canada.ca/en/mergers-and-acquisitions/"
     "report-concluded-merger-reviews#wb-auto-4"
 )
+BASE_URL = os.getenv("BASE_URL")
 N8N_WEBHOOK_URL = os.getenv(
-    "N8N_WEBHOOK_URL",
-    # Kaushal/Josh/Avs only
-    "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6",
+    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
+    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
 )
 
 

@@ -51,6 +51,12 @@ LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
+BASE_URL = os.getenv("BASE_URL")
+N8N_WEBHOOK_URL = os.getenv(
+    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
+    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
+)
+
 
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
@@ -733,8 +739,7 @@ def send_nz_update_email_via_webhook(
                        or {}).get("Case number", "N/A")
         prefix = "[FRMD]" if deal_match else "[FRUD]"
         subject = f"{prefix} NZ Case (Updated) – {case_number}: {target} / {acquirer}"
-        webhook_url = os.getenv(
-            "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/b3007d21-6845-47b5-aece-7b26583758bc")
+        webhook_url = N8N_WEBHOOK_URL
         payload = {
             "subject": subject,
             "html": html_content,
@@ -762,8 +767,7 @@ def send_unmatched_nz_usa_email_via_webhook(case_info: Dict[str, Any], changes: 
     try:
         subject, html_email = generate_unmatched_nz_usa_email_html(
             case_info, changes)
-        webhook_url = os.getenv(
-            "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/b3007d21-6845-47b5-aece-7b26583758bc")
+        webhook_url = N8N_WEBHOOK_URL
         payload = {
             "subject": subject,
             "html": html_email,

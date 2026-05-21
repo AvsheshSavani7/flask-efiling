@@ -48,6 +48,12 @@ LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
+BASE_URL = os.getenv("BASE_URL")
+N8N_WEBHOOK_URL = os.getenv(
+    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
+    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
+)
+
 
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
@@ -638,11 +644,7 @@ def send_samr_email_via_webhook(samr_data, deal_match):
         subject, html_email = generate_samr_email_html(samr_data, deal_match)
         logger.info(f"Generated email subject: {subject}")
 
-        webhook_url = os.getenv(
-            "N8N_WEBHOOK_URL",
-            # "https://n8n-xwx1.onrender.com/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
-            "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6",
-        )
+        webhook_url = N8N_WEBHOOK_URL
         logger.info(f"Sending email via n8n webhook: {webhook_url}")
 
         target = deal_match.get("target") or deal_match.get(
@@ -751,11 +753,7 @@ def send_unmatched_samr_email_via_webhook(record: dict) -> bool:
         subject, html_email = generate_unmatched_samr_email_html(record)
         logger.info(f"Generated email subject: {subject}")
 
-        webhook_url = os.getenv(
-            "N8N_WEBHOOK_URL",
-            # "https://n8n-xwx1.onrender.com/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
-            "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6",
-        )
+        webhook_url = N8N_WEBHOOK_URL
         logger.info(f"Sending email via n8n webhook: {webhook_url}")
 
         payload = {

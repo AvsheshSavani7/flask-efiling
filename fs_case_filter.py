@@ -27,6 +27,11 @@ OUTPUT_PATH = "fs_filtered_cases.json"
 MATCHED_DEALS_OUTPUT = "fs_matched_deals.json"
 ENV_PATH = ".env"
 CASE_BASE_URL = "https://competition-cases.ec.europa.eu/cases"
+BASE_URL = os.getenv("BASE_URL")
+N8N_WEBHOOK_URL = os.getenv(
+    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
+    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
+)
 
 # Load OpenAI API Key
 load_dotenv(ENV_PATH)
@@ -444,10 +449,7 @@ def send_fs_case_email_via_webhook(case_data: Dict[str, Any], deal_match: Dict[s
             case_data, deal_match)
         print(f"📝 Generated email subject: {subject}")
 
-        # webhook_url = os.getenv(
-        #     "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6")
-        webhook_url = os.getenv(
-            "N8N_WEBHOOK_URL", "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6")
+        webhook_url = N8N_WEBHOOK_URL
         print(f"📤 Sending email via n8n webhook: {webhook_url}")
 
         metadata = case_data.get("metadata", {})

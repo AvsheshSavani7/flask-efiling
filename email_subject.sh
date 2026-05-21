@@ -116,7 +116,7 @@
 
     ACCC:
 
-        File: accc_cases_register
+        File: accc_cases_register.py
         Route:"/new-accc-cases-register"
 
         File: accc_cases_update_monitor.py
@@ -172,7 +172,7 @@
 
 
     China SAMR:
-        File: new-samr-unconditional-scraper.py
+        File: new_samr_unconditional_approval_db.py
         Route:"/new-samr-unconditional-scraper"
 
         File: new_samr_conditional_approval_db.py

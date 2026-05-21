@@ -108,9 +108,10 @@ def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = 
 # Constants
 BASE_URL = "https://www.comcom.govt.nz"
 ENV_PATH = ".env"
+BASE_URL = os.getenv("BASE_URL")
 N8N_WEBHOOK_URL = os.getenv(
-    "N8N_WEBHOOK_URL",
-    "https://n8n-xwx1.onrender.com/webhook/b3007d21-6845-47b5-aece-7b26583758bc",
+    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
+    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
 )
 
 # OpenAI client for LLM matching

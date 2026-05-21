@@ -117,14 +117,15 @@ PROXY_DICT = {
     "https": f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}",
 }
 
+BASE_URL = os.getenv("BASE_URL")
 # Webhook for new/matched/USA-related completed waiver cases
 N8N_WEBHOOK_URL = os.getenv(
     "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
-    "https://n8n-xwx1.onrender.com/webhook/b3007d21-6845-47b5-aece-7b26583758bc",
+    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
 )
 # Webhook specifically for waiver cases that are still "Under assessment"
 UNDER_ASSESSMENT_WEBHOOK_URL = (
-    "https://n8n-xwx1.onrender.com/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f"
+    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f"
 )
 
 LIST_HEADERS = {

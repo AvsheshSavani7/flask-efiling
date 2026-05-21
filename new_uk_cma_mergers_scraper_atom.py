@@ -34,6 +34,12 @@ LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
+BASE_URL = os.getenv("BASE_URL")
+N8N_WEBHOOK_URL = os.getenv(
+    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
+    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
+)
+
 
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
@@ -591,7 +597,8 @@ If no deal satisfies this rule, respond exactly: None"""
 
 
 def find_deal_by_id(deal_id):
-    deal_by_id = {str(d.get("deal_id", "")): d for d in deals if d.get("deal_id")}
+    deal_by_id = {str(d.get("deal_id", ""))
+                      : d for d in deals if d.get("deal_id")}
     return deal_by_id.get(deal_id)
 
 
@@ -802,11 +809,7 @@ def generate_unmatched_email_html(case_info):
 
 def send_email_via_webhook(subject, html_email, extra_payload=None):
     try:
-        webhook_url = os.getenv(
-            "N8N_WEBHOOK_URL",
-            "https://n8n-xwx1.onrender.com/webhook/4670ee2c-cc2a-4316-a975-d68cba2cd4a6",
-            # "https://n8n-xwx1.onrender.com/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
-        )
+        webhook_url = N8N_WEBHOOK_URL
         payload = {"subject": subject, "html": html_email}
         if extra_payload:
             payload.update(extra_payload)
