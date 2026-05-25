@@ -10,6 +10,7 @@ services:
     environment:
       - PORT=10000
     volumes:
+    # Pipeline log files — persisted on host so logs survive container rebuilds.
       - /opt/apps/logs/flask:/var/data/logs
     labels:
       - "traefik.enable=true"
