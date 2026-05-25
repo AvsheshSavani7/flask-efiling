@@ -819,8 +819,8 @@ def main(headless=True):
     if success:
         logger.info(msg)
     else:
-        # _log_critical_error_and_email(f"MongoDB initialization failed: {msg}", {
-        #                               "step": "init_mongodb_connection"})
+        _log_critical_error_and_email(f"MongoDB initialization failed: {msg}", {
+                                      "step": "init_mongodb_connection"})
         return {"success": False, "error": msg}
 
     logger.info("[STEP 1.1] Loading deals from MongoDB...")
@@ -875,10 +875,10 @@ def main(headless=True):
 
         except Exception as e:
             logger.exception(f"Scraping error: {e}")
-            # _log_critical_error_and_email(
-            #     f"Scraping error: {e}",
-            #     {"step": "scrape_listing", "base_url": BASE_URL},
-            # )
+            _log_critical_error_and_email(
+                f"Scraping error: {e}",
+                {"step": "scrape_listing", "base_url": BASE_URL},
+            )
         finally:
             browser.close()
 
@@ -1045,6 +1045,6 @@ if __name__ == "__main__":
     try:
         main(headless=headless_mode)
     except Exception as e:
-        # _log_critical_error_and_email(
-        #     f"Unhandled error in main: {e}", {"step": "main"})
+        _log_critical_error_and_email(
+            f"Unhandled error in main: {e}", {"step": "main"})
         raise
