@@ -47,8 +47,8 @@ from log_utils import cleanup_old_logs, refresh_log_file
 load_dotenv(".env")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-BASE_URL = "https://www.bundeskartellamt.de/SiteGlobals/Forms/Suche/LaufendeVerfahren/LaufendeVerfahren_Formular.html"
-LAUFENDE_VERFAHREN_URL = f"{BASE_URL}?resultsPerPage=50"
+BASE__SCRAPER_URL = "https://www.bundeskartellamt.de/SiteGlobals/Forms/Suche/LaufendeVerfahren/LaufendeVerfahren_Formular.html"
+LAUFENDE_VERFAHREN_URL = f"{BASE__SCRAPER_URL}?resultsPerPage=50"
 
 COMPARED_FIELDS = ["date", "pursue", "product_area", "diploma"]
 PERSISTENT_LOG_DIR = "/var/data/logs"

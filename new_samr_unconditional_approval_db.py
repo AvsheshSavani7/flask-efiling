@@ -27,7 +27,7 @@ from log_utils import cleanup_old_logs, refresh_log_file
 # Configuration
 CUTOFF_DATE = (datetime.datetime.now() - datetime.timedelta(days=6)).replace(
     hour=0, minute=0, second=0, microsecond=0)
-BASE_URL = "https://www.samr.gov.cn/fldes/ajgs/wtjjz/"
+BASE__SCRAPER_URL = "https://www.samr.gov.cn/fldes/ajgs/wtjjz/"
 ENV_PATH = ".env"
 HTML_OUTPUT_DIR = "samr_unconditional_html_pages"
 PERSISTENT_LOG_DIR = "/var/data/logs"
@@ -1174,8 +1174,8 @@ def main(headless=True):
         logger.info(f"Page: {page}")
 
         try:
-            logger.info(f"Calling BASE_URL: {BASE_URL}")
-            _goto_with_retry(page, BASE_URL)
+            logger.info(f"Calling BASE_URL: {BASE__SCRAPER_URL}")
+            _goto_with_retry(page, BASE__SCRAPER_URL)
             logger.info("   Loaded")
 
             page_num = 1
@@ -1205,7 +1205,7 @@ def main(headless=True):
         except Exception as e:
             _log_critical_error_and_email(
                 f"Scraping error: {e}",
-                {"step": "scrape_listing", "base_url": BASE_URL},
+                {"step": "scrape_listing", "base_url": BASE__SCRAPER_URL},
             )
         finally:
             browser.close()

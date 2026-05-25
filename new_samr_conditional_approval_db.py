@@ -29,7 +29,7 @@ CUTOFF_DATE = (datetime.datetime.now() - datetime.timedelta(days=15)).replace(
     hour=0, minute=0, second=0, microsecond=0)
 # CUTOFF_DATE = datetime.datetime.now().replace(
 #     hour=0, minute=0, second=0, microsecond=0)
-BASE_URL = "https://www.samr.gov.cn/fldes/tzgg/ftj/"
+BASE__SCRAPER_URL = "https://www.samr.gov.cn/fldes/tzgg/ftj/"
 ENV_PATH = ".env"
 HTML_OUTPUT_DIR = "samr_conditional_html_pages"
 PERSISTENT_LOG_DIR = "/var/data/logs"
@@ -1094,8 +1094,8 @@ def main(headless=True):
         logger.info(f"Page: {page}")
 
         try:
-            logger.info(f"Calling BASE_URL: {BASE_URL}")
-            _goto_with_retry(page, BASE_URL)
+            logger.info(f"Calling BASE_URL: {BASE__SCRAPER_URL}")
+            _goto_with_retry(page, BASE__SCRAPER_URL)
             logger.info("   Loaded")
 
             page_num = 1
@@ -1125,7 +1125,7 @@ def main(headless=True):
         except Exception as e:
             _log_critical_error_and_email(
                 f"Scraping error: {e}",
-                {"step": "scrape_listing", "base_url": BASE_URL},
+                {"step": "scrape_listing", "base_url": BASE__SCRAPER_URL},
             )
         finally:
             browser.close()

@@ -116,7 +116,7 @@ def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = 
 
 
 # Constants
-BASE_URL = "https://www.comcom.govt.nz"
+BASE__SCRAPER_URL = "https://www.comcom.govt.nz"
 ENV_PATH = ".env"
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -128,7 +128,7 @@ def utc_now_iso() -> str:
     )
 
 
-def make_absolute_url(href: str, base: str = BASE_URL) -> str:
+def make_absolute_url(href: str, base: str = BASE__SCRAPER_URL) -> str:
     """Convert relative or protocol-relative href to full ComCom URL."""
     if not href or not href.strip():
         return ""

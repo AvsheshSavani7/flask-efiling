@@ -36,7 +36,7 @@ ONE_TIME_END_DATE = None
 # ONE_TIME_START_DATE = datetime.datetime(2025, 11, 1)
 # ONE_TIME_END_DATE = datetime.datetime(2026, 4, 7)
 
-BASE_URL = "https://www.samr.gov.cn/fldes/ajgs/jyaj/"
+BASE__SCRAPER_URL = "https://www.samr.gov.cn/fldes/ajgs/jyaj/"
 ENV_PATH = ".env"
 HTML_OUTPUT_DIR = "samr_html_pages"
 PERSISTENT_LOG_DIR = "/var/data/logs"
@@ -839,8 +839,8 @@ def main(headless=True):
         logger.info(f"Page: {page}")
 
         try:
-            logger.info(f"[STEP 2] Calling BASE_URL: {BASE_URL}")
-            _goto_with_retry(page, BASE_URL)
+            logger.info(f"[STEP 2] Calling BASE_URL: {BASE__SCRAPER_URL}")
+            _goto_with_retry(page, BASE__SCRAPER_URL)
             logger.info("   Loaded")
 
             page_num = 1
@@ -877,7 +877,7 @@ def main(headless=True):
             logger.exception(f"Scraping error: {e}")
             _log_critical_error_and_email(
                 f"Scraping error: {e}",
-                {"step": "scrape_listing", "base_url": BASE_URL},
+                {"step": "scrape_listing", "base_url": BASE__SCRAPER_URL},
             )
         finally:
             browser.close()

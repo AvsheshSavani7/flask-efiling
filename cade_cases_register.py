@@ -35,7 +35,7 @@ from log_utils import cleanup_old_logs, refresh_log_file
 load_dotenv(".env")
 ENV_PATH = ".env"
 
-BASE_URL = (
+BASE__SCRAPER_URL = (
     "https://sei.cade.gov.br/sei/modulos/pesquisa/"
     "md_pesq_processo_pesquisar.php"
     "?acao_externa=protocolo_pesquisar"
@@ -574,7 +574,8 @@ def parse_search_results(page) -> List[Dict[str, Any]]:
                         href = link.get("href", "")
                         if href:
                             if not href.startswith("http"):
-                                href = requests.compat.urljoin(BASE_URL, href)
+                                href = requests.compat.urljoin(
+                                    BASE__SCRAPER_URL, href)
                             detail_url = href
                             break
 
@@ -1266,7 +1267,7 @@ def run_cade_cases_register(
                 logger.info(
                     f"[STEP 2.1] Searching: {type_name} (id={type_id})")
 
-                page.goto(BASE_URL, wait_until="domcontentloaded",
+                page.goto(BASE__SCRAPER_URL, wait_until="domcontentloaded",
                           timeout=50000)
                 time.sleep(3)
 

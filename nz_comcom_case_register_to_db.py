@@ -106,7 +106,7 @@ def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = 
 
 
 # Constants
-BASE_URL = "https://www.comcom.govt.nz"
+BASE__SCRAPER_URL = "https://www.comcom.govt.nz"
 ENV_PATH = ".env"
 BASE_URL = os.getenv("BASE_URL")
 N8N_WEBHOOK_URL = os.getenv(
@@ -129,7 +129,7 @@ LIST_URL_TEMPLATE = (
 )
 
 
-def make_absolute_url(href: str, base: str = BASE_URL) -> str:
+def make_absolute_url(href: str, base: str = BASE__SCRAPER_URL) -> str:
     """Convert relative or protocol-relative href to full ComCom URL."""
     if not href or not href.strip():
         return ""
@@ -402,7 +402,8 @@ def extract_list_items_from_html(html_content: str) -> List[Dict[str, Any]]:
 
             href = link.get("href", "")
             if href and not href.startswith("http"):
-                detail_url = BASE_URL.rstrip("/") + "/" + href.lstrip("/")
+                detail_url = BASE__SCRAPER_URL.rstrip(
+                    "/") + "/" + href.lstrip("/")
             else:
                 detail_url = href or ""
 
