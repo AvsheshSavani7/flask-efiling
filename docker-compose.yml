@@ -9,6 +9,8 @@ services:
       - "10000"
     environment:
       - PORT=10000
+    volumes:
+      - /opt/apps/flask-logs:/var/data/logs
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.flask-app.rule=Host(`flask.arbintel.cloud`)"
