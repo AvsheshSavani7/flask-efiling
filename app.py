@@ -46,7 +46,12 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, force=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %I:%M:%S %p",
+    force=True,
+)
 logger = logging.getLogger(__name__)
 
 for _pymongo_logger in ["pymongo", "pymongo.monitoring", "pymongo.serverSelection",
