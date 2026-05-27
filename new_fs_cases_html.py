@@ -26,6 +26,12 @@ Run:
 
 from llm_verification_service import verify_usa_relation
 from error_email_service import send_error_email
+from scraper_error_utils import (
+    collect_error,
+    scrape_error,
+    scrape_error_context,
+    send_error_summary,
+)
 from mongodb_connection import (
     get_database,
     get_deals_collection,
@@ -113,17 +119,6 @@ if not logger.handlers:
 logger.propagate = False
 
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
-
-
-def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
-    """Immediate error email — use ONLY for critical startup / fatal failures."""
-    logger.error(msg)
-    send_error_email(
-        script_name=SCRIPT_NAME,
-        error_message=msg,
-        context=context,
-        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
-    )
 
 
 # OpenAI client
@@ -246,22 +241,6 @@ def wait_for_results(page, timeout_ms: int = 45000) -> str:
         f"so the selectors no longer match. "
         f"Selectors tried: {tried_selectors}"
     )
-    _log_critical_error_and_email(
-        explanation,
-        {
-            "step": "wait_for_results",
-            "page_url": page_url,
-            "page_title": page_title,
-            "timeout_seconds": f"{timeout_ms / 1000:.0f}",
-            "selectors_tried": tried_selectors,
-            "possible_causes": (
-                "1) Site temporarily slow or under maintenance; "
-                "2) Site HTML structure changed (selectors outdated); "
-                "3) Network issue between server and EC portal"
-            ),
-            "screenshot": screenshot_path or "capture failed",
-        },
-    )
     raise RuntimeError(explanation)
 
 
@@ -338,7 +317,21 @@ def scrape_case_detail(context, url: str) -> Optional[Dict[str, Any]]:
     logger.info(f"  [{case_num}] Opening detail page: {url}")
     page = context.new_page()
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+        http_status = resp.status if resp else "N/A"
+        logger.info(f"  [{case_num}] Page response: status={http_status}")
+
+        if resp and resp.status >= 400:
+            logger.error(
+                f"  [{case_num}] Detail page returned HTTP {resp.status}")
+            return scrape_error(
+                case_num,
+                f"HTTP {resp.status} loading {url}",
+                url=url,
+                http_status=resp.status,
+            )
+
         dismiss_cookie_banner(page)
 
         spa_loaded = wait_for_spa_content(page, timeout_s=15)
@@ -355,19 +348,32 @@ def scrape_case_detail(context, url: str) -> Optional[Dict[str, Any]]:
         if not is_spa_content_in_html(html):
             logger.warning(
                 f"  [{case_num}] SPA labels not found in HTML — page did not fully load, skipping")
-            return None
+            return scrape_error(
+                case_num,
+                f"SPA content not rendered after loading {url} (html_length={len(html)})",
+                url=url,
+            )
 
         parsed = parse_case_html(html, case_num)
         logger.info(f"  [{case_num}] Parsed: {parsed}")
         if parsed and not parsed.get("error"):
             logger.info(f"  [{case_num}] Parsed fields: {list(parsed.keys())}")
         else:
+            error_msg = parsed.get(
+                "error") if parsed else "parse returned None"
             logger.warning(
-                f"  [{case_num}] Parse returned error: {parsed.get('error') if parsed else 'None'}")
+                f"  [{case_num}] Parse returned error: {error_msg}")
+            if parsed:
+                parsed["url"] = url
         return parsed
     except Exception as exc:
         logger.exception(f"  [{case_num}] Failed to scrape: {exc}")
-        return None
+        return scrape_error(
+            case_num,
+            f"Failed to load {url}: {exc}",
+            url=url,
+            traceback=traceback.format_exc(),
+        )
     finally:
         page.close()
 
@@ -410,7 +416,7 @@ def case_exists(collection, case_number: str) -> bool:
         return False
 
 
-def fetch_deals() -> List[Dict[str, Any]]:
+def fetch_deals(error_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     try:
         deals_collection = get_deals_collection()
         if deals_collection is None:
@@ -438,9 +444,11 @@ def fetch_deals() -> List[Dict[str, Any]]:
                     f"  Sample deal: id={d.get('deal_id')} | target={d.get('target') or d.get('target_name','N/A')} | acquirer={d.get('acquirer') or d.get('acquire_name','N/A')}")
         return deals
     except Exception as e:
-        _log_critical_error_and_email(
+        logger.exception(f"Error fetching deals: {e}")
+        collect_error(
+            error_items,
             f"Error fetching deals: {e}",
-            {"step": "fetch_deals"},
+            step="fetch_deals",
         )
         return []
 
@@ -561,7 +569,7 @@ RESPONSE FORMAT:
         return (deal_id, matched_company, matched_role)
     except Exception as e:
         logger.exception(f"LLM deal match error: {e}")
-        return None
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -841,32 +849,35 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
         logger.info("[STEP 1] Initializing MongoDB connection...")
         success, message = init_mongodb_connection(ENV_PATH)
         if not success:
-            _log_critical_error_and_email(
+            collect_error(
+                error_items,
                 f"MongoDB connection failed: {message}",
-                {"step": "mongodb_connect"},
+                step="mongodb_connect",
             )
             return
         logger.info(f"[STEP 1] {message}")
 
         if not is_connected():
-            _log_critical_error_and_email(
+            collect_error(
+                error_items,
                 "MongoDB not connected after init",
-                {"step": "mongodb_connect"},
+                step="mongodb_connect",
             )
             return
 
         collection = get_fs_cases_collection()
         if collection is None:
-            _log_critical_error_and_email(
+            collect_error(
+                error_items,
                 "Could not access 'fs_cases' collection",
-                {"step": "get_collection"},
+                step="get_collection",
             )
             return
         logger.info("[STEP 1] fs_cases collection ready")
 
         # --- Step 2: Fetch deals ---
         logger.info("[STEP 2] Loading deals from MongoDB...")
-        deals = fetch_deals()
+        deals = fetch_deals(error_items)
         if not deals:
             logger.warning(
                 "[STEP 2] No open/unknown deals found. Will still register cases.")
@@ -947,13 +958,18 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
 
                     logger.info(f"[STEP 3.7] [{case_num}] Case: {case}")
                     if not case or case.get("error"):
+                        parse_error = (
+                            case.get("error") if case else "Scrape/parse failed"
+                        )
                         logger.warning(
-                            f"[STEP 3.8] [{case_num}] Parse failed; skipping")
-                        error_items.append({
-                            "case_number": case_num,
-                            "error": "Scrape/parse failed",
-                            "step": "scrape_case_detail",
-                        })
+                            f"[STEP 3.8] [{case_num}] Scrape failed; skipping")
+                        collect_error(
+                            error_items,
+                            str(parse_error),
+                            context=scrape_error_context(case, url),
+                            case_number=case_num,
+                            step="scrape_case_detail",
+                        )
                         continue
 
                     case_title = case.get("case_title") or "N/A"
@@ -968,8 +984,19 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                     # --- LLM #1: deal match ---
                     logger.info(
                         f"[STEP 3.12] [{case_num}] LLM Call #1: deal match (companies={companies})...")
-                    match_result = match_case_to_deal(
-                        companies, deals) if deals else None
+                    match_result = None
+                    if deals:
+                        try:
+                            match_result = match_case_to_deal(companies, deals)
+                        except Exception as e:
+                            logger.exception(
+                                f"[STEP 3.12] [{case_num}] LLM deal match error: {e}")
+                            collect_error(
+                                error_items,
+                                str(e),
+                                case_number=case_num,
+                                step="match_case_to_deal",
+                            )
 
                     if match_result:
                         matched_deal_id, matched_company, matched_role = match_result
@@ -996,11 +1023,12 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                             except Exception as e:
                                 logger.exception(
                                     f"[STEP 3.17] [{case_num}] Error looking up deal {matched_deal_id}: {e}")
-                                error_items.append({
-                                    "case_number": case_num,
-                                    "error": str(e),
-                                    "step": "deal_lookup",
-                                })
+                                collect_error(
+                                    error_items,
+                                    str(e),
+                                    case_number=case_num,
+                                    step="deal_lookup",
+                                )
 
                         if deal:
                             target = deal.get("target") or deal.get(
@@ -1012,8 +1040,14 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
 
                             subject, html_email = generate_matched_email(
                                 case, deal, companies)
-                            send_email_via_webhook(
-                                subject, html_email, case_num, case_title, deal_id=matched_deal_id)
+                            if not send_email_via_webhook(
+                                subject, html_email, case_num, case_title, deal_id=matched_deal_id):
+                                collect_error(
+                                    error_items,
+                                    "Failed to send matched-case notification email",
+                                    case_number=case_num,
+                                    step="send_email_via_webhook",
+                                )
 
                             case_doc = {
                                 **case,
@@ -1025,6 +1059,13 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                             inserted_id = insert_case(collection, case_doc)
                             if inserted_id:
                                 new_count += 1
+                            else:
+                                collect_error(
+                                    error_items,
+                                    "Failed to insert matched case into DB",
+                                    case_number=case_num,
+                                    step="insert_case",
+                                )
                             continue
                         else:
                             logger.warning(
@@ -1041,11 +1082,12 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                     except Exception as e:
                         logger.exception(
                             f"[STEP 3.21] [{case_num}] USA check error: {e}")
-                        error_items.append({
-                            "case_number": case_num,
-                            "error": str(e),
-                            "step": "verify_usa_relation",
-                        })
+                        collect_error(
+                            error_items,
+                            str(e),
+                            case_number=case_num,
+                            step="verify_usa_relation",
+                        )
                         is_usa = False
 
                     if is_usa:
@@ -1053,8 +1095,14 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                             f"[STEP 3.22] [{case_num}] USA-related case detected — sending email")
                         subject, html_email = generate_usa_email(
                             case, companies)
-                        send_email_via_webhook(
-                            subject, html_email, case_num, case_title, usa_related=True)
+                        if not send_email_via_webhook(
+                            subject, html_email, case_num, case_title, usa_related=True):
+                            collect_error(
+                                error_items,
+                                "Failed to send USA-related notification email",
+                                case_number=case_num,
+                                step="send_email_via_webhook",
+                            )
 
                         case_doc = {
                             **case,
@@ -1065,6 +1113,13 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                         inserted_id = insert_case(collection, case_doc)
                         if inserted_id:
                             new_count += 1
+                        else:
+                            collect_error(
+                                error_items,
+                                "Failed to insert USA-related case into DB",
+                                case_number=case_num,
+                                step="insert_case",
+                            )
                     else:
                         logger.info(
                             f"[STEP 3.23] [{case_num}] No match, not USA-related — saving to DB (no email)")
@@ -1077,6 +1132,13 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                         inserted_id = insert_case(collection, case_doc)
                         if inserted_id:
                             new_count += 1
+                        else:
+                            collect_error(
+                                error_items,
+                                "Failed to insert case into DB",
+                                case_number=case_num,
+                                step="insert_case",
+                            )
 
                 if max_pages is not None and current_page >= max_pages:
                     logger.info(
@@ -1096,24 +1158,16 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
             logger.info(f"[STEP 3.26] Browser closed")
 
     except Exception as e:
-        _log_critical_error_and_email(
+        logger.exception(f"Unhandled error in run(): {e}")
+        collect_error(
+            error_items,
             f"Unhandled error in run(): {e}",
-            {"step": "run_main", "start_url": start_url},
+            context={"start_url": start_url},
+            step="run_main",
         )
 
     finally:
-        if error_items:
-            logger.warning(
-                f"[STEP 3.27] {len(error_items)} per-case errors collected — sending summary email")
-            send_error_email(
-                script_name=SCRIPT_NAME,
-                error_message=f"{len(error_items)} errors occurred during run",
-                context={
-                    "error_count": len(error_items),
-                    "errors": error_items[:20],
-                },
-                traceback_str=None,
-            )
+        send_error_summary(error_items, SCRIPT_NAME)
 
         elapsed = round(time.time() - run_start, 1)
         logger.info("")
@@ -1148,6 +1202,11 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception as e:
-        _log_critical_error_and_email(
-            f"Unhandled error in __main__: {e}", {"step": "__main__"})
+        logger.exception(f"Unhandled error in __main__: {e}")
+        send_error_email(
+            script_name=SCRIPT_NAME,
+            error_message=f"Unhandled error in __main__: {e}",
+            context={"step": "__main__"},
+            traceback_str=traceback.format_exc(),
+        )
         raise

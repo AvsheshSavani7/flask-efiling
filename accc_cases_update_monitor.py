@@ -1,12 +1,11 @@
 import os
 import json
 import logging
-from logging.handlers import RotatingFileHandler
 import sys
-import traceback
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from logging.handlers import RotatingFileHandler
 
 from bson import ObjectId
 from dotenv import load_dotenv
@@ -21,8 +20,8 @@ from mongodb_connection import (
 )
 from llm_verification_service import verify_usa_relation
 from accc_cases_register import match_case_to_deal
-from error_email_service import send_error_email
 from log_utils import cleanup_old_logs, refresh_log_file
+from scraper_error_utils import collect_error, send_error_summary
 
 
 load_dotenv(".env")
@@ -88,16 +87,6 @@ if not logger.handlers:
 logger.propagate = False
 
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
-
-
-def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
-    logger.error(msg)
-    send_error_email(
-        script_name=SCRIPT_NAME,
-        error_message=msg,
-        context=context,
-        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
-    )
 
 
 # OpenAI client for LLM matching
@@ -1022,260 +1011,326 @@ def process_accc_cases_updates():
     LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     logger.info("[STEP 1] Starting ACCC Cases Update Monitor")
     run_start = time.time()
-    error_count = 0
     error_items: List[Dict[str, Any]] = []
+    total_checked = 0
+    total_changed = 0
     logger.info("=" * 60)
     logger.info("[STEP 1] Starting ACCC Cases Update Monitor")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
     logger.info("[STEP 1.1] Starting ACCC Cases Register update monitor")
 
-    logger.info("[STEP 1.2] Initializing MongoDB connection...")
-    success, message = init_mongodb_connection(ENV_PATH)
-    if not success:
-        _log_critical_error_and_email(
-            f"MongoDB connection failed: {message}",
-            {"step": "mongodb_connect"},
+    try:
+        logger.info("[STEP 1.2] Initializing MongoDB connection...")
+        success, message = init_mongodb_connection(ENV_PATH)
+        if not success:
+            collect_error(
+                error_items,
+                f"MongoDB connection failed: {message}",
+                step="mongodb_connect",
+            )
+            return
+        logger.info(f"[STEP 1.3] {message}")
+
+        if not is_connected():
+            collect_error(
+                error_items,
+                "MongoDB not connected. Exiting.",
+                step="mongodb_connect",
+            )
+            return
+
+        cases_collection = get_accc_cases_collection()
+        if cases_collection is None:
+            collect_error(
+                error_items,
+                "Could not access 'accc_cases' collection. Exiting.",
+                step="get_collection",
+            )
+            return
+
+        deals_collection = get_deals_collection()
+
+        cursor = cases_collection.find(
+            {"acquisition_status": {"$regex": "^under assessment$", "$options": "i"}}
         )
-        return
-    logger.info(f"[STEP 1.3] {message}")
+        cases = list(cursor)
+        if not cases:
+            print(
+                "[STEP 1.4] No ACCC cases with acquisition_status 'Under Assessment' found.")
+            return
 
-    if not is_connected():
-        _log_critical_error_and_email("MongoDB not connected. Exiting.", {
-            "step": "mongodb_connect"})
-        return
+        logger.info(
+            f"[STEP 1.5] Found {len(cases)} ACCC cases with status 'Under Assessment'")
+        logger.info(f"[STEP 1.6] Existing Cases: {cases}")
 
-    cases_collection = get_accc_cases_collection()
-    if cases_collection is None:
-        _log_critical_error_and_email("Could not access 'accc_cases' collection. Exiting.", {
-            "step": "get_collection"})
-        return
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    f"--proxy-server=http://{PROXY_HOST}:{PROXY_PORT}",
+                ],
+            )
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+                proxy={
+                    "server": f"http://{PROXY_HOST}:{PROXY_PORT}",
+                    "username": PROXY_USERNAME,
+                    "password": PROXY_PASSWORD,
+                },
+            )
+            page = context.new_page()
+            logger.info(f"[STEP 1.7] Page: {page}")
 
-    deals_collection = get_deals_collection()
-
-    # Step 1: get all cases whose acquisition_status is Under Assessment
-    cursor = cases_collection.find(
-        {"acquisition_status": {"$regex": "^under assessment$", "$options": "i"}}
-    )
-    cases = list(cursor)
-    if not cases:
-        print(
-            "[STEP 1.4] No ACCC cases with acquisition_status 'Under Assessment' found.")
-        return
-
-    logger.info(
-        f"[STEP 1.5] Found {len(cases)} ACCC cases with status 'Under Assessment'")
-    logger.info(f"[STEP 1.6] Existing Cases: {cases}")
-
-    total_checked = 0
-    total_changed = 0
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                f"--proxy-server=http://{PROXY_HOST}:{PROXY_PORT}",
-            ],
-        )
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-            proxy={
-                "server": f"http://{PROXY_HOST}:{PROXY_PORT}",
-                "username": PROXY_USERNAME,
-                "password": PROXY_PASSWORD,
-            },
-        )
-        page = context.new_page()
-        logger.info(f"[STEP 1.7] Page: {page}")
-
-        for idx, case_doc in enumerate(cases, 1):
-            total_checked += 1
-            case_number = case_doc.get("case_number", "N/A")
-            title = case_doc.get("title", "N/A")
-            url = case_doc.get("url")
-
-            logger.info(f"[{idx}/{len(cases)}] Case {case_number}: {title}")
-            if not url:
-                logger.warning("  No URL stored for this case; skipping")
-                continue
-
-            current_case = fetch_current_case_from_page(page, url)
-            logger.info(
-                f"Accc daily monitor check: current_case:1 {current_case}")
-
-            if not current_case:
-                logger.warning("  Could not fetch current case info; skipping")
-                continue
-
-            logger.info(f"  Case doc: {case_doc}")
-            logger.info(f"  Current case: {current_case}")
-
-            # Scrapers can occasionally omit fields due to transient DOM issues
-            # or selector drift. Treat "missing from scrape" as "unknown",
-            # and preserve the previously stored value so we don't generate
-            # fake "removed" diffs and wipe/overwrite data.
-            allowed_keys = {
-                "acquisition_status",
-                "type",
-                "effective_notification_date",
-                "status",
-                "about_the_acquisition",
-                "decisions_and_key_events",
-            }
-            for k in allowed_keys:
-                if k not in current_case and k in case_doc:
-                    current_case[k] = case_doc.get(k)
-            # Extra safety: if decisions_and_key_events is present but empty,
-            # prefer the stored value (events are append-only in practice).
-            if (
-                "decisions_and_key_events" in current_case
-                and isinstance(current_case.get("decisions_and_key_events"), list)
-                and not current_case.get("decisions_and_key_events")
-                and case_doc.get("decisions_and_key_events")
-            ):
-                logger.info(
-                    "  decisions_and_key_events missing/empty; preserving existing")
-                current_case["decisions_and_key_events"] = case_doc.get(
-                    "decisions_and_key_events"
-                )
-
-            changes = detect_changes(case_doc, current_case)
-            if not changes:
-                logger.info("  No changes detected")
-                continue
-
-            total_changed += 1
-            logger.info(f"  Changes detected ({len(changes)} fields)")
-            for label, old_val, new_val, change_type in changes:
-                if label == "Decisions and key events":
-                    count = len(new_val) if isinstance(new_val, list) else 0
-                    logger.info(f"    - {label}: {count} new event(s) (NEW)")
-                else:
-                    old_disp = "N/A" if old_val is None else str(old_val)
-                    new_disp = "N/A" if new_val is None else str(new_val)
-                    tag = "NEW" if change_type == "new" else "UPDATED"
-                    logger.info(
-                        f"    - {label}: {old_disp} → {new_disp} ({tag})")
-
-            deal = None
-            # Step 6.1: if record already has deal_id, just send email + update
-            deal_id = case_doc.get("deal_id")
-            if deal_id and deals_collection is not None:
+            for idx, case_doc in enumerate(cases, 1):
                 try:
-                    oid = ObjectId(deal_id)
-                    deal = deals_collection.find_one({"_id": oid})
-                except Exception as e:
-                    logger.warning(f"  Invalid deal_id on case: {e}")
+                    total_checked += 1
+                    case_number = case_doc.get("case_number", "N/A")
+                    title = case_doc.get("title", "N/A")
+                    url = case_doc.get("url")
 
-                if deal:
+                    logger.info(f"[{idx}/{len(cases)}] Case {case_number}: {title}")
+                    if not url:
+                        logger.warning("  No URL stored for this case; skipping")
+                        continue
+
+                    current_case = fetch_current_case_from_page(page, url)
                     logger.info(
-                        "  Case already linked to a deal; sending email and updating")
-                    send_update_email(case_doc, current_case, deal, changes)
-                    update_case_document(
-                        cases_collection, case_doc, current_case)
-                    continue
+                        f"Accc daily monitor check: current_case:1 {current_case}")
 
-            # Step 6.2: try to match to a deal via LLM
-            matched_deal_id = match_case_to_deal(title)
+                    if not current_case:
+                        collect_error(
+                            error_items,
+                            "Could not fetch current case info from detail page",
+                            step="scrape_detail_page",
+                            case_number=case_number,
+                            context={"url": url},
+                        )
+                        continue
 
-            logger.info(f"  Matched: {matched_deal_id}")
-            if matched_deal_id:
-                deal_id_str = matched_deal_id
-                logger.info(f"  LLM matched case to deal {deal_id_str}")
+                    logger.info(f"  Case doc: {case_doc}")
+                    logger.info(f"  Current case: {current_case}")
 
-                # Always record the matched deal_id on the case, even if we can't
-                # resolve it to a full deal document (for traceability).
-                current_case["deal_id"] = deal_id_str
+                    allowed_keys = {
+                        "acquisition_status",
+                        "type",
+                        "effective_notification_date",
+                        "status",
+                        "about_the_acquisition",
+                        "decisions_and_key_events",
+                    }
+                    for k in allowed_keys:
+                        if k not in current_case and k in case_doc:
+                            current_case[k] = case_doc.get(k)
+                    if (
+                        "decisions_and_key_events" in current_case
+                        and isinstance(current_case.get("decisions_and_key_events"), list)
+                        and not current_case.get("decisions_and_key_events")
+                        and case_doc.get("decisions_and_key_events")
+                    ):
+                        logger.info(
+                            "  decisions_and_key_events missing/empty; preserving existing")
+                        current_case["decisions_and_key_events"] = case_doc.get(
+                            "decisions_and_key_events"
+                        )
 
-                # Try to fetch the full deal document for richer email content.
-                logger.info(f"  Deals collection: {deals_collection}")
-                if deals_collection is not None:
-                    try:
-                        oid = ObjectId(deal_id_str)
-                        deal = deals_collection.find_one({"_id": oid})
-                    except Exception as e:
-                        logger.warning(
-                            f"  Invalid or unresolved deal_id from LLM: {e}")
-                        deal = None
-                else:
+                    changes = detect_changes(case_doc, current_case)
+                    if not changes:
+                        logger.info("  No changes detected")
+                        continue
+
+                    total_changed += 1
+                    logger.info(f"  Changes detected ({len(changes)} fields)")
+                    for label, old_val, new_val, change_type in changes:
+                        if label == "Decisions and key events":
+                            count = len(new_val) if isinstance(new_val, list) else 0
+                            logger.info(f"    - {label}: {count} new event(s) (NEW)")
+                        else:
+                            old_disp = "N/A" if old_val is None else str(old_val)
+                            new_disp = "N/A" if new_val is None else str(new_val)
+                            tag = "NEW" if change_type == "new" else "UPDATED"
+                            logger.info(
+                                f"    - {label}: {old_disp} → {new_disp} ({tag})")
+
                     deal = None
+                    deal_id = case_doc.get("deal_id")
+                    if deal_id and deals_collection is not None:
+                        try:
+                            oid = ObjectId(deal_id)
+                            deal = deals_collection.find_one({"_id": oid})
+                        except Exception as e:
+                            logger.warning(f"  Invalid deal_id on case: {e}")
 
-                # Send email (with or without deal details) and update case;
-                # when a match exists we do NOT run the USA-related flow.
-                send_update_email(case_doc, current_case, deal, changes)
-                update_case_document(cases_collection, case_doc, current_case)
-                continue
+                        if deal:
+                            logger.info(
+                                "  Case already linked to a deal; sending email and updating")
+                            if not send_update_email(case_doc, current_case, deal, changes):
+                                collect_error(
+                                    error_items,
+                                    "Failed to send update email",
+                                    step="send_email",
+                                    case_number=case_number,
+                                )
+                            if not update_case_document(
+                                cases_collection, case_doc, current_case
+                            ):
+                                collect_error(
+                                    error_items,
+                                    "Failed to update case document",
+                                    step="update_case",
+                                    case_number=case_number,
+                                )
+                            continue
 
-            # No deal link → check USA relation
-            try:
-                case_details_str = f"""
+                    try:
+                        matched_deal_id = match_case_to_deal(title)
+                    except Exception as e:
+                        logger.exception(f"Error during deal matching: {e}")
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="match_case_to_deal",
+                            case_number=case_number,
+                        )
+                        matched_deal_id = None
+
+                    logger.info(f"  Matched: {matched_deal_id}")
+                    if matched_deal_id:
+                        deal_id_str = matched_deal_id
+                        logger.info(f"  LLM matched case to deal {deal_id_str}")
+
+                        current_case["deal_id"] = deal_id_str
+
+                        logger.info(f"  Deals collection: {deals_collection}")
+                        if deals_collection is not None:
+                            try:
+                                oid = ObjectId(deal_id_str)
+                                deal = deals_collection.find_one({"_id": oid})
+                            except Exception as e:
+                                logger.warning(
+                                    f"  Invalid or unresolved deal_id from LLM: {e}")
+                                deal = None
+                        else:
+                            deal = None
+
+                        if not send_update_email(case_doc, current_case, deal, changes):
+                            collect_error(
+                                error_items,
+                                "Failed to send update email",
+                                step="send_email",
+                                case_number=case_number,
+                            )
+                        if not update_case_document(
+                            cases_collection, case_doc, current_case
+                        ):
+                            collect_error(
+                                error_items,
+                                "Failed to update case document",
+                                step="update_case",
+                                case_number=case_number,
+                            )
+                        continue
+
+                    try:
+                        case_details_str = f"""
 Case number: {case_number}
 Title: {title}
 Acquisition status: {current_case.get("acquisition_status", "")}
 Type: {current_case.get("type", "")}
 URL: {url}
 """
-                is_usa = verify_usa_relation(
-                    company_details=case_details_str,
-                    case_type="ACCC",
-                )
-            except Exception as e:
-                logger.exception(f"Error verifying USA relation: {e}")
-                error_items.append({
-                    "case_number": case_number,
-                    "error": str(e),
-                    "step": "verify_usa_relation",
-                })
-                error_count += 1
-                is_usa = False
+                        is_usa = verify_usa_relation(
+                            company_details=case_details_str,
+                            case_type="ACCC",
+                        )
+                    except Exception as e:
+                        logger.exception(f"Error verifying USA relation: {e}")
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="verify_usa_relation",
+                            case_number=case_number,
+                        )
+                        is_usa = False
 
-            if is_usa:
-                logger.info(
-                    "  Case appears USA-related; sending email and updating")
-                # current_case["usa_related"] = True
-                send_update_email(case_doc, current_case,
-                                  None, changes, is_usa=True)
-                update_case_document(cases_collection, case_doc, current_case)
-            else:
-                logger.info(
-                    "  Not USA-related and no deal match; updating case only")
-                update_case_document(cases_collection, case_doc, current_case)
+                    if is_usa:
+                        logger.info(
+                            "  Case appears USA-related; sending email and updating")
+                        if not send_update_email(
+                            case_doc, current_case, None, changes, is_usa=True
+                        ):
+                            collect_error(
+                                error_items,
+                                "Failed to send update email",
+                                step="send_email",
+                                case_number=case_number,
+                            )
+                        if not update_case_document(
+                            cases_collection, case_doc, current_case
+                        ):
+                            collect_error(
+                                error_items,
+                                "Failed to update case document",
+                                step="update_case",
+                                case_number=case_number,
+                            )
+                    else:
+                        logger.info(
+                            "  Not USA-related and no deal match; updating case only")
+                        if not update_case_document(
+                            cases_collection, case_doc, current_case
+                        ):
+                            collect_error(
+                                error_items,
+                                "Failed to update case document",
+                                step="update_case",
+                                case_number=case_number,
+                            )
+                except Exception as e:
+                    logger.exception(f"Error processing case #{idx}: {e}")
+                    collect_error(
+                        error_items,
+                        str(e),
+                        step="process_case",
+                        case_number=case_doc.get("case_number", "N/A"),
+                    )
+                    continue
 
-        browser.close()
+            browser.close()
 
-    logger.info("=" * 60)
-    logger.info("Summary:")
-    logger.info(f"   Total cases checked: {total_checked}")
-    logger.info(f"   Cases with changes: {total_changed}")
-    logger.info("=" * 60)
-    logger.info("Done!")
+        logger.info("=" * 60)
+        logger.info("Summary:")
+        logger.info(f"   Total cases checked: {total_checked}")
+        logger.info(f"   Cases with changes: {total_changed}")
+        logger.info("=" * 60)
+        logger.info("Done!")
 
-    if error_items:
-        send_error_email(
-            script_name=SCRIPT_NAME,
-            error_message=f"{len(error_items)} errors occurred during run",
-            context={
-                "error_count": len(error_items),
-                "errors": error_items[:20],
-            },
-            traceback_str=None,
+    except Exception as e:
+        logger.exception(f"Unhandled error in process_accc_cases_updates(): {e}")
+        collect_error(
+            error_items,
+            f"Unhandled error in process_accc_cases_updates(): {e}",
+            step="run_main",
         )
 
-    elapsed = round(time.time() - run_start, 1)
-    logger.info("=" * 60)
-    logger.info("SUMMARY")
-    logger.info(f"  Total cases checked          : {total_checked}")
-    logger.info(f"  Cases with changes           : {total_changed}")
-    logger.info(f"  Errors encountered           : {error_count}")
-    logger.info(f"  Total time                   : {elapsed}s")
-    logger.info("=" * 60)
+    finally:
+        send_error_summary(error_items, SCRIPT_NAME)
+
+        elapsed = round(time.time() - run_start, 1)
+        logger.info("=" * 60)
+        logger.info("SUMMARY")
+        logger.info(f"  Total cases checked          : {total_checked}")
+        logger.info(f"  Cases with changes           : {total_changed}")
+        logger.info(f"  Errors encountered           : {len(error_items)}")
+        logger.info(f"  Total time                   : {elapsed}s")
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":

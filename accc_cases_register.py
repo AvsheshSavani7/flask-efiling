@@ -5,14 +5,13 @@ from mongodb_connection import (
     is_connected,
 )
 from llm_verification_service import verify_usa_relation
-from error_email_service import send_error_email
 from log_utils import cleanup_old_logs, refresh_log_file
+from scraper_error_utils import collect_error, send_error_summary
 import os
 import json
 import sys
 import logging
 from logging.handlers import RotatingFileHandler
-import traceback
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -85,16 +84,6 @@ if not logger.handlers:
 logger.propagate = False
 
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
-
-
-def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
-    logger.error(msg)
-    send_error_email(
-        script_name=SCRIPT_NAME,
-        error_message=msg,
-        context=context,
-        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
-    )
 
 
 # OpenAI client for deal matching
@@ -372,8 +361,8 @@ RESPONSE FORMAT:
         except Exception:
             return None
     except Exception as e:
-        logger.warning(f"LLM match error: {e}")
-        return None
+        logger.exception(f"LLM match error: {e}")
+        raise
 
 
 def _post_email_payload(payload: Dict[str, Any]) -> bool:
@@ -856,8 +845,9 @@ def run_accc_cases_register(test_mode: bool = False):
     global LOG_FILE
     LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = time.time()
-    error_count = 0
     error_items: List[Dict[str, Any]] = []
+    items: List[Dict[str, Any]] = []
+    new_cases: List[Dict[str, Any]] = []
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"
     logger.info("=" * 60)
     logger.info(f"[STEP 1] Starting ACCC Cases Register ({mode_label})")
@@ -865,288 +855,299 @@ def run_accc_cases_register(test_mode: bool = False):
     logger.info("=" * 60)
     logger.info(f"Starting ACCC Cases Register scraper ({mode_label})")
 
-    # Initialize MongoDB (still connect in test mode so we exercise full path,
-    # but skip writes later)
-    logger.info("[STEP 1.1] Initializing MongoDB connection...")
-    success, message = init_mongodb_connection(ENV_PATH)
-    if not success:
-        _log_critical_error_and_email(
-            f"MongoDB connection failed: {message}",
-            {"step": "mongodb_connect"},
-        )
-        return
-    logger.info(f"[STEP 1.2] {message}")
-
-    if not is_connected():
-        _log_critical_error_and_email("MongoDB not connected. Exiting.", {
-            "step": "mongodb_connect"})
-        return
-
-    collection = get_accc_cases_collection()
-    if collection is None:
-        _log_critical_error_and_email("Could not access 'accc_cases' collection. Exiting.", {
-            "step": "get_collection"})
-        return
-
-    new_cases: List[Dict[str, Any]] = []
-
-    # ------------------------------------------------------------------
-    # Step 1: Fetch list page HTML via residential proxy (requests)
-    # ------------------------------------------------------------------
-    logger.info(f"Loading ACCC acquisitions register list page: {LIST_URL}")
-    logger.info(f"Using residential proxy: {PROXY_HOST}:{PROXY_PORT}")
-
-    list_headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-
-    max_retries = 3
-    items = []
-    for attempt in range(1, max_retries + 1):
-        try:
-            resp = requests.get(
-                LIST_URL,
-                headers=list_headers,
-                proxies=PROXY_DICT,
-                timeout=(10, 60),
-                verify=False,
-                allow_redirects=True,
+    try:
+        # Initialize MongoDB (still connect in test mode so we exercise full path,
+        # but skip writes later)
+        logger.info("[STEP 1.1] Initializing MongoDB connection...")
+        success, message = init_mongodb_connection(ENV_PATH)
+        if not success:
+            collect_error(
+                error_items,
+                f"MongoDB connection failed: {message}",
+                step="mongodb_connect",
             )
-            resp.raise_for_status()
-            items = parse_list_items(resp.text)
-            logger.info(f"[STEP 1.3] Items: {items}")
-            if not items:
-                raise Exception("HTML fetched but no .views-row items found")
-            logger.info(
-                f"Found {len(items)} list items from acquisitions register")
-            break
-        except Exception as e:
-            logger.warning(
-                f"Attempt {attempt}/{max_retries} failed loading list page: {e}")
-            if attempt == max_retries:
-                logger.error("All retries exhausted; exiting")
-                return
-            wait_time = 5 * attempt
-            logger.info(f"Retrying in {wait_time}s...")
-            time.sleep(wait_time)
+            return
+        logger.info(f"[STEP 1.2] {message}")
 
-    # ------------------------------------------------------------------
-    # Step 2: Process each item's detail page via Playwright
-    # ------------------------------------------------------------------
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                f"--proxy-server=http://{PROXY_HOST}:{PROXY_PORT}",
-            ],
-        )
-        context = browser.new_context(
-            user_agent=(
+        if not is_connected():
+            collect_error(
+                error_items,
+                "MongoDB not connected. Exiting.",
+                step="mongodb_connect",
+            )
+            return
+
+        collection = get_accc_cases_collection()
+        if collection is None:
+            collect_error(
+                error_items,
+                "Could not access 'accc_cases' collection. Exiting.",
+                step="get_collection",
+            )
+            return
+
+        # ------------------------------------------------------------------
+        # Step 1: Fetch list page HTML via residential proxy (requests)
+        # ------------------------------------------------------------------
+        logger.info(f"Loading ACCC acquisitions register list page: {LIST_URL}")
+        logger.info(f"Using residential proxy: {PROXY_HOST}:{PROXY_PORT}")
+
+        list_headers = {
+            "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
             ),
-            proxy={
-                "server": f"http://{PROXY_HOST}:{PROXY_PORT}",
-                "username": PROXY_USERNAME,
-                "password": PROXY_PASSWORD,
-            },
-        )
-        page = context.new_page()
-        logger.info(f"[STEP 2.1] Page: {page}")
-        # Process each list item
-        for idx, item in enumerate(items, 1):
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        max_retries = 3
+        list_error: Optional[str] = None
+        for attempt in range(1, max_retries + 1):
             try:
-                case_number = item.get("case_number")
-                url = item.get("url")
-                title = item.get("title", "")
-
+                resp = requests.get(
+                    LIST_URL,
+                    headers=list_headers,
+                    proxies=PROXY_DICT,
+                    timeout=(10, 60),
+                    verify=False,
+                    allow_redirects=True,
+                )
+                resp.raise_for_status()
+                items = parse_list_items(resp.text)
+                logger.info(f"[STEP 1.3] Items: {items}")
+                if not items:
+                    raise Exception("HTML fetched but no .views-row items found")
                 logger.info(
-                    f"[{idx}/{len(items)}] Case {case_number}: {title}")
+                    f"Found {len(items)} list items from acquisitions register")
+                break
+            except Exception as e:
+                list_error = str(e)
+                logger.warning(
+                    f"Attempt {attempt}/{max_retries} failed loading list page: {e}")
+                if attempt == max_retries:
+                    collect_error(
+                        error_items,
+                        f"Failed to load list page after {max_retries} attempts: {list_error}",
+                        step="fetch_list_page",
+                        context={"url": LIST_URL, "attempts": max_retries},
+                    )
+                    return
+                wait_time = 5 * attempt
+                logger.info(f"Retrying in {wait_time}s...")
+                time.sleep(wait_time)
 
-                if not case_number or not url:
-                    logger.warning("  Missing case_number or url; skipping")
-                    continue
+        # ------------------------------------------------------------------
+        # Step 2: Process each item's detail page via Playwright
+        # ------------------------------------------------------------------
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    f"--proxy-server=http://{PROXY_HOST}:{PROXY_PORT}",
+                ],
+            )
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+                proxy={
+                    "server": f"http://{PROXY_HOST}:{PROXY_PORT}",
+                    "username": PROXY_USERNAME,
+                    "password": PROXY_PASSWORD,
+                },
+            )
+            page = context.new_page()
+            logger.info(f"[STEP 2.1] Page: {page}")
+            for idx, item in enumerate(items, 1):
+                try:
+                    case_number = item.get("case_number")
+                    url = item.get("url")
+                    title = item.get("title", "")
 
-                # Step 2: skip if already in accc_cases (for live mode)
-                if not test_mode and case_exists(collection, case_number):
                     logger.info(
-                        "  Case already exists in accc_cases; skipping")
-                    continue
+                        f"[{idx}/{len(items)}] Case {case_number}: {title}")
 
-                # Step 3: fetch and parse detail page into case_info
-                case_info = extract_detail_page_case(page, url)
-                logger.info(f"Accc daily check: case_info: {case_info}")
-                if not case_info:
-                    logger.warning("  Could not extract case info; skipping")
-                    continue
+                    if not case_number or not url:
+                        logger.warning("  Missing case_number or url; skipping")
+                        continue
 
-                # Ensure summary fields from list are preserved if missing from detail
-                for key in [
-                    "acquisition_status",
-                    "type",
-                    "effective_notification_date",
-                    "title",
-                ]:
-                    if key not in case_info and key in item:
-                        case_info[key] = item[key]
+                    if not test_mode and case_exists(collection, case_number):
+                        logger.info(
+                            "  Case already exists in accc_cases; skipping")
+                        continue
 
-                # Timestamps for new-case insert
-                now_iso = utc_now_iso()
-                case_info.setdefault("created_at", now_iso)
-                case_info["updated_at"] = now_iso
+                    case_info = extract_detail_page_case(page, url)
+                    logger.info(f"Accc daily check: case_info: {case_info}")
+                    if not case_info:
+                        collect_error(
+                            error_items,
+                            "Could not extract case info from detail page",
+                            step="scrape_detail_page",
+                            case_number=case_number,
+                            context={"url": url},
+                        )
+                        continue
 
-                # -----------------------------------------------------------------
-                # New-case workflow (no change comparison in this script)
-                # Reference logic: accc_cases_update_monitor.py
-                # -----------------------------------------------------------------
-                if test_mode:
-                    # One-time backfill mode:
-                    # - do NOT skip existing records
-                    # - upsert all cases
-                    # - do NOT send emails
-                    # - do NOT run USA-related verification
+                    for key in [
+                        "acquisition_status",
+                        "type",
+                        "effective_notification_date",
+                        "title",
+                    ]:
+                        if key not in case_info and key in item:
+                            case_info[key] = item[key]
+
+                    now_iso = utc_now_iso()
+                    case_info.setdefault("created_at", now_iso)
+                    case_info["updated_at"] = now_iso
+
                     try:
                         matched_deal_id = match_case_to_deal(
                             case_info.get("title", "") or title
                         )
                     except Exception as e:
                         logger.exception(f"Error during deal matching: {e}")
-                        error_items.append({
-                            "case_number": case_number,
-                            "error": str(e),
-                            "step": "match_case_to_deal",
-                        })
-                        error_count += 1
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="match_case_to_deal",
+                            case_number=case_number,
+                        )
                         matched_deal_id = None
 
-                    if matched_deal_id:
-                        case_info["deal_id"] = matched_deal_id
-                        logger.info(
-                            f"  Deal match found (deal_id={matched_deal_id})"
-                        )
-
-                    action = upsert_case_by_case_number(collection, case_info)
-                    logger.info(
-                        f"  [TEST MODE] Upserted case into accc_cases ({action})"
-                    )
-
-                    backup_case = dict(case_info)
-                    backup_case.pop("_id", None)
-                    new_cases.append(backup_case)
-                else:
-                    try:
-                        matched_deal_id = match_case_to_deal(
-                            case_info.get("title", "") or title
-                        )
-                    except Exception as e:
-                        logger.warning(f"  Error during deal matching: {e}")
-                        matched_deal_id = None
-
-                    if matched_deal_id:
-                        case_info["deal_id"] = matched_deal_id
-                        logger.info(
-                            f"  Deal match found (deal_id={matched_deal_id}); sending email"
-                        )
-                        send_new_case_email(case_info, matched_deal_id)
-                    else:
-                        # No deal match → verify USA relation
-                        try:
-                            case_details_str = prepare_case_payload_for_llm(
-                                case_info)
-                            is_usa = bool(
-                                verify_usa_relation(
-                                    company_details=case_details_str,
-                                    case_type="ACCC",
-                                )
-                            )
-                        except Exception as e:
-                            logger.exception(
-                                f"Error verifying USA relation: {e}")
-                            error_items.append({
-                                "case_number": case_number,
-                                "error": str(e),
-                                "step": "verify_usa_relation",
-                            })
-                            error_count += 1
-                            is_usa = False
-
-                        if is_usa:
-                            # case_info["usa_related"] = True
+                    if test_mode:
+                        if matched_deal_id:
+                            case_info["deal_id"] = matched_deal_id
                             logger.info(
-                                "  Case appears USA-related (unmatched); sending email"
+                                f"  Deal match found (deal_id={matched_deal_id})"
                             )
-                            send_unmatched_usa_related_email(case_info)
 
-                    inserted_id = insert_case(collection, case_info)
-                    if inserted_id:
+                        action = upsert_case_by_case_number(collection, case_info)
                         logger.info(
-                            f"  Inserted new case into accc_cases (id={inserted_id})"
+                            f"  [TEST MODE] Upserted case into accc_cases ({action})"
                         )
+
                         backup_case = dict(case_info)
                         backup_case.pop("_id", None)
                         new_cases.append(backup_case)
                     else:
-                        logger.warning("  Insert failed")
+                        if matched_deal_id:
+                            case_info["deal_id"] = matched_deal_id
+                            logger.info(
+                                f"  Deal match found (deal_id={matched_deal_id}); sending email"
+                            )
+                            if not send_new_case_email(case_info, matched_deal_id):
+                                collect_error(
+                                    error_items,
+                                    "Failed to send new-case email",
+                                    step="send_email",
+                                    case_number=case_number,
+                                    context={"url": url},
+                                )
+                        else:
+                            try:
+                                case_details_str = prepare_case_payload_for_llm(
+                                    case_info)
+                                is_usa = bool(
+                                    verify_usa_relation(
+                                        company_details=case_details_str,
+                                        case_type="ACCC",
+                                    )
+                                )
+                            except Exception as e:
+                                logger.exception(
+                                    f"Error verifying USA relation: {e}")
+                                collect_error(
+                                    error_items,
+                                    str(e),
+                                    step="verify_usa_relation",
+                                    case_number=case_number,
+                                )
+                                is_usa = False
+
+                            if is_usa:
+                                logger.info(
+                                    "  Case appears USA-related (unmatched); sending email"
+                                )
+                                if not send_unmatched_usa_related_email(case_info):
+                                    collect_error(
+                                        error_items,
+                                        "Failed to send USA-related email",
+                                        step="send_email",
+                                        case_number=case_number,
+                                        context={"url": url},
+                                    )
+
+                        inserted_id = insert_case(collection, case_info)
+                        if inserted_id:
+                            logger.info(
+                                f"  Inserted new case into accc_cases (id={inserted_id})"
+                            )
+                            backup_case = dict(case_info)
+                            backup_case.pop("_id", None)
+                            new_cases.append(backup_case)
+                        else:
+                            collect_error(
+                                error_items,
+                                "Insert failed",
+                                step="insert_case",
+                                case_number=case_number,
+                            )
+                except Exception as e:
+                    logger.exception(f"Error processing list item #{idx}: {e}")
+                    collect_error(
+                        error_items,
+                        str(e),
+                        step="process_list_item",
+                        case_number=item.get("case_number", "N/A"),
+                    )
+                    continue
+
+            browser.close()
+
+        if new_cases:
+            try:
+                serializable_cases: List[Dict[str, Any]] = []
+                for c in new_cases:
+                    d = dict(c)
+                    if "_id" in d:
+                        d["_id"] = str(d["_id"])
+                    serializable_cases.append(d)
+
+                with open(BACKUP_JSON, "w", encoding="utf-8") as f:
+                    json.dump(serializable_cases, f, indent=2, ensure_ascii=False)
+                logger.info(
+                    f"Saved {len(serializable_cases)} new cases to backup JSON: {BACKUP_JSON}"
+                )
             except Exception as e:
-                logger.exception(f"Error processing list item #{idx}: {e}")
-                error_items.append({
-                    "case_number": item.get("case_number", "N/A"),
-                    "error": str(e),
-                    "step": "process_list_item",
-                })
-                error_count += 1
-                continue
+                logger.warning(f"Error writing backup JSON: {e}")
 
-        browser.close()
-
-    # Backup JSON for new cases in this run
-    if new_cases:
-        try:
-            # Ensure there are no non-JSON-serializable values (e.g. ObjectId)
-            serializable_cases: List[Dict[str, Any]] = []
-            for c in new_cases:
-                d = dict(c)
-                if "_id" in d:
-                    d["_id"] = str(d["_id"])
-                serializable_cases.append(d)
-
-            with open(BACKUP_JSON, "w", encoding="utf-8") as f:
-                json.dump(serializable_cases, f, indent=2, ensure_ascii=False)
-            logger.info(
-                f"Saved {len(serializable_cases)} new cases to backup JSON: {BACKUP_JSON}"
-            )
-        except Exception as e:
-            logger.warning(f"Error writing backup JSON: {e}")
-
-    if error_items:
-        send_error_email(
-            script_name=SCRIPT_NAME,
-            error_message=f"{len(error_items)} errors occurred during run",
-            context={
-                "error_count": len(error_items),
-                "errors": error_items[:20],
-            },
-            traceback_str=None,
+    except Exception as e:
+        logger.exception(f"Unhandled error in run_accc_cases_register(): {e}")
+        collect_error(
+            error_items,
+            f"Unhandled error in run_accc_cases_register(): {e}",
+            step="run_main",
         )
 
-    logger.info("ACCC Cases Register scraper finished")
-    elapsed = round(time.time() - run_start, 1)
-    logger.info("=" * 60)
-    logger.info("SUMMARY")
-    logger.info(f"Total cases checked: {len(items)}")
-    logger.info(f"  New cases inserted           : {len(new_cases)}")
-    logger.info(f"  Errors encountered           : {error_count}")
-    logger.info(f"  Total time                   : {elapsed}s")
-    logger.info("=" * 60)
+    finally:
+        send_error_summary(error_items, SCRIPT_NAME)
+
+        logger.info("ACCC Cases Register scraper finished")
+        elapsed = round(time.time() - run_start, 1)
+        logger.info("=" * 60)
+        logger.info("SUMMARY")
+        logger.info(f"Total cases checked: {len(items)}")
+        logger.info(f"  New cases inserted           : {len(new_cases)}")
+        logger.info(f"  Errors encountered           : {len(error_items)}")
+        logger.info(f"  Total time                   : {elapsed}s")
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":

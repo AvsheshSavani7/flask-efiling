@@ -1,18 +1,17 @@
 from mongodb_connection import (
     get_database,
-    get_deals_collection,
     init_mongodb_connection,
     is_connected,
 )
 from llm_verification_service import verify_usa_relation
-from error_email_service import send_error_email
+from accc_cases_register import match_case_to_deal
 from log_utils import cleanup_old_logs, refresh_log_file
+from scraper_error_utils import collect_error, send_error_summary
 import os
 import json
 import sys
 import logging
 from logging.handlers import RotatingFileHandler
-import traceback
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -22,7 +21,6 @@ import requests
 import urllib3
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from openai import OpenAI
 from playwright.sync_api import sync_playwright
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -85,18 +83,6 @@ logger.propagate = False
 
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 
-
-def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
-    logger.error(msg)
-    send_error_email(
-        script_name=SCRIPT_NAME,
-        error_message=msg,
-        context=context,
-        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
-    )
-
-
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 ENV_PATH = ".env"
 
@@ -302,99 +288,6 @@ URL: {url}
 {parts_str}
 Description: {desc_snippet}
 """.strip()
-
-
-def match_case_to_deal(title: str) -> Optional[str]:
-    """Use LLM to match the ACCC waiver case to an existing deal. Returns deal_id or None."""
-    try:
-        deals_collection = get_deals_collection()
-        if deals_collection is None:
-            return None
-
-        status_filter = {
-            "$or": [
-                {"deal_status": {"$in": ["Open", "Unknown"]}},
-                {"deal_status": None},
-                {"deal_status": {"$exists": False}},
-            ]
-        }
-        deals = list(deals_collection.find(status_filter))
-        if not deals:
-            return None
-
-        lines = []
-        for d in deals:
-            deal_id = str(d.get("_id"))
-            target = d.get("target") or d.get("target_name", "N/A")
-            acquirer = d.get("acquirer") or d.get("acquire_name", "N/A")
-            line = f"Deal ID: {deal_id} | Target: {target} | Acquirer: {acquirer}"
-            target_aliases = d.get("target_aliases") or []
-            parent_aliases = d.get("parent_aliases") or []
-            if target_aliases:
-                line += f" | Target aliases: {', '.join(str(a) for a in target_aliases)}"
-            if parent_aliases:
-                line += f" | Parent aliases: {', '.join(str(a) for a in parent_aliases)}"
-            lines.append(line)
-
-        deals_text = "\n".join(lines)
-
-        prompt = f"""You are an expert M&A deal matcher. Your task is to determine if ANY company mentioned in the ACCC case title appears in our deals database.
-
-DEALS DATABASE:
-{deals_text}
-
-ACCC CASE TITLE TO MATCH:
-{title}
-
-MATCHING INSTRUCTIONS:
-1. Extract only the company names that are explicitly and directly mentioned in the ACCC title (both acquirer and target / vendors).
-2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, service providers, or any company not actually written in the ACCC title.
-3. For each deal in the deals database, check whether:
-   - the Acquirer (or its known alias), AND
-   - the Target (or its known alias)
-   are both directly mentioned in the ACCC title.
-4. A deal is a valid match only if BOTH sides of the same deal are confidently matched from the ACCC title:
-   - one match for the Acquirer side
-   - one match for the Target side
-5. Do not return a match if only one side is present, even if that single company is an exact match.
-6. Allow only normal name variations when they clearly refer to the same company, such as:
-   - punctuation differences
-   - "Inc." vs "Incorporated"
-   - "Corp." vs "Corporation"
-   - "Ltd" vs "Limited"
-   - obvious spacing/casing differences
-7. Do not match based only on sector, business type, article topic, indirect association, or partial deal overlap.
-8. If the ACCC title does not directly name both companies for the same deal, return None.
-
-RESPONSE FORMAT:
--If BOTH the Acquirer and Target for one deal are directly matched, respond EXACTLY: Match: DEAL_ID
--If no deal satisfies this rule, respond exactly: None
-"""
-
-        res = client.chat.completions.create(
-            model="gpt-5.2",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an expert M&A deal identifier and matcher.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-        )
-
-        content = (res.choices[0].message.content or "").strip()
-        if not content.lower().startswith("match"):
-            return None
-
-        try:
-            _prefix, deal_id_raw = content.split(":", 1)
-            deal_id = deal_id_raw.strip()
-            return deal_id or None
-        except Exception:
-            return None
-    except Exception as e:
-        logger.warning(f"LLM match error: {e}")
-        return None
 
 
 def _post_email_payload(
@@ -872,16 +765,27 @@ def _process_waiver_case(
             matched_deal_id = match_case_to_deal(
                 case_info.get("title", "") or title)
         except Exception as e:
-            logger.warning(f"  Error during deal matching: {e}")
-            error_items.append({"case_number": case_number,
-                               "error": str(e), "step": "match_case_to_deal"})
+            logger.exception(f"  Error during deal matching: {e}")
+            collect_error(
+                error_items,
+                str(e),
+                step="match_case_to_deal",
+                case_number=case_number,
+            )
             matched_deal_id = None
 
         if matched_deal_id:
             case_info["deal_id"] = matched_deal_id
             logger.info(
                 f"  Deal match found (deal_id={matched_deal_id}); sending email")
-            send_new_case_email(case_info, matched_deal_id)
+            if not send_new_case_email(case_info, matched_deal_id):
+                collect_error(
+                    error_items,
+                    "Failed to send new-case email",
+                    step="send_email",
+                    case_number=case_number,
+                    context={"url": case_info.get("url")},
+                )
         else:
             try:
                 case_details_str = prepare_case_payload_for_llm(case_info)
@@ -891,14 +795,25 @@ def _process_waiver_case(
                 )
             except Exception as e:
                 logger.exception(f"Error verifying USA relation: {e}")
-                error_items.append(
-                    {"case_number": case_number, "error": str(e), "step": "verify_usa_relation"})
+                collect_error(
+                    error_items,
+                    str(e),
+                    step="verify_usa_relation",
+                    case_number=case_number,
+                )
                 is_usa = False
 
             if is_usa:
                 logger.info(
                     "  Case appears USA-related (unmatched); sending email")
-                send_unmatched_usa_related_email(case_info)
+                if not send_unmatched_usa_related_email(case_info):
+                    collect_error(
+                        error_items,
+                        "Failed to send USA-related email",
+                        step="send_email",
+                        case_number=case_number,
+                        context={"url": case_info.get("url")},
+                    )
 
     inserted_id = insert_case(collection, case_info)
     if inserted_id:
@@ -909,7 +824,12 @@ def _process_waiver_case(
         backup.pop("_id", None)
         return backup
 
-    logger.warning("  Insert failed")
+    collect_error(
+        error_items,
+        "Insert failed",
+        step="insert_case",
+        case_number=case_number,
+    )
     return None
 
 
@@ -931,9 +851,9 @@ def run_accc_waiver_register(test_mode: bool = False):
     global LOG_FILE
     LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = time.time()
-    error_count = 0
     error_items: List[Dict[str, Any]] = []
     new_cases: List[Dict[str, Any]] = []
+    all_items: List[Dict[str, Any]] = []
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"
 
     logger.info("=" * 60)
@@ -941,210 +861,226 @@ def run_accc_waiver_register(test_mode: bool = False):
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
 
-    logger.info("[STEP 1.1] Initializing MongoDB connection...")
-    success, message = init_mongodb_connection(ENV_PATH)
-    if not success:
-        _log_critical_error_and_email(
-            f"MongoDB connection failed: {message}", {
-                "step": "mongodb_connect"}
-        )
-        return
-    logger.info(f"[STEP 1.2] {message}")
+    try:
+        logger.info("[STEP 1.1] Initializing MongoDB connection...")
+        success, message = init_mongodb_connection(ENV_PATH)
+        if not success:
+            collect_error(
+                error_items,
+                f"MongoDB connection failed: {message}",
+                step="mongodb_connect",
+            )
+            return
+        logger.info(f"[STEP 1.2] {message}")
 
-    if not is_connected():
-        _log_critical_error_and_email(
-            "MongoDB not connected. Exiting.", {"step": "mongodb_connect"}
-        )
-        return
+        if not is_connected():
+            collect_error(
+                error_items,
+                "MongoDB not connected. Exiting.",
+                step="mongodb_connect",
+            )
+            return
 
-    collection = get_accc_cases_collection()
-    if collection is None:
-        _log_critical_error_and_email(
-            "Could not access 'accc_cases' collection. Exiting.", {
-                "step": "get_collection"}
-        )
-        return
+        collection = get_accc_cases_collection()
+        if collection is None:
+            collect_error(
+                error_items,
+                "Could not access 'accc_cases' collection. Exiting.",
+                step="get_collection",
+            )
+            return
 
-    # ------------------------------------------------------------------
-    # Collect all list items (all pages in test mode, page 0 in live mode)
-    # ------------------------------------------------------------------
-    all_items: List[Dict[str, Any]] = []
-
-    if test_mode:
-        logger.info(
-            "[STEP 2] TEST MODE — paginating all pages of the waiver register")
-        page_num = 0
-        while True:
-            url = page_url(page_num)
-            logger.info(f"  Fetching page {page_num}: {url}")
-            html = fetch_list_page(url, attempt_label=f"[page={page_num}]")
-            if not html:
-                logger.error(
-                    f"  Failed to fetch page {page_num}; stopping pagination")
-                break
-            items = parse_list_items(html)
-            if not items:
-                logger.info(
-                    f"  Page {page_num} returned 0 items — end of list")
-                break
-            all_items.extend(items)
+        if test_mode:
             logger.info(
-                f"  Page {page_num}: {len(items)} items (total so far: {len(all_items)})")
-            page_num += 1
-            time.sleep(2)
-    else:
-        logger.info("[STEP 2] LIVE MODE — fetching first page only")
-        html = fetch_list_page(page_url(0), attempt_label="[page=0]")
-        if not html:
-            logger.error("Failed to fetch first page; exiting")
-            return
-        all_items = parse_list_items(html)
-        if not all_items:
-            logger.info("No items found on first page; nothing to process")
-            return
-
-    logger.info(f"Total list items to process: {len(all_items)}")
-
-    # ------------------------------------------------------------------
-    # Process each item via Playwright detail page
-    # ------------------------------------------------------------------
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                f"--proxy-server=http://{PROXY_HOST}:{PROXY_PORT}",
-            ],
-        )
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-            proxy={
-                "server": f"http://{PROXY_HOST}:{PROXY_PORT}",
-                "username": PROXY_USERNAME,
-                "password": PROXY_PASSWORD,
-            },
-        )
-        pw_page = context.new_page()
-
-        for idx, item in enumerate(all_items, 1):
-            try:
-                case_number = item.get("case_number")
-                url = item.get("url")
-                title = item.get("title", "")
-
-                logger.info(
-                    f"[{idx}/{len(all_items)}] Case {case_number}: {title}")
-
-                if not case_number or not url:
-                    logger.warning("  Missing case_number or url; skipping")
-                    continue
-
-                # Skip if this case_number + acquisition_status combo already exists
-                list_status = item.get("acquisition_status", "")
-                if waiver_case_exists(collection, case_number, list_status):
+                "[STEP 2] TEST MODE — paginating all pages of the waiver register")
+            page_num = 0
+            while True:
+                list_url = page_url(page_num)
+                logger.info(f"  Fetching page {page_num}: {list_url}")
+                html = fetch_list_page(list_url, attempt_label=f"[page={page_num}]")
+                if not html:
+                    collect_error(
+                        error_items,
+                        f"Failed to fetch waiver list page {page_num}",
+                        step="fetch_list_page",
+                        context={"url": list_url, "page": page_num},
+                    )
+                    break
+                items = parse_list_items(html)
+                if not items:
                     logger.info(
-                        f"  Case already in DB (status='{list_status}'); skipping"
+                        f"  Page {page_num} returned 0 items — end of list")
+                    break
+                all_items.extend(items)
+                logger.info(
+                    f"  Page {page_num}: {len(items)} items (total so far: {len(all_items)})")
+                page_num += 1
+                time.sleep(2)
+        else:
+            logger.info("[STEP 2] LIVE MODE — fetching first page only")
+            list_url = page_url(0)
+            html = fetch_list_page(list_url, attempt_label="[page=0]")
+            if not html:
+                collect_error(
+                    error_items,
+                    "Failed to fetch first waiver list page",
+                    step="fetch_list_page",
+                    context={"url": list_url},
+                )
+                return
+            all_items = parse_list_items(html)
+            if not all_items:
+                logger.info("No items found on first page; nothing to process")
+                return
+
+        logger.info(f"Total list items to process: {len(all_items)}")
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    f"--proxy-server=http://{PROXY_HOST}:{PROXY_PORT}",
+                ],
+            )
+            context = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+                proxy={
+                    "server": f"http://{PROXY_HOST}:{PROXY_PORT}",
+                    "username": PROXY_USERNAME,
+                    "password": PROXY_PASSWORD,
+                },
+            )
+            pw_page = context.new_page()
+
+            for idx, item in enumerate(all_items, 1):
+                try:
+                    case_number = item.get("case_number")
+                    url = item.get("url")
+                    title = item.get("title", "")
+
+                    logger.info(
+                        f"[{idx}/{len(all_items)}] Case {case_number}: {title}")
+
+                    if not case_number or not url:
+                        logger.warning("  Missing case_number or url; skipping")
+                        continue
+
+                    list_status = item.get("acquisition_status", "")
+                    if waiver_case_exists(collection, case_number, list_status):
+                        logger.info(
+                            f"  Case already in DB (status='{list_status}'); skipping"
+                        )
+                        continue
+
+                    case_info = extract_detail_page_case(pw_page, url)
+                    logger.info(f"  case_info: {case_info}")
+                    if not case_info:
+                        collect_error(
+                            error_items,
+                            "Could not extract case info from detail page",
+                            step="scrape_detail_page",
+                            case_number=case_number,
+                            context={"url": url},
+                        )
+                        continue
+
+                    for key in ["acquisition_status", "type", "effective_notification_date", "title"]:
+                        if key not in case_info and key in item:
+                            case_info[key] = item[key]
+
+                    now_iso = utc_now_iso()
+                    case_info.setdefault("created_at", now_iso)
+                    case_info["updated_at"] = now_iso
+
+                    detail_status = (case_info.get(
+                        "acquisition_status") or "").strip()
+
+                    if detail_status.lower() == "under assessment":
+                        if test_mode:
+                            logger.info(
+                                "  [TEST MODE] Waiver is Under Assessment; skipping"
+                            )
+                        else:
+                            logger.info(
+                                "  Waiver is Under Assessment — sending notification "
+                                "(not inserting into DB)"
+                            )
+                            if not send_under_assessment_waiver_email(case_info):
+                                collect_error(
+                                    error_items,
+                                    "Failed to send under-assessment waiver email",
+                                    step="send_email",
+                                    case_number=case_number,
+                                    context={"url": url},
+                                )
+                        continue
+
+                    backup = _process_waiver_case(
+                        collection=collection,
+                        case_info=case_info,
+                        title=title,
+                        error_items=error_items,
+                        test_mode=test_mode,
+                    )
+                    if backup:
+                        new_cases.append(backup)
+
+                except Exception as e:
+                    logger.exception(f"Error processing list item #{idx}: {e}")
+                    collect_error(
+                        error_items,
+                        str(e),
+                        step="process_list_item",
+                        case_number=item.get("case_number", "N/A"),
                     )
                     continue
 
-                # Fetch and parse detail page
-                case_info = extract_detail_page_case(pw_page, url)
-                logger.info(f"  case_info: {case_info}")
-                if not case_info:
-                    logger.warning("  Could not extract case info; skipping")
-                    continue
+            browser.close()
 
-                # Preserve list-level fields if the detail page missed them
-                for key in ["acquisition_status", "type", "effective_notification_date", "title"]:
-                    if key not in case_info and key in item:
-                        case_info[key] = item[key]
+        if new_cases:
+            try:
+                serializable: List[Dict[str, Any]] = []
+                for c in new_cases:
+                    d = dict(c)
+                    if "_id" in d:
+                        d["_id"] = str(d["_id"])
+                    serializable.append(d)
 
-                now_iso = utc_now_iso()
-                case_info.setdefault("created_at", now_iso)
-                case_info["updated_at"] = now_iso
-
-                detail_status = (case_info.get(
-                    "acquisition_status") or "").strip()
-
-                if detail_status.lower() == "under assessment":
-                    if test_mode:
-                        logger.info(
-                            "  [TEST MODE] Waiver is Under Assessment; skipping"
-                        )
-                    else:
-                        logger.info(
-                            "  Waiver is Under Assessment — sending notification "
-                            "(not inserting into DB)"
-                        )
-                        send_under_assessment_waiver_email(case_info)
-                    continue
-
-                backup = _process_waiver_case(
-                    collection=collection,
-                    case_info=case_info,
-                    title=title,
-                    error_items=error_items,
-                    test_mode=test_mode,
+                with open(BACKUP_JSON, "w", encoding="utf-8") as f:
+                    json.dump(serializable, f, indent=2, ensure_ascii=False)
+                logger.info(
+                    f"Saved {len(serializable)} new cases to backup JSON: {BACKUP_JSON}"
                 )
-                if backup:
-                    new_cases.append(backup)
-
             except Exception as e:
-                logger.exception(f"Error processing list item #{idx}: {e}")
-                error_items.append({
-                    "case_number": item.get("case_number", "N/A"),
-                    "error": str(e),
-                    "step": "process_list_item",
-                })
-                error_count += 1
-                continue
+                logger.warning(f"Error writing backup JSON: {e}")
 
-        browser.close()
-
-    # ------------------------------------------------------------------
-    # Backup JSON for cases processed in this run
-    # ------------------------------------------------------------------
-    if new_cases:
-        try:
-            serializable: List[Dict[str, Any]] = []
-            for c in new_cases:
-                d = dict(c)
-                if "_id" in d:
-                    d["_id"] = str(d["_id"])
-                serializable.append(d)
-
-            with open(BACKUP_JSON, "w", encoding="utf-8") as f:
-                json.dump(serializable, f, indent=2, ensure_ascii=False)
-            logger.info(
-                f"Saved {len(serializable)} new cases to backup JSON: {BACKUP_JSON}"
-            )
-        except Exception as e:
-            logger.warning(f"Error writing backup JSON: {e}")
-
-    if error_items:
-        error_count = len(error_items)
-        send_error_email(
-            script_name=SCRIPT_NAME,
-            error_message=f"{error_count} errors occurred during run",
-            context={"error_count": error_count, "errors": error_items[:20]},
-            traceback_str=None,
+    except Exception as e:
+        logger.exception(f"Unhandled error in run_accc_waiver_register(): {e}")
+        collect_error(
+            error_items,
+            f"Unhandled error in run_accc_waiver_register(): {e}",
+            step="run_main",
         )
 
-    elapsed = round(time.time() - run_start, 1)
-    logger.info("=" * 60)
-    logger.info("SUMMARY")
-    logger.info(f"Total items from list     : {len(all_items)}")
-    logger.info(f"New/updated cases          : {len(new_cases)}")
-    logger.info(f"Errors encountered         : {error_count}")
-    logger.info(f"Total time                 : {elapsed}s")
-    logger.info("=" * 60)
-    logger.info("ACCC Waiver Register scraper finished")
+    finally:
+        send_error_summary(error_items, SCRIPT_NAME)
+
+        elapsed = round(time.time() - run_start, 1)
+        logger.info("=" * 60)
+        logger.info("SUMMARY")
+        logger.info(f"Total items from list     : {len(all_items)}")
+        logger.info(f"New/updated cases          : {len(new_cases)}")
+        logger.info(f"Errors encountered         : {len(error_items)}")
+        logger.info(f"Total time                 : {elapsed}s")
+        logger.info("=" * 60)
+        logger.info("ACCC Waiver Register scraper finished")
 
 
 if __name__ == "__main__":
