@@ -24,9 +24,8 @@ from mongodb_connection import (
     is_connected,
 )
 from llm_verification_service import verify_usa_relation
-from error_email_service import send_error_email
+from scraper_error_utils import collect_error, send_error_summary
 import logging
-import traceback
 from datetime import datetime, timedelta, timezone
 from html import escape as escape_html
 from logging.handlers import RotatingFileHandler
@@ -99,17 +98,6 @@ if not logger.handlers:
 logger.propagate = False
 
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
-
-
-def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
-    """Immediate error email — use ONLY for critical startup / fatal failures."""
-    logger.error(msg)
-    send_error_email(
-        script_name=SCRIPT_NAME,
-        error_message=msg,
-        context=context,
-        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
-    )
 
 
 # OpenAI client for LLM matching
@@ -369,7 +357,7 @@ RESPONSE FORMAT:
             return None
     except Exception as e:
         logger.warning(f"⚠️ LLM match error: {e}")
-        return None
+        raise
 
 
 def generate_matched_case_email_html(
@@ -548,196 +536,256 @@ def run_canada_cases_register(headless: bool = True):
     LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = datetime.now()
     error_items: List[Dict[str, Any]] = []
+    new_cases: List[Dict[str, Any]] = []
     logger.info("=" * 60)
     logger.info(f"[STEP 1] Starting Canada Cases Register")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
 
-    logger.info(f"[STEP 1.1] Initializing MongoDB connection...")
-    success, message = init_mongodb_connection(ENV_PATH)
-    if not success:
-        _log_critical_error_and_email(
-            f"MongoDB connection failed: {message}",
-            {"step": "mongodb_connect"},
-        )
-        return
-    logger.info(f"[STEP 1.2] MongoDB: {message}")
+    try:
+        logger.info(f"[STEP 1.1] Initializing MongoDB connection...")
+        success, message = init_mongodb_connection(ENV_PATH)
+        if not success:
+            collect_error(
+                error_items,
+                f"MongoDB connection failed: {message}",
+                step="mongodb_connect",
+            )
+            return
+        logger.info(f"[STEP 1.2] MongoDB: {message}")
 
-    if not is_connected():
-        _log_critical_error_and_email("MongoDB not connected. Exiting.", {
-                                      "step": "mongodb_connect"})
-        return
+        if not is_connected():
+            collect_error(
+                error_items,
+                "MongoDB not connected. Exiting.",
+                step="mongodb_connect",
+            )
+            return
 
-    collection = get_canada_cases_collection()
-    if collection is None:
-        _log_critical_error_and_email(
-            "Could not access 'canada_cases' collection. Exiting.", {"step": "get_collection"})
-        return
-
-    logger.info(
-        f"[STEP 1.3] CUTOFF_DATE: {CUTOFF_DATE.strftime('%Y-%m-%d')} (3 days ago)")
-
-    html = fetch_report_html(REPORT_URL, headless=headless)
-    logger.info(f"[STEP 1.4] HTML: {html}")
-    if not html:
-        logger.error(f"[STEP 1.5] Failed to fetch report HTML. Exiting.")
-        return
-
-    all_rows = parse_merger_table(html)
-    logger.info(f"[STEP 1.6] All rows: {all_rows}")
-    if not all_rows:
-        logger.warning(
-            f"[STEP 1.7] No merger rows parsed from table. Exiting.")
-        return
-
-    new_cases: List[Dict[str, Any]] = []
-    cutoff_date_only = CUTOFF_DATE.date()
-
-    logger.info(
-        f"[STEP 1.8] Processing rows (filtering by opened_date >= {cutoff_date_only} AND concluded_date == 'Ongoing')...")
-
-    for idx, row in enumerate(all_rows, 1):
-        concluded_date = (row.get("concluded_date") or "").strip()
-        if concluded_date.lower() != "ongoing":
-            continue
-
-        opened_dt = row.get("opened_date_parsed")
-        if opened_dt is None:
-            continue
-
-        try:
-            if isinstance(opened_dt, datetime):
-                d = opened_dt.date()
-            else:
-                d = opened_dt
-
-            if d < cutoff_date_only:
-                continue
-        except Exception:
-            continue
-
-        parties = row["parties"]
-        opened_date = row["opened_date"]
+        collection = get_canada_cases_collection()
+        if collection is None:
+            collect_error(
+                error_items,
+                "Could not access 'canada_cases' collection. Exiting.",
+                step="get_collection",
+            )
+            return
 
         logger.info(
-            f"[STEP 1.9] [{idx}] Parties: {parties[:80]}... | Opened: {opened_date}")
+            f"[STEP 1.3] CUTOFF_DATE: {CUTOFF_DATE.strftime('%Y-%m-%d')} (3 days ago)")
 
-        if case_exists(collection, parties, opened_date):
-            logger.info(
-                f"[STEP 1.10] Already exists in canada_cases; skipping")
-            continue
+        html = fetch_report_html(REPORT_URL, headless=headless)
+        logger.info(f"[STEP 1.4] HTML: {html}")
+        if not html:
+            collect_error(
+                error_items,
+                "Failed to fetch report HTML",
+                step="fetch_report_html",
+                context={"url": REPORT_URL},
+            )
+            return
 
-        logger.info(f"[STEP 1.11] LLM Call #1: Checking for deal match...")
-        matched_deal_id = match_case_to_deal(parties)
+        all_rows = parse_merger_table(html)
+        logger.info(f"[STEP 1.6] All rows: {all_rows}")
+        if not all_rows:
+            logger.warning(
+                f"[STEP 1.7] No merger rows parsed from table. Exiting.")
+            return
 
-        now_iso = utc_now_iso()
-        case_info: Dict[str, Any] = {
-            "parties": parties,
-            "opened_date": opened_date,
-            "concluded_date": row["concluded_date"],
-            "industry": row["industry"],
-            "outcome": row["outcome"],
-            "is_open": True,
-            "created_at": now_iso,
-            "updated_at": now_iso,
-        }
+        cutoff_date_only = CUTOFF_DATE.date()
 
-        if matched_deal_id:
-            logger.info(
-                f"[STEP 1.12] Deal match found (deal_id={matched_deal_id})")
-            case_info["deal_id"] = matched_deal_id
+        logger.info(
+            f"[STEP 1.8] Processing rows (filtering by opened_date >= {cutoff_date_only} AND concluded_date == 'Ongoing')...")
 
-            deals_collection = get_deals_collection()
-            deal = None
-            if deals_collection is not None:
-                try:
-                    from bson import ObjectId
-                    deal = deals_collection.find_one(
-                        {"_id": ObjectId(matched_deal_id)})
-                except Exception as e:
-                    logger.exception(f"[STEP 1.13] Could not fetch deal: {e}")
-                    error_items.append({"parties": parties[:80], "error": str(
-                        e), "step": "fetch_deal_for_email"})
-
-            if deal:
-                target = deal.get("target") or deal.get("target_name", "N/A")
-                acquirer = deal.get("acquirer") or deal.get(
-                    "acquire_name", "N/A")
-                subject = f"[FRMD] Canada Competition Bureau (New) – {target} / {acquirer}"
-                html_email = generate_matched_case_email_html(case_info, deal)
-                send_email_via_webhook(
-                    subject, html_email, case_info, deal_id=matched_deal_id)
-        else:
-            logger.info(f"[STEP 1.14] LLM Call #2: Checking if USA-related...")
+        for idx, row in enumerate(all_rows, 1):
             try:
-                details_for_llm = (
-                    f"Parties: {parties}\n"
-                    f"Industry (NAICS): {row['industry']}\n"
-                    f"Outcome: {row['outcome']}\n"
-                    f"Opened Date: {opened_date}\n"
-                    f"Concluded Date: {row['concluded_date']}"
-                )
-                is_usa = verify_usa_relation(
-                    company_details=details_for_llm,
-                    case_type="CANADA",
-                )
+                concluded_date = (row.get("concluded_date") or "").strip()
+                if concluded_date.lower() != "ongoing":
+                    continue
+
+                opened_dt = row.get("opened_date_parsed")
+                if opened_dt is None:
+                    continue
+
+                try:
+                    if isinstance(opened_dt, datetime):
+                        d = opened_dt.date()
+                    else:
+                        d = opened_dt
+
+                    if d < cutoff_date_only:
+                        continue
+                except Exception:
+                    continue
+
+                parties = row["parties"]
+                opened_date = row["opened_date"]
+
+                logger.info(
+                    f"[STEP 1.9] [{idx}] Parties: {parties[:80]}... | Opened: {opened_date}")
+
+                if case_exists(collection, parties, opened_date):
+                    logger.info(
+                        f"[STEP 1.10] Already exists in canada_cases; skipping")
+                    continue
+
+                logger.info(f"[STEP 1.11] LLM Call #1: Checking for deal match...")
+                try:
+                    matched_deal_id = match_case_to_deal(parties)
+                except Exception as e:
+                    logger.exception(f"[STEP 1.11] Deal matching error: {e}")
+                    collect_error(
+                        error_items,
+                        str(e),
+                        step="match_case_to_deal",
+                        context={"parties": parties[:80]},
+                    )
+                    matched_deal_id = None
+
+                now_iso = utc_now_iso()
+                case_info: Dict[str, Any] = {
+                    "parties": parties,
+                    "opened_date": opened_date,
+                    "concluded_date": row["concluded_date"],
+                    "industry": row["industry"],
+                    "outcome": row["outcome"],
+                    "is_open": True,
+                    "created_at": now_iso,
+                    "updated_at": now_iso,
+                }
+
+                if matched_deal_id:
+                    logger.info(
+                        f"[STEP 1.12] Deal match found (deal_id={matched_deal_id})")
+                    case_info["deal_id"] = matched_deal_id
+
+                    deals_collection = get_deals_collection()
+                    deal = None
+                    if deals_collection is not None:
+                        try:
+                            from bson import ObjectId
+                            deal = deals_collection.find_one(
+                                {"_id": ObjectId(matched_deal_id)})
+                        except Exception as e:
+                            logger.exception(f"[STEP 1.13] Could not fetch deal: {e}")
+                            collect_error(
+                                error_items,
+                                str(e),
+                                step="fetch_deal_for_email",
+                                context={"parties": parties[:80], "deal_id": matched_deal_id},
+                            )
+
+                    if deal:
+                        target = deal.get("target") or deal.get("target_name", "N/A")
+                        acquirer = deal.get("acquirer") or deal.get(
+                            "acquire_name", "N/A")
+                        subject = f"[FRMD] Canada Competition Bureau (New) – {target} / {acquirer}"
+                        html_email = generate_matched_case_email_html(case_info, deal)
+                        if not send_email_via_webhook(
+                            subject, html_email, case_info, deal_id=matched_deal_id
+                        ):
+                            collect_error(
+                                error_items,
+                                "Failed to send matched-case email",
+                                step="send_email",
+                                context={"parties": parties[:80], "deal_id": matched_deal_id},
+                            )
+                else:
+                    logger.info(f"[STEP 1.14] LLM Call #2: Checking if USA-related...")
+                    try:
+                        details_for_llm = (
+                            f"Parties: {parties}\n"
+                            f"Industry (NAICS): {row['industry']}\n"
+                            f"Outcome: {row['outcome']}\n"
+                            f"Opened Date: {opened_date}\n"
+                            f"Concluded Date: {row['concluded_date']}"
+                        )
+                        is_usa = verify_usa_relation(
+                            company_details=details_for_llm,
+                            case_type="CANADA",
+                        )
+                    except Exception as e:
+                        logger.exception(f"[STEP 1.15] USA relation check error: {e}")
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="verify_usa_relation",
+                            context={"parties": parties[:80]},
+                        )
+                        is_usa = False
+
+                    if is_usa:
+                        logger.info(f"[STEP 1.16] Case is USA-related")
+                        subject = f"[FRUD] Canada Competition Bureau (USA-Related)"
+                        html_email = generate_usa_related_email_html(case_info)
+                        if not send_email_via_webhook(
+                            subject, html_email, case_info, usa_related=True
+                        ):
+                            collect_error(
+                                error_items,
+                                "Failed to send USA-related email",
+                                step="send_email",
+                                context={"parties": parties[:80]},
+                            )
+                    else:
+                        logger.info(f"[STEP 1.17] Not matched and not USA-related")
+
+                inserted_id = insert_case(collection, case_info)
+                if inserted_id:
+                    logger.info(
+                        f"[STEP 1.18] Inserted case into canada_cases (id={inserted_id})")
+                    backup_case = dict(case_info)
+                    backup_case.pop("_id", None)
+                    new_cases.append(backup_case)
+                else:
+                    collect_error(
+                        error_items,
+                        "Failed to insert case",
+                        step="insert_case",
+                        context={"parties": parties[:80]},
+                    )
             except Exception as e:
-                logger.exception(f"[STEP 1.15] USA relation check error: {e}")
-                error_items.append(
-                    {"parties": parties[:80], "error": str(e), "step": "verify_usa_relation"})
-                is_usa = False
+                logger.exception(f"Error processing row #{idx}: {e}")
+                collect_error(
+                    error_items,
+                    str(e),
+                    step="process_row",
+                    context={"parties": (row.get("parties") or "")[:80]},
+                )
 
-            if is_usa:
-                logger.info(f"[STEP 1.16] Case is USA-related")
-                subject = f"[FRUD] Canada Competition Bureau (USA-Related)"
-                html_email = generate_usa_related_email_html(case_info)
-                send_email_via_webhook(subject, html_email,
-                                       case_info, usa_related=True)
-            else:
-                logger.info(f"[STEP 1.17] Not matched and not USA-related")
+        if new_cases:
+            try:
+                with open(BACKUP_JSON, "w", encoding="utf-8") as f:
+                    json.dump(new_cases, f, indent=2, ensure_ascii=False)
+                logger.info(
+                    f"Saved {len(new_cases)} new cases to backup JSON: {BACKUP_JSON}")
+            except Exception as e:
+                logger.warning(f"[STEP 1.19] Error writing backup JSON: {e}")
+                collect_error(
+                    error_items,
+                    f"Error writing backup JSON: {e}",
+                    step="write_backup_json",
+                )
 
-        inserted_id = insert_case(collection, case_info)
-        if inserted_id:
-            logger.info(
-                f"[STEP 1.18] Inserted case into canada_cases (id={inserted_id})")
-            backup_case = dict(case_info)
-            backup_case.pop("_id", None)
-            new_cases.append(backup_case)
-
-    # Backup JSON
-    if new_cases:
-        try:
-            with open(BACKUP_JSON, "w", encoding="utf-8") as f:
-                json.dump(new_cases, f, indent=2, ensure_ascii=False)
-            logger.info(
-                f"Saved {len(new_cases)} new cases to backup JSON: {BACKUP_JSON}")
-        except Exception as e:
-            logger.warning(f"[STEP 1.19] Error writing backup JSON: {e}")
-
-    if error_items:
-        logger.warning(
-            f"{len(error_items)} per-case errors collected — sending summary email")
-        send_error_email(
-            script_name=SCRIPT_NAME,
-            error_message=f"{len(error_items)} errors occurred during run",
-            context={"error_count": len(
-                error_items), "errors": error_items[:20]},
-            traceback_str=None,
+    except Exception as e:
+        logger.exception(f"Unhandled error in run_canada_cases_register: {e}")
+        collect_error(
+            error_items,
+            f"Unhandled error in run_canada_cases_register: {e}",
+            step="run_main",
         )
 
-    elapsed = round((datetime.now() - run_start).total_seconds(), 1)
-    logger.info("=" * 60)
-    logger.info("SUMMARY")
-    logger.info(f"  New cases inserted           : {len(new_cases)}")
-    logger.info(f"  Errors encountered           : {len(error_items)}")
-    logger.info(f"  Total time                   : {elapsed}s")
-    logger.info("=" * 60)
+    finally:
+        send_error_summary(error_items, SCRIPT_NAME)
+
+        elapsed = round((datetime.now() - run_start).total_seconds(), 1)
+        logger.info("=" * 60)
+        logger.info("SUMMARY")
+        logger.info(f"  New cases inserted           : {len(new_cases)}")
+        logger.info(f"  Errors encountered           : {len(error_items)}")
+        logger.info(f"  Total time                   : {elapsed}s")
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":
-    try:
-        run_canada_cases_register()
-    except Exception as e:
-        _log_critical_error_and_email(
-            f"Unhandled error in __main__: {e}", {"step": "__main__"})
-        raise
+    run_canada_cases_register()

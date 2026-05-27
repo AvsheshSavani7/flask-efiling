@@ -20,8 +20,9 @@ from mongodb_connection import (
 )
 from html import escape as escape_html
 from llm_verification_service import verify_usa_relation
-from error_email_service import send_error_email
+from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
+from typing import Any
 
 # Configuration
 # CUTOFF_DATE = datetime.datetime.now().replace(
@@ -92,17 +93,6 @@ if not logger.handlers:
 logger.propagate = False
 
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
-
-
-def _log_critical_error_and_email(msg: str, context: dict | None = None):
-    """Immediate error email — use ONLY for critical startup / fatal failures."""
-    logger.error(msg)
-    send_error_email(
-        script_name=SCRIPT_NAME,
-        error_message=msg,
-        context=context or {},
-        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
-    )
 
 
 def _goto_with_retry(page, url, max_retries=2):
@@ -529,7 +519,7 @@ RESPONSE FORMAT:
         return result
     except Exception as e:
         logger.warning(f"LLM Error: {e}")
-        return "None"
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -807,221 +797,268 @@ def main(headless=True):
     LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     global all_extracted_records, matched_data, deals
     run_start = datetime.datetime.now()
+    error_items: list[dict[str, Any]] = []
     all_extracted_records = []
     matched_data = []
+    new_records: list[dict] = []
     logger.info("=" * 60)
     logger.info("[STEP 1] Starting SAMR Public Notice Register")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
 
-    # Initialize MongoDB connection
-    success, msg = init_mongodb_connection(ENV_PATH)
-    if success:
-        logger.info(msg)
-    else:
-        _log_critical_error_and_email(f"MongoDB initialization failed: {msg}", {
-                                      "step": "init_mongodb_connection"})
-        return {"success": False, "error": msg}
-
-    logger.info("[STEP 1.1] Loading deals from MongoDB...")
-    load_deals()
-
-    # ------------------------------------------------------------------
-    # PHASE 1: Scrape listing pages and extract records
-    # ------------------------------------------------------------------
-    logger.info("[STEP 1.2] PHASE 1: EXTRACT ALL RECORDS")
-    logger.info("[STEP 1.3] Mode: Scraping SAMR website")
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        context = browser.new_context()
-        page = context.new_page()
-        logger.info(f"Page: {page}")
-
-        try:
-            logger.info(f"[STEP 2] Calling BASE_URL: {BASE__SCRAPER_URL}")
-            _goto_with_retry(page, BASE__SCRAPER_URL)
-            logger.info("   Loaded")
-
-            page_num = 1
-            while True:
-                page_records, should_stop = extract_page_records(
-                    page, page_num)
-                logger.info(
-                    f"Page records: {len(page_records)}, should_stop: {should_stop}")
-                logger.info(f"Page records: {page_records}")
-                all_extracted_records.extend(page_records)
-
-                if should_stop:
-                    logger.info("Stopped: Cutoff date reached")
-                    break
-
-                try:
-                    next_btn = page.get_by_text("下一页")
-                    next_class = next_btn.get_attribute("class")
-
-                    if next_class and "disabled" in next_class:
-                        logger.info("Stopped: No more pages")
-                        break
-
-                    logger.info(f"Navigating to page {page_num + 1}...")
-                    next_btn.click()
-                    page.wait_for_timeout(2000)
-                    page_num += 1
-
-                except Exception as e:
-                    logger.exception(f"Pagination error: {e}")
-                    break
-
-        except Exception as e:
-            logger.exception(f"Scraping error: {e}")
-            _log_critical_error_and_email(
-                f"Scraping error: {e}",
-                {"step": "scrape_listing", "base_url": BASE__SCRAPER_URL},
-            )
-        finally:
-            browser.close()
-
-    logger.info(
-        f"Total records extracted from listing pages: {len(all_extracted_records)}")
-
-    # ------------------------------------------------------------------
-    # PHASE 2: Filter out already-processed records via samr_cases
-    # ------------------------------------------------------------------
-    logger.info("PHASE 2: FILTER ALREADY-PROCESSED RECORDS")
-    logger.info("Checking which records are already in samr_cases...")
-    new_records = []
-    skipped_count = 0
-    for record in all_extracted_records:
-        detail_url = record.get("url")
-        if detail_url and record_exists_in_samr_cases(detail_url):
-            skipped_count += 1
+    try:
+        success, msg = init_mongodb_connection(ENV_PATH)
+        if success:
+            logger.info(msg)
         else:
-            new_records.append(record)
+            collect_error(
+                error_items,
+                f"MongoDB initialization failed: {msg}",
+                step="init_mongodb_connection",
+            )
+            return {"success": False, "error": msg}
 
-    if skipped_count > 0:
-        logger.info(f"Skipped {skipped_count} already-processed records")
-    logger.info(f"{len(new_records)} new records to process")
+        logger.info("[STEP 1.1] Loading deals from MongoDB...")
+        load_deals()
 
-    # ------------------------------------------------------------------
-    # PHASE 3: Match each new record → save to deals & samr_cases
-    # ------------------------------------------------------------------
-    logger.info("PHASE 3: MATCH RECORDS WITH DEALS")
+        logger.info("[STEP 1.2] PHASE 1: EXTRACT ALL RECORDS")
+        logger.info("[STEP 1.3] Mode: Scraping SAMR website")
 
-    for idx, record in enumerate(new_records, 1):
-        title_en = record.get("title_en", "")
-        title_cn = record.get("title_cn", "")
-        date_str = record.get("date", "")
-        url = record.get("url", "")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=headless)
+            context = browser.new_context()
+            page = context.new_page()
+            logger.info(f"Page: {page}")
 
-        logger.info(
-            f"[{idx}/{len(new_records)}] {date_str} - {title_en[:70]}...")
-
-        # Prepare the samr_cases document (will be saved at end regardless)
-        samr_case_doc = {
-            "url": url,
-            "title_cn": title_cn,
-            "title_en": title_en,
-            "date": date_str,
-            "deal_id": None,
-        }
-
-        if title_en == "[Translation failed]":
-            logger.info("  Skipped (translation failed)")
-            save_to_samr_cases(samr_case_doc)
-            continue
-
-        match_result = match_deal_with_llm(title_en, title_cn)
-        logger.info(f"Match result: {match_result}")
-        if match_result and match_result.lower() != "none" and match_result.lower().startswith("match"):
             try:
-                deal_id = match_result.replace(
-                    "Match:", "").replace("match:", "").strip()
+                logger.info(f"[STEP 2] Calling BASE_URL: {BASE__SCRAPER_URL}")
+                _goto_with_retry(page, BASE__SCRAPER_URL)
+                logger.info("   Loaded")
 
-                deal_match = None
-                for deal in deals:
-                    if deal.get("deal_id") == deal_id:
-                        deal_match = deal
-                        logger.info(f"  Found deal by ID: {deal_id}")
+                page_num = 1
+                while True:
+                    page_records, should_stop = extract_page_records(
+                        page, page_num)
+                    logger.info(
+                        f"Page records: {len(page_records)}, should_stop: {should_stop}")
+                    logger.info(f"Page records: {page_records}")
+                    all_extracted_records.extend(page_records)
+
+                    if should_stop:
+                        logger.info("Stopped: Cutoff date reached")
                         break
-
-                if deal_match:
-                    matched_result = {
-                        "deal_id": deal_match.get("deal_id", ""),
-                        "title_cn": title_cn,
-                        "title_en": title_en,
-                        "url": url,
-                        "date": date_str,
-                        "matched_deal": deal_match,
-                    }
-                    matched_data.append(matched_result)
-                    logger.info("  Match added to results!")
-
-                    samr_case_doc["deal_id"] = deal_match.get(
-                        "deal_id", "")
 
                     try:
-                        samr_data = {
-                            k: v for k, v in matched_result.items() if k != "matched_deal"}
-                        send_samr_email_via_webhook(samr_data, deal_match)
+                        next_btn = page.get_by_text("下一页")
+                        next_class = next_btn.get_attribute("class")
+
+                        if next_class and "disabled" in next_class:
+                            logger.info("Stopped: No more pages")
+                            break
+
+                        logger.info(f"Navigating to page {page_num + 1}...")
+                        next_btn.click()
+                        page.wait_for_timeout(2000)
+                        page_num += 1
+
                     except Exception as e:
-                        logger.exception(
-                            f"  Error sending email notification: {e}")
-                else:
-                    logger.warning(
-                        f"  LLM found match but deal not found in loaded deals: {deal_id}")
+                        logger.exception(f"Pagination error: {e}")
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="pagination",
+                            context={"page": page_num},
+                        )
+                        break
 
             except Exception as e:
-                logger.exception(f"  Error processing match: {e}")
-        else:
-            logger.info("  No match")
-            try:
-                company_details = title_en if title_en and title_en != "[Translation failed]" else title_cn
-                is_usa_related = verify_usa_relation(
-                    company_details=company_details,
-                    case_type="CHINA",
+                logger.exception(f"Scraping error: {e}")
+                collect_error(
+                    error_items,
+                    f"Scraping error: {e}",
+                    step="scrape_listing",
+                    context={"url": BASE__SCRAPER_URL},
                 )
-                if is_usa_related:
-                    logger.info(
-                        "  USA-related case detected - sending email notification")
-                    send_unmatched_samr_email_via_webhook(record)
+            finally:
+                browser.close()
+
+        logger.info(
+            f"Total records extracted from listing pages: {len(all_extracted_records)}")
+
+        logger.info("PHASE 2: FILTER ALREADY-PROCESSED RECORDS")
+        logger.info("Checking which records are already in samr_cases...")
+        skipped_count = 0
+        for record in all_extracted_records:
+            detail_url = record.get("url")
+            if detail_url and record_exists_in_samr_cases(detail_url):
+                skipped_count += 1
+            else:
+                new_records.append(record)
+
+        if skipped_count > 0:
+            logger.info(f"Skipped {skipped_count} already-processed records")
+        logger.info(f"{len(new_records)} new records to process")
+
+        logger.info("PHASE 3: MATCH RECORDS WITH DEALS")
+
+        for idx, record in enumerate(new_records, 1):
+            try:
+                title_en = record.get("title_en", "")
+                title_cn = record.get("title_cn", "")
+                date_str = record.get("date", "")
+                url = record.get("url", "")
+
+                logger.info(
+                    f"[{idx}/{len(new_records)}] {date_str} - {title_en[:70]}...")
+
+                samr_case_doc = {
+                    "url": url,
+                    "title_cn": title_cn,
+                    "title_en": title_en,
+                    "date": date_str,
+                    "deal_id": None,
+                }
+
+                if title_en == "[Translation failed]":
+                    logger.info("  Skipped (translation failed)")
+                    save_to_samr_cases(samr_case_doc)
+                    continue
+
+                try:
+                    match_result = match_deal_with_llm(title_en, title_cn)
+                except Exception as e:
+                    logger.exception(f"  LLM match failed: {e}")
+                    collect_error(
+                        error_items,
+                        str(e),
+                        step="match_deal_with_llm",
+                        context={"title": title_en[:80], "url": url},
+                    )
+                    match_result = None
+
+                logger.info(f"Match result: {match_result}")
+                if match_result and match_result.lower() != "none" and match_result.lower().startswith("match"):
+                    deal_id = match_result.replace(
+                        "Match:", "").replace("match:", "").strip()
+
+                    deal_match = None
+                    for deal in deals:
+                        if deal.get("deal_id") == deal_id:
+                            deal_match = deal
+                            logger.info(f"  Found deal by ID: {deal_id}")
+                            break
+
+                    if deal_match:
+                        matched_result = {
+                            "deal_id": deal_match.get("deal_id", ""),
+                            "title_cn": title_cn,
+                            "title_en": title_en,
+                            "url": url,
+                            "date": date_str,
+                            "matched_deal": deal_match,
+                        }
+                        matched_data.append(matched_result)
+                        logger.info("  Match added to results!")
+
+                        samr_case_doc["deal_id"] = deal_match.get(
+                            "deal_id", "")
+
+                        try:
+                            samr_data = {
+                                k: v for k, v in matched_result.items() if k != "matched_deal"}
+                            send_samr_email_via_webhook(samr_data, deal_match)
+                        except Exception as e:
+                            logger.exception(
+                                f"  Error sending email notification: {e}")
+                            collect_error(
+                                error_items,
+                                str(e),
+                                step="send_email",
+                                context={"title": title_en[:80], "url": url},
+                            )
+                    else:
+                        logger.warning(
+                            f"  LLM found match but deal not found in loaded deals: {deal_id}")
                 else:
-                    logger.info("  Not USA-related - no action taken")
+                    logger.info("  No match")
+                    try:
+                        company_details = title_en if title_en and title_en != "[Translation failed]" else title_cn
+                        is_usa_related = verify_usa_relation(
+                            company_details=company_details,
+                            case_type="CHINA",
+                        )
+                        if is_usa_related:
+                            logger.info(
+                                "  USA-related case detected - sending email notification")
+                            try:
+                                send_unmatched_samr_email_via_webhook(record)
+                            except Exception as e:
+                                logger.exception(f"  Error sending USA email: {e}")
+                                collect_error(
+                                    error_items,
+                                    str(e),
+                                    step="send_email",
+                                    context={"title": title_en[:80], "url": url},
+                                )
+                        else:
+                            logger.info("  Not USA-related - no action taken")
+                    except Exception as e:
+                        logger.exception(f"  Error verifying USA relation: {e}")
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="verify_usa_relation",
+                            context={"title": title_en[:80], "url": url},
+                        )
+
+                save_to_samr_cases(samr_case_doc)
             except Exception as e:
-                logger.exception(f"  Error verifying USA relation: {e}")
+                logger.exception(f"Error processing record #{idx}: {e}")
+                collect_error(
+                    error_items,
+                    str(e),
+                    step="process_record",
+                    context={
+                        "url": record.get("url", ""),
+                        "title": (record.get("title_en") or "")[:80],
+                    },
+                )
 
-        # Always persist the record to samr_cases
-        save_to_samr_cases(samr_case_doc)
+        return {
+            "success": True,
+            "extraction_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "total_extracted": len(all_extracted_records),
+            "total_new": len(new_records),
+            "total_matched": len(matched_data),
+            "matched_results": convert_datetime_to_string(matched_data),
+        }
 
-    # ------------------------------------------------------------------
-    # Summary
-    # ------------------------------------------------------------------
-    matched_data_serializable = convert_datetime_to_string(matched_data)
+    except Exception as e:
+        logger.exception(f"Unhandled error in main: {e}")
+        collect_error(
+            error_items,
+            f"Unhandled error in main: {e}",
+            step="run_main",
+        )
+        return {"success": False, "error": str(e)}
 
-    matched_output = {
-        "success": True,
-        "extraction_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "total_extracted": len(all_extracted_records),
-        "total_new": len(new_records),
-        "total_matched": len(matched_data),
-        "matched_results": matched_data_serializable,
-    }
+    finally:
+        send_error_summary(error_items, SCRIPT_NAME)
 
-    logger.info("ALL DONE!")
-    logger.info(f"Total records extracted: {len(all_extracted_records)}")
-    logger.info(f"New records processed: {len(new_records)}")
-    logger.info(f"Total matches found: {len(matched_data)}")
-    elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
-    logger.info("=" * 60)
-    logger.info("SUMMARY")
-    logger.info(
-        f"  Total records extracted      : {len(all_extracted_records)}")
-    logger.info(f"  New records processed        : {len(new_records)}")
-    logger.info(f"  Total matches found          : {len(matched_data)}")
-    logger.info(f"  Total time                   : {elapsed}s")
-    logger.info("=" * 60)
-
-    return matched_output
+        logger.info("ALL DONE!")
+        logger.info(f"Total records extracted: {len(all_extracted_records)}")
+        logger.info(f"New records processed: {len(new_records)}")
+        logger.info(f"Total matches found: {len(matched_data)}")
+        elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
+        logger.info("=" * 60)
+        logger.info("SUMMARY")
+        logger.info(
+            f"  Total records extracted      : {len(all_extracted_records)}")
+        logger.info(f"  New records processed        : {len(new_records)}")
+        logger.info(f"  Total matches found          : {len(matched_data)}")
+        logger.info(f"  Errors encountered           : {len(error_items)}")
+        logger.info(f"  Total time                   : {elapsed}s")
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":
@@ -1042,9 +1079,4 @@ if __name__ == "__main__":
             sys.exit(0)
 
     logger.info("Mode: Scrape new pages from SAMR website")
-    try:
-        main(headless=headless_mode)
-    except Exception as e:
-        _log_critical_error_and_email(
-            f"Unhandled error in main: {e}", {"step": "main"})
-        raise
+    main(headless=headless_mode)

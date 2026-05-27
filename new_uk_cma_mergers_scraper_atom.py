@@ -15,8 +15,8 @@ from bs4 import BeautifulSoup
 from html import escape as escape_html
 from openai import OpenAI
 from pymongo import MongoClient
-from typing import Optional, Tuple
-from error_email_service import send_error_email
+from typing import Any, Dict, List, Optional, Tuple
+from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
 
 # ---------------------------------------------------------------------------
@@ -78,17 +78,6 @@ if not logger.handlers:
 logger.propagate = False
 
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
-
-
-def _log_critical_error_and_email(msg: str, context: Optional[dict] = None):
-    """Immediate error email — use ONLY for critical startup / fatal failures."""
-    logger.error(msg)
-    send_error_email(
-        script_name=SCRIPT_NAME,
-        error_message=msg,
-        context=context or {},
-        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +248,10 @@ def insert_uk_cma_case(record: dict) -> bool:
 # Atom feed
 # ===================================================================
 
-def fetch_atom_feed(max_retries: int = 2):
+def fetch_atom_feed(
+    max_retries: int = 2,
+    error_items: Optional[List[Dict[str, Any]]] = None,
+):
     """Fetch the Atom feed with retry logic and detailed error reporting."""
     last_error = None
     last_status = None
@@ -286,21 +278,19 @@ def fetch_atom_feed(max_retries: int = 2):
         f"URL: {ATOM_FEED_URL}. Last error: {last_error}. "
         f"The CMA feed may be temporarily unavailable or the server is slow to respond."
     )
-    _log_critical_error_and_email(
-        explanation,
-        {
-            "step": "fetch_atom_feed",
-            "feed_url": ATOM_FEED_URL,
-            "attempts": str(max_retries),
-            "last_http_status": str(last_status) if last_status else "no response",
-            "last_error": str(last_error),
-            "possible_causes": (
-                "1) UK CMA website temporarily down or slow; "
-                "2) Network issue between server and gov.uk; "
-                "3) Feed URL changed or removed"
-            ),
-        },
-    )
+    logger.error(explanation)
+    if error_items is not None:
+        collect_error(
+            error_items,
+            explanation,
+            step="fetch_atom_feed",
+            context={
+                "url": ATOM_FEED_URL,
+                "attempts": max_retries,
+                "http_status": str(last_status) if last_status else "no response",
+                "last_error": str(last_error),
+            },
+        )
     return None
 
 
@@ -443,7 +433,11 @@ def extract_published_dates(soup):
     return result
 
 
-def scrape_detail_page(url, max_retries: int = 3):
+def scrape_detail_page(
+    url,
+    max_retries: int = 3,
+    error_items: Optional[List[Dict[str, Any]]] = None,
+):
     """Fetch the detail page HTML and extract all fields. Retries on failure."""
     import time
     last_error = None
@@ -488,21 +482,19 @@ def scrape_detail_page(url, max_retries: int = 3):
         f"URL: {url}. Last error: {last_error}. "
         f"The page may be temporarily unavailable or its structure may have changed."
     )
-    _log_critical_error_and_email(
-        explanation,
-        {
-            "step": "scrape_detail_page",
-            "page_url": url,
-            "attempts": str(max_retries),
-            "last_http_status": str(last_status) if last_status else "no response",
-            "last_error": str(last_error),
-            "possible_causes": (
-                "1) UK CMA website temporarily down or slow; "
-                "2) Network issue between server and gov.uk; "
-                "3) Page HTML structure changed (parser broken)"
-            ),
-        },
-    )
+    logger.error(explanation)
+    if error_items is not None:
+        collect_error(
+            error_items,
+            explanation,
+            step="scrape_detail_page",
+            context={
+                "url": url,
+                "attempts": max_retries,
+                "http_status": str(last_status) if last_status else "no response",
+                "last_error": str(last_error),
+            },
+        )
     return None
 
 
@@ -593,7 +585,7 @@ If no deal satisfies this rule, respond exactly: None"""
             return None
     except Exception as e:
         print(f"  ❌ LLM error: {e}")
-        return None
+        raise
 
 
 def find_deal_by_id(deal_id):
@@ -644,7 +636,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
         return False
     except Exception as e:
         print(f"⚠️ LLM USA-relation error: {e}")
-        return False
+        raise
 
 
 # ===================================================================
@@ -833,103 +825,145 @@ def send_email_via_webhook(subject, html_email, extra_payload=None):
 # Process a single record
 # ===================================================================
 
-def process_record(record, existing_urls):
+def process_record(record, existing_urls, error_items: List[Dict[str, Any]]):
     detail_url = record.get("url", "")
     title = record.get("title", "")
     print(f"STEP 1.5.1: Record: {record}")
     print(f"STEP 1.5.2: Existing URLs: {existing_urls}")
 
-    if not detail_url:
-        print(f"  ⏩ Skipped (no URL): {title[:60]}")
-        return None
-    print(f"STEP 1.5.3: Detail URL: {detail_url}")
-    if detail_url in existing_urls:
-        print(f"  ⏩ Already in DB: {title[:60]}")
-        return None
-    print(f"STEP 1.5.4: Already in DB: {title[:60]}")
-    # Scrape detail page
-    scraped = scrape_detail_page(detail_url)
-    if not scraped:
-        print(f"  ⚠️ Failed to scrape, skipping: {title[:60]}")
-        return None
-    print(f"STEP 1.5.5: Scraped: {scraped}")
-    # Build the record to insert
-    case_record = {
-        "atom_id": record.get("id", ""),
-        "atom_updated": record.get("updated", ""),
-        "detail_url": detail_url,
-        "title": scraped.get("title") or title,
-        "description": scraped.get("description"),
-        "case_type": scraped.get("case_type"),
-        "case_state": scraped.get("case_state"),
-        "market_sector": scraped.get("market_sector"),
-        "outcome": scraped.get("outcome"),
-        "opened_date": scraped.get("opened_date"),
-        "closed_date": scraped.get("closed_date"),
-        "history": scraped.get("history", []),
-        "published_date": scraped.get("published_date"),
-        "last_updated": scraped.get("last_updated"),
-        "created_at": datetime.datetime.utcnow(),
-        "updated_at": datetime.datetime.utcnow(),
-    }
+    try:
+        if not detail_url:
+            print(f"  ⏩ Skipped (no URL): {title[:60]}")
+            return None
+        print(f"STEP 1.5.3: Detail URL: {detail_url}")
+        if detail_url in existing_urls:
+            print(f"  ⏩ Already in DB: {title[:60]}")
+            return None
+        print(f"STEP 1.5.4: Already in DB: {title[:60]}")
+        scraped = scrape_detail_page(detail_url, error_items=error_items)
+        if not scraped:
+            print(f"  ⚠️ Failed to scrape, skipping: {title[:60]}")
+            return None
+        print(f"STEP 1.5.5: Scraped: {scraped}")
+        case_record = {
+            "atom_id": record.get("id", ""),
+            "atom_updated": record.get("updated", ""),
+            "detail_url": detail_url,
+            "title": scraped.get("title") or title,
+            "description": scraped.get("description"),
+            "case_type": scraped.get("case_type"),
+            "case_state": scraped.get("case_state"),
+            "market_sector": scraped.get("market_sector"),
+            "outcome": scraped.get("outcome"),
+            "opened_date": scraped.get("opened_date"),
+            "closed_date": scraped.get("closed_date"),
+            "history": scraped.get("history", []),
+            "published_date": scraped.get("published_date"),
+            "last_updated": scraped.get("last_updated"),
+            "created_at": datetime.datetime.utcnow(),
+            "updated_at": datetime.datetime.utcnow(),
+        }
 
-    # --- LLM deal matching ---
-    deal_id = match_title_with_deals(case_record["title"])
-    deal_match = find_deal_by_id(deal_id) if deal_id else None
-    print(f"STEP 1.5.6: Deal match: {deal_match}")
-    if deal_match:
-        acquirer = deal_match.get(
-            "acquirer") or deal_match.get("acquire_name", "N/A")
-        target = deal_match.get("target") or deal_match.get(
-            "target_name", "N/A")
-        print(f"  🎯 Match: {acquirer} / {target}")
-        print(f"STEP 1.5.7: Match: {acquirer} / {target}")
-        case_record["deal_id"] = deal_id
-
-        email_info = {**case_record, "updated": record.get("updated", "")}
-        subj, html = generate_matched_email_html(email_info, deal_match)
-        send_email_via_webhook(subj, html, {
-            "deal_id": deal_id,
-            "target": target,
-            "acquirer": acquirer,
-            "title": case_record["title"],
-            "url": detail_url,
-            "is_new_case": True,
-        })
-        print(f"STEP 1.5.8: Email sent: {subj}")
-    else:
-        if deal_id:
-            print(f"  ⚠️ Deal ID from LLM not found in deals list: {deal_id}")
-        # No deal match -> check USA relation
-        print(f"  ➖ No deal match for: {case_record['title'][:60]}")
         try:
-            is_usa = verify_usa_relation(case_record["title"])
-            print(f"STEP 1.5.9: USA relation: {is_usa}")
-            if is_usa:
-                print(f"  🇺🇸 USA-related - sending email")
-                print(f"STEP 1.5.10: Sending email")
-                email_info = {**case_record,
-                              "updated": record.get("updated", "")}
-                subj, html = generate_unmatched_email_html(email_info)
-                print(f"STEP 1.5.11: Email generated: {subj}")
-                send_email_via_webhook(subj, html, {
-                    "title": case_record["title"],
-                    "url": detail_url,
-                    "is_unmatched": True,
-                    "usa_related": True,
-                })
-                print(f"STEP 1.5.12: Email sent: {subj}")
-            else:
-                print(f"  ℹ️ Not USA-related - no email")
+            deal_id = match_title_with_deals(case_record["title"])
         except Exception as e:
-            print(f"  ⚠️ Error checking USA relation: {e}")
-            print(f"STEP 1.5.13: Error checking USA relation: {e}")
-            logger.exception("Error checking USA relation")
+            logger.exception(f"Deal matching error: {e}")
+            collect_error(
+                error_items,
+                str(e),
+                step="match_title_with_deals",
+                context={"title": case_record["title"][:80], "detail_url": detail_url},
+            )
+            deal_id = None
 
-    # Insert into uk_cma_cases collection
-    insert_uk_cma_case(case_record)
-    print(f"STEP 1.5.14: Inserted into uk_cma_cases collection: {case_record}")
-    return case_record
+        deal_match = find_deal_by_id(deal_id) if deal_id else None
+        print(f"STEP 1.5.6: Deal match: {deal_match}")
+        if deal_match:
+            acquirer = deal_match.get(
+                "acquirer") or deal_match.get("acquire_name", "N/A")
+            target = deal_match.get("target") or deal_match.get(
+                "target_name", "N/A")
+            print(f"  🎯 Match: {acquirer} / {target}")
+            print(f"STEP 1.5.7: Match: {acquirer} / {target}")
+            case_record["deal_id"] = deal_id
+
+            email_info = {**case_record, "updated": record.get("updated", "")}
+            subj, html = generate_matched_email_html(email_info, deal_match)
+            if not send_email_via_webhook(subj, html, {
+                "deal_id": deal_id,
+                "target": target,
+                "acquirer": acquirer,
+                "title": case_record["title"],
+                "url": detail_url,
+                "is_new_case": True,
+            }):
+                collect_error(
+                    error_items,
+                    "Failed to send matched-case email",
+                    step="send_email",
+                    context={"title": case_record["title"][:80], "detail_url": detail_url},
+                )
+            print(f"STEP 1.5.8: Email sent: {subj}")
+        else:
+            if deal_id:
+                print(f"  ⚠️ Deal ID from LLM not found in deals list: {deal_id}")
+            print(f"  ➖ No deal match for: {case_record['title'][:60]}")
+            try:
+                is_usa = verify_usa_relation(case_record["title"])
+                print(f"STEP 1.5.9: USA relation: {is_usa}")
+                if is_usa:
+                    print(f"  🇺🇸 USA-related - sending email")
+                    print(f"STEP 1.5.10: Sending email")
+                    email_info = {**case_record,
+                                  "updated": record.get("updated", "")}
+                    subj, html = generate_unmatched_email_html(email_info)
+                    print(f"STEP 1.5.11: Email generated: {subj}")
+                    if not send_email_via_webhook(subj, html, {
+                        "title": case_record["title"],
+                        "url": detail_url,
+                        "is_unmatched": True,
+                        "usa_related": True,
+                    }):
+                        collect_error(
+                            error_items,
+                            "Failed to send USA-related email",
+                            step="send_email",
+                            context={"title": case_record["title"][:80], "detail_url": detail_url},
+                        )
+                    print(f"STEP 1.5.12: Email sent: {subj}")
+                else:
+                    print(f"  ℹ️ Not USA-related - no email")
+            except Exception as e:
+                print(f"  ⚠️ Error checking USA relation: {e}")
+                print(f"STEP 1.5.13: Error checking USA relation: {e}")
+                logger.exception("Error checking USA relation")
+                collect_error(
+                    error_items,
+                    str(e),
+                    step="verify_usa_relation",
+                    context={"title": case_record["title"][:80], "detail_url": detail_url},
+                )
+
+        if not insert_uk_cma_case(case_record):
+            collect_error(
+                error_items,
+                "Failed to insert case into uk_cma_cases",
+                step="insert_uk_cma_case",
+                context={"title": case_record["title"][:80], "detail_url": detail_url},
+            )
+            return None
+
+        print(f"STEP 1.5.14: Inserted into uk_cma_cases collection: {case_record}")
+        return case_record
+    except Exception as e:
+        logger.exception(f"Error processing record: {e}")
+        collect_error(
+            error_items,
+            str(e),
+            step="process_record",
+            context={"title": title[:80], "detail_url": detail_url},
+        )
+        return None
 
 
 # ===================================================================
@@ -940,6 +974,10 @@ def main():
     global LOG_FILE
     LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = datetime.datetime.now()
+    error_items: List[Dict[str, Any]] = []
+    new_count = 0
+    skipped_count = 0
+    atom_records: List[Dict[str, Any]] = []
     logger.info("=" * 60)
     logger.info("STEP 1: Starting UK CMA Cases Register")
     logger.info(f"Log file: {LOG_FILE}")
@@ -948,84 +986,82 @@ def main():
     print(f"🚀 UK CMA Open Mergers Scraper (new_uk_cma_mergers_scraper_atom)")
     print(f"{'='*60}\n")
 
-    # Step 1: MongoDB connection
-    print("STEP 1.1: Connecting to MongoDB...")
-    success, msg = init_mongodb_connection()
-    if success:
-        print(f"✅ {msg}\n")
-    else:
-        _log_critical_error_and_email(
-            f"MongoDB connection failed: {msg}",
-            {"step": "mongodb_connect"},
-        )
-        return
-
-    # Step 2: Load deals
-    print("STEP 1.2: Loading deals from MongoDB...")
-    load_deals()
-
-    # Step 3: Get existing open uk_cma_cases detail_urls for dedup
-    print("\nSTEP 1.3: Fetching existing open uk_cma_cases for dedup...")
-    existing_urls = get_existing_open_case_urls()
-    print(f"STEP 1.3.1: Existing open uk_cma_cases: {existing_urls}")
-
-    # Step 4: Fetch & parse Atom feed
-    print(f"\n{'='*60}")
-    print("STEP 1.4: FETCHING & PARSING ATOM FEED")
-    print(f"{'='*60}\n")
-    xml_content = fetch_atom_feed()
-    print(f"STEP 1.4.1: XML content: {xml_content}")
-    if not xml_content:
-        _log_critical_error_and_email("Failed to fetch Atom feed. Exiting.", {
-                                      "step": "fetch_atom_feed"})
-        return
-
-    atom_records = parse_atom_feed(xml_content)
-    print(f"STEP 1.4.2: Total entries from feed: {len(atom_records)}")
-    print(f"STEP 1.4.3: Atom records: {atom_records}")
-
-    # Step 5: Process each record
-    print(f"\n{'='*60}")
-    print("STEP 1.5: PROCESSING RECORDS")
-    print(f"{'='*60}\n")
-
-    new_count = 0
-    skipped_count = 0
-
-    for idx, record in enumerate(atom_records, 1):
-        title = record.get("title", "N/A")
-        print(f"\n[{idx}/{len(atom_records)}] {title[:70]}")
-
-        result = process_record(record, existing_urls)
-        if result:
-            new_count += 1
-            existing_urls.add(record.get("url", ""))
+    try:
+        print("STEP 1.1: Connecting to MongoDB...")
+        success, msg = init_mongodb_connection()
+        if success:
+            print(f"✅ {msg}\n")
         else:
-            skipped_count += 1
+            collect_error(
+                error_items,
+                f"MongoDB connection failed: {msg}",
+                step="mongodb_connect",
+            )
+            return
 
-    # Summary
-    print(f"\n{'='*60}")
-    print("STEP 1.6: ALL DONE!")
-    print(f"{'='*60}")
-    print(f"STEP 1.6.1: Total feed entries: {len(atom_records)}")
-    print(f"STEP 1.6.2: New records processed: {new_count}")
-    print(f"STEP 1.6.3: Skipped (already in DB): {skipped_count}")
-    print(f"{'='*60}\n")
-    elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
-    logger.info("=" * 60)
-    logger.info("SUMMARY")
-    logger.info(
-        f"STEP 1.6.4: Total feed entries           : {len(atom_records)}")
-    logger.info(f"STEP 1.6.5: New records processed        : {new_count}")
-    logger.info(f"STEP 1.6.6: Skipped                      : {skipped_count}")
-    logger.info(f"STEP 1.6.7: Total time                   : {elapsed}s")
-    logger.info("=" * 60)
+        print("STEP 1.2: Loading deals from MongoDB...")
+        load_deals()
+
+        print("\nSTEP 1.3: Fetching existing open uk_cma_cases for dedup...")
+        existing_urls = get_existing_open_case_urls()
+        print(f"STEP 1.3.1: Existing open uk_cma_cases: {existing_urls}")
+
+        print(f"\n{'='*60}")
+        print("STEP 1.4: FETCHING & PARSING ATOM FEED")
+        print(f"{'='*60}\n")
+        xml_content = fetch_atom_feed(error_items=error_items)
+        print(f"STEP 1.4.1: XML content: {xml_content}")
+        if not xml_content:
+            return
+
+        atom_records = parse_atom_feed(xml_content)
+        print(f"STEP 1.4.2: Total entries from feed: {len(atom_records)}")
+        print(f"STEP 1.4.3: Atom records: {atom_records}")
+
+        print(f"\n{'='*60}")
+        print("STEP 1.5: PROCESSING RECORDS")
+        print(f"{'='*60}\n")
+
+        for idx, record in enumerate(atom_records, 1):
+            title = record.get("title", "N/A")
+            print(f"\n[{idx}/{len(atom_records)}] {title[:70]}")
+
+            result = process_record(record, existing_urls, error_items)
+            if result:
+                new_count += 1
+                existing_urls.add(record.get("url", ""))
+            else:
+                skipped_count += 1
+
+    except Exception as e:
+        logger.exception(f"Unhandled error in main: {e}")
+        collect_error(
+            error_items,
+            f"Unhandled error in main: {e}",
+            step="run_main",
+        )
+
+    finally:
+        send_error_summary(error_items, SCRIPT_NAME)
+
+        print(f"\n{'='*60}")
+        print("STEP 1.6: ALL DONE!")
+        print(f"{'='*60}")
+        print(f"STEP 1.6.1: Total feed entries: {len(atom_records)}")
+        print(f"STEP 1.6.2: New records processed: {new_count}")
+        print(f"STEP 1.6.3: Skipped (already in DB): {skipped_count}")
+        print(f"{'='*60}\n")
+        elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
+        logger.info("=" * 60)
+        logger.info("SUMMARY")
+        logger.info(
+            f"STEP 1.6.4: Total feed entries           : {len(atom_records)}")
+        logger.info(f"STEP 1.6.5: New records processed        : {new_count}")
+        logger.info(f"STEP 1.6.6: Skipped                      : {skipped_count}")
+        logger.info(f"STEP 1.6.7: Errors encountered           : {len(error_items)}")
+        logger.info(f"STEP 1.6.8: Total time                   : {elapsed}s")
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        _log_critical_error_and_email(
-            f"Unhandled error in main: {e}", {"step": "main"})
-        raise
+    main()

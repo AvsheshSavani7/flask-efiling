@@ -17,12 +17,16 @@ from bs4 import BeautifulSoup
 from openai import OpenAI
 from dotenv import load_dotenv
 from datetime import datetime, date
+from typing import Any, Dict, List, Optional
 from bson import ObjectId
 from mongodb_connection import get_deals_collection, is_connected, init_mongodb_connection
 from html import escape as escape_html
+from scraper_error_utils import collect_error, send_error_summary
 
 load_dotenv(".env")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+SCRIPT_NAME = "germany_cases_press_release"
 
 # Press releases search URL (Pressemeldungen & Aktuelles, sorted by date desc)
 PRESS_RELEASE_BASE = "https://www.bundeskartellamt.de/SiteGlobals/Forms/Suche/Expertensuche_Formular.html"
@@ -253,7 +257,7 @@ None
         return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"⚠️ LLM Error: {e}")
-        return "None"
+        raise
 
 
 def convert_datetime_to_string(obj):
@@ -399,7 +403,13 @@ def _ensure_german_scrap_array(german_scrap):
     return [item]
 
 
-def append_or_update_press_release_to_deal(deal_match, record, matched_company_raw, matched_role):
+def append_or_update_press_release_to_deal(
+    deal_match,
+    record,
+    matched_company_raw,
+    matched_role,
+    error_items: Optional[List[Dict[str, Any]]] = None,
+):
     """
     Append or update a press_release entry in the deal's german_scrap array.
     If an entry with same url and source==SOURCE_PRESS_RELEASE exists, update it; else append.
@@ -495,11 +505,19 @@ def append_or_update_press_release_to_deal(deal_match, record, matched_company_r
             should_send = updated_fields is None or (
                 updated_fields and len(updated_fields) > 0)
             if should_send:
-                try:
-                    send_press_release_email_via_webhook(
-                        german_scrap_entry, deal_match, updated_fields)
-                except Exception as e:
-                    print(f"⚠️ Error sending email: {e}")
+                if not send_press_release_email_via_webhook(
+                    german_scrap_entry, deal_match, updated_fields
+                ):
+                    if error_items is not None:
+                        collect_error(
+                            error_items,
+                            "Failed to send press release email",
+                            step="send_email",
+                            context={
+                                "title": (record.get("title") or "")[:80],
+                                "url": record_url,
+                            },
+                        )
             return True
         else:
             print("ℹ️ No changes written (data may be identical)")
@@ -511,7 +529,10 @@ def append_or_update_press_release_to_deal(deal_match, record, matched_company_r
         return False
 
 
-def match_records_with_deals(records):
+def match_records_with_deals(
+    records,
+    error_items: Optional[List[Dict[str, Any]]] = None,
+):
     """Match extracted press releases with deals via LLM and append/update german_scrap array (press_release)."""
     print(
         f"\n{'='*60}\n🔍 Matching {len(records)} press releases with deals...\n{'='*60}\n")
@@ -535,14 +556,25 @@ def match_records_with_deals(records):
         title = record.get("title", "")
         print(f"[{idx}/{len(records)}] {title[:70]}...")
 
-        if not title or not title.strip():
-            print("  ⏩ Skipped (no title)")
-            continue
+        try:
+            if not title or not title.strip():
+                print("  ⏩ Skipped (no title)")
+                continue
 
-        match_result = match_deal_with_llm(title, all_companies)
-
-        if match_result and match_result.lower() != "none" and "match:" in match_result.lower():
             try:
+                match_result = match_deal_with_llm(title, all_companies)
+            except Exception as e:
+                print(f"  ⚠️ LLM match error: {e}")
+                if error_items is not None:
+                    collect_error(
+                        error_items,
+                        str(e),
+                        step="match_deal_with_llm",
+                        context={"title": title[:80], "url": record.get("url", "")},
+                    )
+                continue
+
+            if match_result and match_result.lower() != "none" and "match:" in match_result.lower():
                 match_pattern = r"Match:\s*([^(]+)\s*\((\w+)\)"
                 match_obj = re.search(
                     match_pattern, match_result, re.IGNORECASE)
@@ -565,22 +597,35 @@ def match_records_with_deals(records):
 
                     if deal_found:
                         save_ok = append_or_update_press_release_to_deal(
-                            deal_found, record, matched_company_raw, matched_role
+                            deal_found, record, matched_company_raw, matched_role,
+                            error_items=error_items,
                         )
                         if save_ok:
                             matched_count += 1
                         else:
                             print("  ⚠️ Failed to save to MongoDB")
+                            if error_items is not None:
+                                collect_error(
+                                    error_items,
+                                    "Failed to save press release to deal",
+                                    step="append_or_update_press_release",
+                                    context={"title": title[:80], "url": record.get("url", "")},
+                                )
                     else:
                         print("  ⚠️ Deal not found in list")
                 else:
                     print(f"  ⚠️ Could not parse match: {match_result}")
-            except Exception as e:
-                print(f"  ⚠️ Error processing match: {e}")
-                import traceback
-                traceback.print_exc()
-        else:
-            print("  ➖ No match")
+            else:
+                print("  ➖ No match")
+        except Exception as e:
+            print(f"  ⚠️ Error processing record: {e}")
+            if error_items is not None:
+                collect_error(
+                    error_items,
+                    str(e),
+                    step="process_record",
+                    context={"title": title[:80], "url": record.get("url", "")},
+                )
 
     print(f"\n{'='*60}\n✅ Matching complete: {matched_count} new/updated in german_scrap\n{'='*60}\n")
     return matched_count
@@ -592,75 +637,107 @@ def main():
     match with deals via LLM, append/update german_scrap array (press_release).
     """
     global deals
+    error_items: List[Dict[str, Any]] = []
+    records: List[Dict[str, Any]] = []
+    total_matched = 0
 
     print(f"\n{'='*60}\n🚀 BUNDESKARTELLAMT PRESS RELEASE SCRAPER\n{'='*60}\n")
 
-    success, message = init_mongodb_connection(".env")
-    if not success:
-        print(f"❌ {message}")
-        return {"success": False, "error": message}
-
-    load_deals()
-
-    print(f"📍 Fetching HTML from {PRESS_RELEASE_URL}")
-    html_content = None
-    max_retries = 3
-    wait_seconds = 5
-    for attempt in range(1, max_retries + 1):
-        try:
-            response = requests.get(PRESS_RELEASE_URL, timeout=30)
-            response.raise_for_status()
-            html_content = response.text
-            print(f"   ✅ HTML fetched ({len(html_content)} bytes)\n")
-            break
-        except Exception as e:
-            print(f"   ❌ Attempt {attempt}/{max_retries} failed: {e}")
-            if attempt < max_retries:
-                print(f"   ⏳ Waiting {wait_seconds} sec before retry...")
-                time.sleep(wait_seconds)
-            else:
-                print(f"   ❌ All {max_retries} attempts failed.")
-                return {"success": False, "error": str(e)}
-
-    print("📍 Extracting press release list...")
-    records = extract_press_results(html_content)
-    print(f"   ✅ Extracted {len(records)} items\n")
-
-    print(f"📍 Applying cutoff date (>= {CUTOFF_DATE.date()})...")
-    records = filter_by_cutoff_date(records)
-    print(f"   ✅ After cutoff: {len(records)} records\n")
-
-    # Serialize for JSON (date -> str)
-    records_serializable = []
-    for r in records:
-        rec = dict(r)
-        if isinstance(rec.get("date"), date):
-            rec["date"] = rec["date"].isoformat()
-        records_serializable.append(rec)
-
-    print(f"📍 Saving extracted records to {EXTRACTED_RECORDS_JSON}")
     try:
-        with open(EXTRACTED_RECORDS_JSON, "w", encoding="utf-8") as f:
-            json.dump(records_serializable, f, ensure_ascii=False, indent=2)
-        print("   ✅ Saved\n")
+        success, message = init_mongodb_connection(".env")
+        if not success:
+            print(f"❌ {message}")
+            collect_error(
+                error_items,
+                f"MongoDB init failed: {message}",
+                step="init_mongodb_connection",
+            )
+            return {"success": False, "error": message}
+
+        load_deals()
+
+        print(f"📍 Fetching HTML from {PRESS_RELEASE_URL}")
+        html_content = None
+        max_retries = 3
+        wait_seconds = 5
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = requests.get(PRESS_RELEASE_URL, timeout=30)
+                response.raise_for_status()
+                html_content = response.text
+                print(f"   ✅ HTML fetched ({len(html_content)} bytes)\n")
+                break
+            except Exception as e:
+                print(f"   ❌ Attempt {attempt}/{max_retries} failed: {e}")
+                if attempt < max_retries:
+                    print(f"   ⏳ Waiting {wait_seconds} sec before retry...")
+                    time.sleep(wait_seconds)
+                else:
+                    print(f"   ❌ All {max_retries} attempts failed.")
+                    collect_error(
+                        error_items,
+                        f"Failed to fetch press release page: {e}",
+                        step="fetch_press_release_page",
+                        context={"url": PRESS_RELEASE_URL},
+                    )
+                    return {"success": False, "error": str(e)}
+
+        print("📍 Extracting press release list...")
+        records = extract_press_results(html_content)
+        print(f"   ✅ Extracted {len(records)} items\n")
+
+        print(f"📍 Applying cutoff date (>= {CUTOFF_DATE.date()})...")
+        records = filter_by_cutoff_date(records)
+        print(f"   ✅ After cutoff: {len(records)} records\n")
+
+        records_serializable = []
+        for r in records:
+            rec = dict(r)
+            if isinstance(rec.get("date"), date):
+                rec["date"] = rec["date"].isoformat()
+            records_serializable.append(rec)
+
+        print(f"📍 Saving extracted records to {EXTRACTED_RECORDS_JSON}")
+        try:
+            with open(EXTRACTED_RECORDS_JSON, "w", encoding="utf-8") as f:
+                json.dump(records_serializable, f, ensure_ascii=False, indent=2)
+            print("   ✅ Saved\n")
+        except Exception as e:
+            print(f"   ⚠️ Could not save JSON: {e}\n")
+            collect_error(
+                error_items,
+                f"Could not save JSON: {e}",
+                step="write_extracted_json",
+            )
+
+        print("📍 Matching records with deals and updating german_scrap array...")
+        total_matched = match_records_with_deals(records, error_items)
+
+        return {
+            "success": True,
+            "extraction_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "total_extracted": len(records),
+            "total_matched": total_matched,
+            "cutoff_date": CUTOFF_DATE.strftime("%Y-%m-%d"),
+        }
+
     except Exception as e:
-        print(f"   ⚠️ Could not save JSON: {e}\n")
+        print(f"❌ Unhandled error in main: {e}")
+        collect_error(
+            error_items,
+            f"Unhandled error in main: {e}",
+            step="run_main",
+        )
+        return {"success": False, "error": str(e)}
 
-    print("📍 Matching records with deals and updating german_scrap array...")
-    total_matched = match_records_with_deals(records)
+    finally:
+        send_error_summary(error_items, SCRIPT_NAME)
 
-    result = {
-        "success": True,
-        "extraction_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "total_extracted": len(records),
-        "total_matched": total_matched,
-        "cutoff_date": CUTOFF_DATE.strftime("%Y-%m-%d"),
-    }
-    print(f"\n{'='*60}\n✅ DONE\n{'='*60}")
-    print(f"📊 Records (after cutoff): {len(records)}")
-    print(f"🎯 Matches/updates in german_scrap: {total_matched}")
-    print(f"📁 JSON: {EXTRACTED_RECORDS_JSON}\n")
-    return result
+        print(f"\n{'='*60}\n✅ DONE\n{'='*60}")
+        print(f"📊 Records (after cutoff): {len(records)}")
+        print(f"🎯 Matches/updates in german_scrap: {total_matched}")
+        print(f"⚠️ Errors encountered: {len(error_items)}")
+        print(f"📁 JSON: {EXTRACTED_RECORDS_JSON}\n")
 
 
 if __name__ == "__main__":

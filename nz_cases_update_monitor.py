@@ -13,7 +13,6 @@ import os
 import logging
 import sys
 import time
-import traceback
 from datetime import datetime, timezone, timedelta
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Tuple
@@ -27,7 +26,7 @@ from playwright.sync_api import sync_playwright
 from nz_comcom_case_register_to_db import match_case_to_deal
 
 from llm_verification_service import verify_usa_relation
-from error_email_service import send_error_email
+from scraper_error_utils import collect_error, send_error_summary
 from mongodb_connection import (
     get_database,
     get_deals_collection,
@@ -104,17 +103,6 @@ logger.propagate = False
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 
 
-def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
-    """Immediate error email — use ONLY for critical startup / fatal failures."""
-    logger.error(msg)
-    send_error_email(
-        script_name=SCRIPT_NAME,
-        error_message=msg,
-        context=context,
-        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
-    )
-
-
 # Constants
 BASE__SCRAPER_URL = "https://www.comcom.govt.nz"
 ENV_PATH = ".env"
@@ -169,11 +157,8 @@ def get_open_deals_for_matching() -> List[Dict[str, Any]]:
                 d.pop("_id", None)
         return deals
     except Exception as e:
-        _log_critical_error_and_email(
-            f"Error fetching deals: {e}",
-            {"step": "get_open_deals_for_matching"},
-        )
-        return []
+        logger.exception(f"Error fetching deals: {e}")
+        raise
 
 
 # ---------- Detail page fetch (copied from nz_comcom_case_register_to_db) ----------
@@ -844,246 +829,319 @@ def run():
     LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = time.time()
     error_items: List[Dict[str, Any]] = []
+    total_checked = 0
+    total_updated = 0
 
     logger.info("=" * 60)
     logger.info("Starting NZ Cases Update Monitor")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
 
-    logger.info("[STEP 1] Initializing MongoDB connection...")
-    success, message = init_mongodb_connection(ENV_PATH)
-    if not success:
-        _log_critical_error_and_email(f"MongoDB connection failed: {message}", {
-                                      "step": "mongodb_connect"})
-        return
-    logger.info(f"[STEP 1.1] MongoDB: {message}")
+    try:
+        logger.info("[STEP 1] Initializing MongoDB connection...")
+        success, message = init_mongodb_connection(ENV_PATH)
+        if not success:
+            collect_error(
+                error_items,
+                f"MongoDB connection failed: {message}",
+                step="mongodb_connect",
+            )
+            return
+        logger.info(f"[STEP 1.1] MongoDB: {message}")
 
-    nz_collection = get_nz_cases_collection()
-    if nz_collection is None:
-        _log_critical_error_and_email("[STEP 1.2] nz_cases collection not available", {
-                                      "step": "get_collection"})
-        return
+        nz_collection = get_nz_cases_collection()
+        if nz_collection is None:
+            collect_error(
+                error_items,
+                "nz_cases collection not available",
+                step="get_collection",
+            )
+            return
 
-    # Step 1: nz_cases with status Open
-    cases = list(nz_collection.find({"status": "Open"}))
-    if not cases:
-        logger.warning("[STEP 1.3] No nz_cases with status=Open found.")
-        return
-    logger.info(f"[STEP 1.4] Found {len(cases)} nz_cases with status=Open")
+        cases = list(nz_collection.find({"status": "Open"}))
+        if not cases:
+            logger.warning("[STEP 1.3] No nz_cases with status=Open found.")
+            return
+        logger.info(f"[STEP 1.4] Found {len(cases)} nz_cases with status=Open")
 
-    # Step 2: deals for LLM matching
-    deals = get_open_deals_for_matching()
-    logger.info("Loaded %s deals for matching", len(deals))
+        try:
+            deals = get_open_deals_for_matching()
+        except Exception as e:
+            collect_error(
+                error_items,
+                f"Error fetching deals: {e}",
+                step="get_open_deals_for_matching",
+            )
+            deals = []
 
-    logger.info(f"[STEP 2] Found Open Cases: {cases}")
-    total_checked = 0
-    total_updated = 0
+        logger.info("Loaded %s deals for matching", len(deals))
+        logger.info(f"[STEP 2] Found Open Cases: {cases}")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
 
-        for idx, case_doc in enumerate(cases, 1):
-            detail_url = case_doc.get("detail_url")
-            title = case_doc.get("title", "N/A")
-            case_number = (case_doc.get("case_details")
-                           or {}).get("Case number", "")
-            if not detail_url:
-                logger.info("[STEP 2.1] [%s/%s] No detail_url, skipping: %s",
-                            idx, len(cases), title)
-                continue
+            try:
+                for idx, case_doc in enumerate(cases, 1):
+                    try:
+                        detail_url = case_doc.get("detail_url")
+                        title = case_doc.get("title", "N/A")
+                        case_number = (case_doc.get("case_details")
+                                       or {}).get("Case number", "")
+                        if not detail_url:
+                            logger.info("[STEP 2.1] [%s/%s] No detail_url, skipping: %s",
+                                        idx, len(cases), title)
+                            continue
 
-            total_checked += 1
-            logger.info("[STEP 2.2] [%s/%s] %s", idx,
-                        len(cases), title or case_number)
-            logger.info(f"[STEP 2.3] Detail URL: {detail_url}")
+                        total_checked += 1
+                        logger.info("[STEP 2.2] [%s/%s] %s", idx,
+                                    len(cases), title or case_number)
+                        logger.info(f"[STEP 2.3] Detail URL: {detail_url}")
 
-            current_info = fetch_case_detail_page(page, detail_url)
-            if not current_info:
-                logger.warning("[STEP 2.4] Could not fetch detail, skipping")
-                continue
+                        current_info = fetch_case_detail_page(page, detail_url)
+                        if not current_info:
+                            collect_error(
+                                error_items,
+                                "Could not fetch case detail page",
+                                step="fetch_case_detail_page",
+                                case_number=case_number or None,
+                                context={"detail_url": detail_url, "title": title},
+                            )
+                            continue
 
-            # Include list-level fields in current_info for comparison
-            # keep stored title unless we scrape list again
-            current_info["title"] = case_doc.get("title", "")
-            current_info["status"] = case_doc.get("status", "")
-            current_info["tag"] = case_doc.get("tag", "")
-            current_info["outcome"] = case_doc.get("outcome", "")
-            # We didn't re-scrape list; compare detail-level only. Override with scraped case_details for status/outcome if we had them from list.
-            # Use scraped case_details for Status, Outcome etc.
-            scraped_details = current_info.get("case_details") or {}
-            current_info["status"] = scraped_details.get(
-                "Status", case_doc.get("status", ""))
-            current_info["outcome"] = scraped_details.get(
-                "Outcome", case_doc.get("outcome", ""))
+                        current_info["title"] = case_doc.get("title", "")
+                        current_info["status"] = case_doc.get("status", "")
+                        current_info["tag"] = case_doc.get("tag", "")
+                        current_info["outcome"] = case_doc.get("outcome", "")
+                        scraped_details = current_info.get("case_details") or {}
+                        current_info["status"] = scraped_details.get(
+                            "Status", case_doc.get("status", ""))
+                        current_info["outcome"] = scraped_details.get(
+                            "Outcome", case_doc.get("outcome", ""))
 
-            logger.info(f"[STEP 2.5] case_doc: {case_doc}")
-            changes = detect_changes(case_doc, current_info)
-            logger.info(f"[STEP 2.6] changes: {changes}")
-            if not changes:
-                logger.info("[STEP 2.7] No changes detected")
-                continue
+                        logger.info(f"[STEP 2.5] case_doc: {case_doc}")
+                        changes = detect_changes(case_doc, current_info)
+                        logger.info(f"[STEP 2.6] changes: {changes}")
+                        if not changes:
+                            logger.info("[STEP 2.7] No changes detected")
+                            continue
 
-            logger.info(
-                f"[STEP 2.8] Changes detected ({len(changes)} item(s))")
-            for field_name, old_val, new_val, change_type in changes:
-                if field_name.startswith("Case details:"):
-                    logger.info(f"[STEP 2.9] {field_name} ({change_type})")
-                elif field_name.startswith("Timeline") and isinstance(new_val, list):
-                    if field_name == "Timeline (new)":
                         logger.info(
-                            f"[STEP 2.10] Timeline: {len(new_val)} new entry(ies)")
-                    elif field_name == "Timeline (updated)":
-                        logger.info(
-                            f"[STEP 2.11] Timeline: {len(new_val)} updated entry(ies)")
-                    else:
-                        logger.info("%s: %s entry(ies)",
-                                    field_name, len(new_val))
-                elif field_name.startswith("Documents") and isinstance(new_val, list):
-                    if field_name == "Documents (new)":
-                        logger.info(
-                            "Documents: %s new document(s)", len(new_val))
-                    elif field_name == "Documents (updated)":
-                        logger.info(
-                            "Documents: %s updated document(s)", len(new_val))
-                    else:
-                        logger.info("%s: %s document(s)",
-                                    field_name, len(new_val))
-                elif field_name.startswith("Updates/Media") and isinstance(new_val, list):
-                    if field_name == "Updates/Media (new)":
-                        logger.info(
-                            "Updates/Media: %s new entry(ies)", len(new_val))
-                    elif field_name == "Updates/Media (updated)":
-                        logger.info(
-                            "Updates/Media: %s updated entry(ies)", len(new_val))
-                    else:
-                        logger.info("%s: %s entry(ies)",
-                                    field_name, len(new_val))
-                else:
-                    logger.info("%s: %s", field_name, change_type)
+                            f"[STEP 2.8] Changes detected ({len(changes)} item(s))")
+                        for field_name, old_val, new_val, change_type in changes:
+                            if field_name.startswith("Case details:"):
+                                logger.info(f"[STEP 2.9] {field_name} ({change_type})")
+                            elif field_name.startswith("Timeline") and isinstance(new_val, list):
+                                if field_name == "Timeline (new)":
+                                    logger.info(
+                                        f"[STEP 2.10] Timeline: {len(new_val)} new entry(ies)")
+                                elif field_name == "Timeline (updated)":
+                                    logger.info(
+                                        f"[STEP 2.11] Timeline: {len(new_val)} updated entry(ies)")
+                                else:
+                                    logger.info("%s: %s entry(ies)",
+                                                field_name, len(new_val))
+                            elif field_name.startswith("Documents") and isinstance(new_val, list):
+                                if field_name == "Documents (new)":
+                                    logger.info(
+                                        "Documents: %s new document(s)", len(new_val))
+                                elif field_name == "Documents (updated)":
+                                    logger.info(
+                                        "Documents: %s updated document(s)", len(new_val))
+                                else:
+                                    logger.info("%s: %s document(s)",
+                                                field_name, len(new_val))
+                            elif field_name.startswith("Updates/Media") and isinstance(new_val, list):
+                                if field_name == "Updates/Media (new)":
+                                    logger.info(
+                                        "Updates/Media: %s new entry(ies)", len(new_val))
+                                elif field_name == "Updates/Media (updated)":
+                                    logger.info(
+                                        "Updates/Media: %s updated entry(ies)", len(new_val))
+                                else:
+                                    logger.info("%s: %s entry(ies)",
+                                                field_name, len(new_val))
+                            else:
+                                logger.info("%s: %s", field_name, change_type)
 
-            # Build updated case document (merge current into stored)
-            updated_case = dict(case_doc)
-            updated_case["title"] = case_doc.get(
-                "title", "")  # keep existing or from list
-            updated_case["detail_url"] = detail_url
-            updated_case["description"] = current_info.get(
-                "description", updated_case.get("description"))
-            updated_case["case_details"] = current_info.get(
-                "case_details") or updated_case.get("case_details")
-            updated_case["timeline"] = current_info.get("timeline", [])
-            updated_case["documents"] = current_info.get("documents", [])
-            updated_case["updates_media"] = current_info.get(
-                "updates_media", [])
-            # Status: keep list-level in sync with case_details.Status (detail page is source of truth)
-            detail_status = (updated_case.get("case_details")
-                             or {}).get("Status", "")
-            updated_case["status"] = (detail_status.strip() or current_info.get(
-                "status") or updated_case.get("status", ""))
-            updated_case["tag"] = current_info.get(
-                "tag", updated_case.get("tag"))
-            updated_case["outcome"] = current_info.get(
-                "outcome", updated_case.get("outcome"))
-            updated_case["case_number"] = (updated_case.get(
-                "case_details") or {}).get("Case number", "").strip()
+                        updated_case = dict(case_doc)
+                        updated_case["title"] = case_doc.get("title", "")
+                        updated_case["detail_url"] = detail_url
+                        updated_case["description"] = current_info.get(
+                            "description", updated_case.get("description"))
+                        updated_case["case_details"] = current_info.get(
+                            "case_details") or updated_case.get("case_details")
+                        updated_case["timeline"] = current_info.get("timeline", [])
+                        updated_case["documents"] = current_info.get("documents", [])
+                        updated_case["updates_media"] = current_info.get(
+                            "updates_media", [])
+                        detail_status = (updated_case.get("case_details")
+                                         or {}).get("Status", "")
+                        updated_case["status"] = (detail_status.strip() or current_info.get(
+                            "status") or updated_case.get("status", ""))
+                        updated_case["tag"] = current_info.get(
+                            "tag", updated_case.get("tag"))
+                        updated_case["outcome"] = current_info.get(
+                            "outcome", updated_case.get("outcome"))
+                        updated_case["case_number"] = (updated_case.get(
+                            "case_details") or {}).get("Case number", "").strip()
 
-            parties = (updated_case.get("case_details")
-                       or {}).get("Parties", "")
-            description = updated_case.get("description", "")
+                        parties = (updated_case.get("case_details")
+                                   or {}).get("Parties", "")
+                        description = updated_case.get("description", "")
 
-            # If already linked to a deal, skip LLM matching and email as matched.
-            existing_deal_id = case_doc.get("deal_id")
-            logger.info(f"[STEP 2.13] existing_deal_id: {existing_deal_id}")
-            if existing_deal_id:
-                deal = get_deal_by_id(str(existing_deal_id))
-                if deal:
-                    updated_case["deal_id"] = str(existing_deal_id)
-                    logger.info(f"[STEP 2.14] deal: {deal}")
-                    html_content = generate_nz_update_email_html(
-                        updated_case, deal, changes)
-                    logger.info(f"[STEP 2.15] html_content: {html_content}")
-                    send_nz_update_email_via_webhook(
-                        updated_case, deal, html_content, changes)
-                else:
-                    logger.warning(
-                        f"[STEP 2.16] Stored deal_id could not be resolved; falling back to LLM matching"
-                    )
-                    existing_deal_id = None
+                        existing_deal_id = case_doc.get("deal_id")
+                        logger.info(f"[STEP 2.13] existing_deal_id: {existing_deal_id}")
+                        if existing_deal_id:
+                            deal = get_deal_by_id(str(existing_deal_id))
+                            if deal:
+                                updated_case["deal_id"] = str(existing_deal_id)
+                                logger.info(f"[STEP 2.14] deal: {deal}")
+                                html_content = generate_nz_update_email_html(
+                                    updated_case, deal, changes)
+                                logger.info(f"[STEP 2.15] html_content: {html_content}")
+                                if not send_nz_update_email_via_webhook(
+                                    updated_case, deal, html_content, changes
+                                ):
+                                    collect_error(
+                                        error_items,
+                                        "Failed to send update email",
+                                        step="send_email",
+                                        case_number=case_number or None,
+                                        context={"detail_url": detail_url},
+                                    )
+                            else:
+                                logger.warning(
+                                    f"[STEP 2.16] Stored deal_id could not be resolved; falling back to LLM matching"
+                                )
+                                existing_deal_id = None
 
-            # LLM match only when not already linked to a resolvable deal
-            if not existing_deal_id:
-                deal_id = match_case_to_deal(
-                    title or "", parties, description or "", deals)
-                logger.info(f"[STEP 2.17] deal_id: {deal_id}")
+                        if not existing_deal_id:
+                            try:
+                                deal_id = match_case_to_deal(
+                                    title or "", parties, description or "", deals)
+                            except Exception as e:
+                                logger.exception(f"[STEP 2.17] LLM match error: {e}")
+                                collect_error(
+                                    error_items,
+                                    str(e),
+                                    step="match_case_to_deal",
+                                    case_number=case_number or None,
+                                    context={"detail_url": detail_url},
+                                )
+                                deal_id = None
 
-                if deal_id:
-                    deal = get_deal_by_id(deal_id)
-                    if deal:
-                        updated_case["deal_id"] = deal_id
-                        html_content = generate_nz_update_email_html(
-                            updated_case, deal, changes)
-                        logger.info(
-                            f"[STEP 2.18] html_content: {html_content}")
-                        send_nz_update_email_via_webhook(
-                            updated_case, deal, html_content, changes)
-                    else:
-                        # still store deal_id
-                        updated_case["deal_id"] = deal_id
-                else:
-                    # No match: check USA-related
-                    nz_details = {
-                        "title": title,
-                        "parties": parties,
-                        "description": description,
-                        "case_details": updated_case.get("case_details"),
-                    }
-                    is_usa = verify_usa_relation(
-                        company_details=nz_details, case_type="NZ")
-                    logger.info(f"[STEP 2.19] is_usa: {is_usa}")
-                    if is_usa:
-                        logger.info(
-                            f"[STEP 2.20] USA-related – sending email and updating")
-                        send_unmatched_nz_usa_email_via_webhook(
-                            updated_case, changes)
-                    else:
-                        logger.info(
-                            f"[STEP 2.21] Not USA-related – updating only")
+                            logger.info(f"[STEP 2.17] deal_id: {deal_id}")
 
-            if update_nz_case_document(nz_collection, case_doc["_id"], updated_case):
-                total_updated += 1
+                            if deal_id:
+                                deal = get_deal_by_id(deal_id)
+                                if deal:
+                                    updated_case["deal_id"] = deal_id
+                                    html_content = generate_nz_update_email_html(
+                                        updated_case, deal, changes)
+                                    logger.info(
+                                        f"[STEP 2.18] html_content: {html_content}")
+                                    if not send_nz_update_email_via_webhook(
+                                        updated_case, deal, html_content, changes
+                                    ):
+                                        collect_error(
+                                            error_items,
+                                            "Failed to send update email",
+                                            step="send_email",
+                                            case_number=case_number or None,
+                                            context={"detail_url": detail_url},
+                                        )
+                                else:
+                                    updated_case["deal_id"] = deal_id
+                            else:
+                                is_usa = False
+                                try:
+                                    nz_details = {
+                                        "title": title,
+                                        "parties": parties,
+                                        "description": description,
+                                        "case_details": updated_case.get("case_details"),
+                                    }
+                                    is_usa = bool(verify_usa_relation(
+                                        company_details=nz_details, case_type="NZ"))
+                                except Exception as e:
+                                    logger.exception(f"[STEP 2.19] USA check error: {e}")
+                                    collect_error(
+                                        error_items,
+                                        str(e),
+                                        step="verify_usa_relation",
+                                        case_number=case_number or None,
+                                        context={"detail_url": detail_url},
+                                    )
 
-        browser.close()
-        logger.info("Browser closed")
+                                logger.info(f"[STEP 2.19] is_usa: {is_usa}")
+                                if is_usa:
+                                    logger.info(
+                                        f"[STEP 2.20] USA-related – sending email and updating")
+                                    if not send_unmatched_nz_usa_email_via_webhook(
+                                        updated_case, changes
+                                    ):
+                                        collect_error(
+                                            error_items,
+                                            "Failed to send USA-related email",
+                                            step="send_email",
+                                            case_number=case_number or None,
+                                            context={"detail_url": detail_url},
+                                        )
+                                else:
+                                    logger.info(
+                                        f"[STEP 2.21] Not USA-related – updating only")
 
-    if error_items:
-        logger.warning(
-            f"[STEP 2.22] {len(error_items)} per-case errors collected — sending summary email")
-        send_error_email(
-            script_name=SCRIPT_NAME,
-            error_message=f"[STEP 2.23] {len(error_items)} errors occurred during run",
-            context={
-                "error_count": len(error_items),
-                "errors": error_items[:20],
-            },
-            traceback_str=None,
+                        if update_nz_case_document(nz_collection, case_doc["_id"], updated_case):
+                            total_updated += 1
+                        else:
+                            collect_error(
+                                error_items,
+                                "Failed to update case document",
+                                step="update_case",
+                                case_number=case_number or None,
+                                context={"detail_url": detail_url},
+                            )
+
+                    except Exception as e:
+                        logger.exception(f"Error processing case #{idx}: {e}")
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="process_case",
+                            context={
+                                "case_number": (case_doc.get("case_details") or {}).get("Case number"),
+                                "detail_url": case_doc.get("detail_url"),
+                            },
+                        )
+                        continue
+
+            finally:
+                browser.close()
+                logger.info("Browser closed")
+
+    except Exception as e:
+        logger.exception(f"Unhandled error in run(): {e}")
+        collect_error(
+            error_items,
+            f"Unhandled error in run(): {e}",
+            step="run_main",
         )
 
-    elapsed = round(time.time() - run_start, 1)
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("SUMMARY")
-    logger.info(f"[STEP 2.24] Total cases checked          : {total_checked}")
-    logger.info(f"[STEP 2.25] Cases updated                : {total_updated}")
-    logger.info(
-        f"[STEP 2.26] Errors encountered           : {len(error_items)}")
-    logger.info(f"[STEP 2.27] Total time                   : {elapsed}s")
-    logger.info("=" * 60)
+    finally:
+        send_error_summary(error_items, SCRIPT_NAME)
+
+        elapsed = round(time.time() - run_start, 1)
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("SUMMARY")
+        logger.info(f"[STEP 2.24] Total cases checked          : {total_checked}")
+        logger.info(f"[STEP 2.25] Cases updated                : {total_updated}")
+        logger.info(
+            f"[STEP 2.26] Errors encountered           : {len(error_items)}")
+        logger.info(f"[STEP 2.27] Total time                   : {elapsed}s")
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":
-    try:
-        run()
-    except Exception as e:
-        _log_critical_error_and_email(
-            f"Unhandled error in __main__: {e}", {"step": "__main__"})
-        raise
+    run()

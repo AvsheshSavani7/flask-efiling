@@ -6,7 +6,6 @@ import logging
 import re
 import base64
 import datetime
-import traceback
 from datetime import date, timezone, timedelta
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,7 +18,7 @@ from openai import OpenAI
 from playwright.sync_api import sync_playwright
 
 from llm_verification_service import verify_usa_relation
-from error_email_service import send_error_email
+from scraper_error_utils import collect_error, send_error_summary
 from mongodb_connection import (
     get_database,
     get_deals_collection,
@@ -122,17 +121,6 @@ if not logger.handlers:
 logger.propagate = False
 
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
-
-
-def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
-    """Immediate error email — use ONLY for critical startup / fatal failures."""
-    logger.error(msg)
-    send_error_email(
-        script_name=SCRIPT_NAME,
-        error_message=msg,
-        context=context,
-        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
-    )
 
 
 def utc_now_iso() -> str:
@@ -704,7 +692,11 @@ _EMPTY_AUTUACAO = {"process": "", "type": "",
 
 
 def extract_detail_page(
-    page, context, url: str, skip_certidao_transitada: bool = False,
+    page,
+    context,
+    url: str,
+    skip_certidao_transitada: bool = False,
+    error_items: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Open the detail page ONCE and extract everything:
@@ -927,27 +919,19 @@ def extract_detail_page(
                 f"The CADE SEI portal may be temporarily unavailable, slow to render, "
                 f"or its page structure may have changed."
             )
-            _log_critical_error_and_email(
-                explanation,
-                {
-                    "step": "extract_detail_page",
-                    "page_url": url,
-                    "attempts": str(max_retries),
-                    "last_error": str(e),
-                    "possible_causes": (
-                        "1) CADE SEI portal temporarily slow or under maintenance; "
-                        "2) CAPTCHA blocked page load; "
-                        "3) Page HTML structure changed; "
-                        "4) Network issue between server and CADE portal"
-                    ),
-                    "screenshot": screenshot_path or "capture failed",
-                },
-            )
-            return {
-                "autuacao": dict(_EMPTY_AUTUACAO),
-                "table_records": [],
-                "historico_records": [],
-            }
+            if error_items is not None:
+                collect_error(
+                    error_items,
+                    explanation,
+                    step="extract_detail_page",
+                    context={
+                        "url": url,
+                        "attempts": max_retries,
+                        "traceback": str(e),
+                        "screenshot": screenshot_path or "capture failed",
+                    },
+                )
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -1059,7 +1043,7 @@ RESPONSE FORMAT:
             return None
     except Exception as e:
         logger.exception(f"LLM deal match error: {e}")
-        return None
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -1201,290 +1185,333 @@ def run_cade_cases_register(
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
 
-    logger.info("[STEP 1] Initializing MongoDB connection...")
-    ok, msg = init_mongodb_connection(ENV_PATH)
-    if not ok:
-        _log_critical_error_and_email(f"MongoDB connection failed: {msg}", {
-            "step": "mongodb_connect"})
-        return
-    logger.info(f"[STEP 1.1] MongoDB: {msg}")
-
-    if not is_connected():
-        _log_critical_error_and_email("[STEP 1.2] MongoDB not connected after init", {
-            "step": "mongodb_connect"})
-        return
-
-    collection = get_brazil_cases_collection()
-    if collection is None:
-        _log_critical_error_and_email("[STEP 1.3] Could not access 'brazil_cases' collection", {
-            "step": "get_collection"})
-        return
-
-    logger.info("[STEP 1.4] brazil_cases collection ready")
-
-    # Default date range
-    if end_date is None:
-        end_date = datetime.datetime.now()
-    if start_date is None:
-        start_date = end_date - datetime.timedelta(days=2)
-
-    logger.info(
-        f"[STEP 1.5] Date range: {start_date.strftime('%Y-%m-%d')} → {end_date.strftime('%Y-%m-%d')}")
-
     new_cases: List[Dict[str, Any]] = []
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=headless,
-            args=[
-                "--start-maximized",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
-        context = browser.new_context(
-            viewport={"width": 1920, "height": 1080},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-        )
-        context.on("dialog", lambda dialog: dialog.accept())
-        page = context.new_page()
-
-        try:
-            logger.info(
-                f"[STEP 2] Searching {start_date.strftime('%Y-%m-%d')} → "
-                f"{end_date.strftime('%Y-%m-%d')} "
-                f"across {len(PROCESS_TYPES)} process types"
+    try:
+        logger.info("[STEP 1] Initializing MongoDB connection...")
+        ok, msg = init_mongodb_connection(ENV_PATH)
+        if not ok:
+            collect_error(
+                error_items,
+                f"MongoDB connection failed: {msg}",
+                step="mongodb_connect",
             )
+            return
+        logger.info(f"[STEP 1.1] MongoDB: {msg}")
 
-            # Run one search per process type, collect & deduplicate
-            all_results: List[Dict[str, Any]] = []
-            seen_urls: set = set()
+        if not is_connected():
+            collect_error(
+                error_items,
+                "MongoDB not connected after init",
+                step="mongodb_connect",
+            )
+            return
 
-            for type_name, type_id in PROCESS_TYPES.items():
+        collection = get_brazil_cases_collection()
+        if collection is None:
+            collect_error(
+                error_items,
+                "Could not access 'brazil_cases' collection",
+                step="get_collection",
+            )
+            return
+
+        logger.info("[STEP 1.4] brazil_cases collection ready")
+
+        if end_date is None:
+            end_date = datetime.datetime.now()
+        if start_date is None:
+            start_date = end_date - datetime.timedelta(days=2)
+
+        logger.info(
+            f"[STEP 1.5] Date range: {start_date.strftime('%Y-%m-%d')} → {end_date.strftime('%Y-%m-%d')}")
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=headless,
+                args=[
+                    "--start-maximized",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
+            context = browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            )
+            context.on("dialog", lambda dialog: dialog.accept())
+            page = context.new_page()
+
+            try:
                 logger.info(
-                    f"[STEP 2.1] Searching: {type_name} (id={type_id})")
-
-                page.goto(BASE__SCRAPER_URL, wait_until="domcontentloaded",
-                          timeout=50000)
-                time.sleep(3)
-
-                if not submit_search_form(page, start_date, end_date, process_type_id=type_id):
-                    logger.warning(
-                        f"[STEP 2.2] Failed to submit form for {type_name}")
-                    continue
-
-                type_results = collect_all_pages(page)
-                logger.info(
-                    f"[STEP 2.3] Found {len(type_results)} results for {type_name}")
-
-                added = 0
-                for r in type_results:
-                    url = r.get("detail_url", "")
-                    if url and url not in seen_urls:
-                        seen_urls.add(url)
-                        r["process_type_filter"] = type_name
-                        all_results.append(r)
-                        added += 1
-                logger.info(
-                    f"[STEP 2.4]  +{added} new (after dedup), {len(type_results) - added} duplicates skipped")
-
-            logger.info(
-                f"[STEP 2.5] Total collected (deduplicated): {len(all_results)} results")
-
-            # Step 3–7: Process each record
-            for idx, result in enumerate(all_results, 1):
-                detail_url = result.get("detail_url")
-                title = result.get("title", "N/A")
-
-                logger.info(
-                    f"[STEP 2.6] [{idx}/{len(all_results)}] {title[:80]}...")
-
-                if not detail_url:
-                    logger.warning("[STEP 2.7] No detail URL; skipping")
-                    continue
-
-                if not test_mode and case_exists_by_url(collection, detail_url):
-                    logger.info("[STEP 2.8] Already in brazil_cases; skipping")
-                    continue
-
-                # Single page visit: autuação + tblDocumentos + tblHistorico
-                detail = extract_detail_page(
-                    page, context, detail_url,
-                    skip_certidao_transitada=skip_certidao_transitada,
+                    f"[STEP 2] Searching {start_date.strftime('%Y-%m-%d')} → "
+                    f"{end_date.strftime('%Y-%m-%d')} "
+                    f"across {len(PROCESS_TYPES)} process types"
                 )
 
-                if detail is None:
-                    continue
+                all_results: List[Dict[str, Any]] = []
+                seen_urls: set = set()
 
-                autuacao = detail["autuacao"]
-                table_data = detail["table_records"]
-                historico_data = detail["historico_records"]
-
-                interessados_text = autuacao.get("interessados", "").strip()
-
-                translated = ""
-                if interessados_text:
-                    translated = translate_to_english(interessados_text)
+                for type_name, type_id in PROCESS_TYPES.items():
                     logger.info(
-                        f"[STEP 2.9] Translated: {translated[:150]}...")
+                        f"[STEP 2.1] Searching: {type_name} (id={type_id})")
 
-                type_en = ""
-                if autuacao.get("type"):
-                    type_en = translate_to_english(autuacao["type"])
+                    page.goto(BASE__SCRAPER_URL, wait_until="domcontentloaded",
+                              timeout=50000)
+                    time.sleep(3)
 
-                now_iso = utc_now_iso()
-                case_doc: Dict[str, Any] = {
-                    "process": autuacao.get("process", ""),
-                    "type": autuacao.get("type", ""),
-                    "type_en": type_en,
-                    "registration_date": autuacao.get("registration_date", ""),
-                    "interessados": interessados_text,
-                    "interessados_en": translated,
-                    "detail_url": detail_url,
-                    "is_open": True,
-                    "created_at": now_iso,
-                    "updated_at": now_iso,
-                }
+                    if not submit_search_form(page, start_date, end_date, process_type_id=type_id):
+                        collect_error(
+                            error_items,
+                            f"Failed to submit search form for {type_name}",
+                            step="submit_search_form",
+                            context={"process_type": type_name},
+                        )
+                        continue
 
-                # Translate table_records tipo_documento only
-                translated_table = []
-                for rec in table_data:
-                    tr = rec.copy()
-                    if "tipo_documento" in tr:
-                        doc_type = tr["tipo_documento"]
-                        if isinstance(doc_type, str) and doc_type.strip():
-                            tr["document_type"] = translate_to_english(
-                                doc_type)
-                            tr.pop("tipo_documento", None)
-                    translated_table.append(tr)
+                    type_results = collect_all_pages(page)
+                    logger.info(
+                        f"[STEP 2.3] Found {len(type_results)} results for {type_name}")
 
-                case_doc["table_records"] = translated_table
-                case_doc["historico_records"] = historico_data
+                    added = 0
+                    for r in type_results:
+                        url = r.get("detail_url", "")
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            r["process_type_filter"] = type_name
+                            all_results.append(r)
+                            added += 1
+                    logger.info(
+                        f"[STEP 2.4]  +{added} new (after dedup), {len(type_results) - added} duplicates skipped")
 
-                # LLM deal matching (after extraction so skipped records don't waste an API call)
-                matched_deal_id = None
-                if interessados_text:
+                logger.info(
+                    f"[STEP 2.5] Total collected (deduplicated): {len(all_results)} results")
+
+                for idx, result in enumerate(all_results, 1):
                     try:
-                        matched_deal_id = match_case_to_deal(
-                            interessados_text, translated)
+                        detail_url = result.get("detail_url")
+                        title = result.get("title", "N/A")
+
+                        logger.info(
+                            f"[STEP 2.6] [{idx}/{len(all_results)}] {title[:80]}...")
+
+                        if not detail_url:
+                            logger.warning("[STEP 2.7] No detail URL; skipping")
+                            continue
+
+                        if not test_mode and case_exists_by_url(collection, detail_url):
+                            logger.info("[STEP 2.8] Already in brazil_cases; skipping")
+                            continue
+
+                        detail = extract_detail_page(
+                            page,
+                            context,
+                            detail_url,
+                            skip_certidao_transitada=skip_certidao_transitada,
+                            error_items=error_items,
+                        )
+
+                        if detail is None:
+                            continue
+
+                        autuacao = detail["autuacao"]
+                        table_data = detail["table_records"]
+                        historico_data = detail["historico_records"]
+                        process_num = autuacao.get("process", "")
+
+                        interessados_text = autuacao.get("interessados", "").strip()
+
+                        translated = ""
+                        if interessados_text:
+                            translated = translate_to_english(interessados_text)
+                            logger.info(
+                                f"[STEP 2.9] Translated: {translated[:150]}...")
+
+                        type_en = ""
+                        if autuacao.get("type"):
+                            type_en = translate_to_english(autuacao["type"])
+
+                        now_iso = utc_now_iso()
+                        case_doc: Dict[str, Any] = {
+                            "process": process_num,
+                            "type": autuacao.get("type", ""),
+                            "type_en": type_en,
+                            "registration_date": autuacao.get("registration_date", ""),
+                            "interessados": interessados_text,
+                            "interessados_en": translated,
+                            "detail_url": detail_url,
+                            "is_open": True,
+                            "created_at": now_iso,
+                            "updated_at": now_iso,
+                        }
+
+                        translated_table = []
+                        for rec in table_data:
+                            tr = rec.copy()
+                            if "tipo_documento" in tr:
+                                doc_type = tr["tipo_documento"]
+                                if isinstance(doc_type, str) and doc_type.strip():
+                                    tr["document_type"] = translate_to_english(
+                                        doc_type)
+                                    tr.pop("tipo_documento", None)
+                            translated_table.append(tr)
+
+                        case_doc["table_records"] = translated_table
+                        case_doc["historico_records"] = historico_data
+
+                        matched_deal_id = None
+                        if interessados_text:
+                            try:
+                                matched_deal_id = match_case_to_deal(
+                                    interessados_text, translated)
+                            except Exception as e:
+                                logger.exception(
+                                    f"[STEP 2.10] Error during deal matching: {e}")
+                                collect_error(
+                                    error_items,
+                                    str(e),
+                                    step="match_case_to_deal",
+                                    context={
+                                        "detail_url": detail_url,
+                                        "process": process_num,
+                                    },
+                                )
+
+                        if matched_deal_id:
+                            logger.info(
+                                f"[STEP 2.11] Deal match found (deal_id={matched_deal_id})")
+                            case_doc["deal_id"] = matched_deal_id
+
+                            if not test_mode:
+                                if not send_matched_email(case_doc, matched_deal_id):
+                                    collect_error(
+                                        error_items,
+                                        "Failed to send matched-case email",
+                                        step="send_email",
+                                        context={
+                                            "detail_url": detail_url,
+                                            "process": process_num,
+                                        },
+                                    )
+                        else:
+                            is_usa = False
+                            if interessados_text:
+                                try:
+                                    company_details = (
+                                        f"Process: {autuacao.get('process', '')}\n"
+                                        f"Type: {autuacao.get('type', '')}\n"
+                                        f"Registration Date: {autuacao.get('registration_date', '')}\n"
+                                        f"Interested Parties (PT): {interessados_text}\n"
+                                        f"Interested Parties (EN): {translated}\n"
+                                        f"Detail URL: {detail_url}"
+                                    )
+                                    is_usa = bool(verify_usa_relation(
+                                        company_details=company_details,
+                                        case_type="BRAZIL",
+                                    ))
+                                except Exception as e:
+                                    logger.exception(
+                                        f"[STEP 2.12] Error verifying USA relation: {e}")
+                                    collect_error(
+                                        error_items,
+                                        str(e),
+                                        step="verify_usa_relation",
+                                        context={
+                                            "detail_url": detail_url,
+                                            "process": process_num,
+                                        },
+                                    )
+
+                            if is_usa:
+                                logger.info(
+                                    "[STEP 2.13] USA-related (unmatched) — sending email")
+                                if not test_mode:
+                                    if not send_usa_related_email(case_doc):
+                                        collect_error(
+                                            error_items,
+                                            "Failed to send USA-related email",
+                                            step="send_email",
+                                            context={
+                                                "detail_url": detail_url,
+                                                "process": process_num,
+                                            },
+                                        )
+                            else:
+                                logger.info(
+                                    "[STEP 2.14] No match, not USA-related — saving record only")
+
+                        inserted_id = insert_case(collection, case_doc)
+                        if inserted_id:
+                            logger.info(
+                                f"[STEP 2.15] Inserted into brazil_cases (id={inserted_id})")
+                            backup = dict(case_doc)
+                            backup.pop("_id", None)
+                            new_cases.append(backup)
+                        else:
+                            collect_error(
+                                error_items,
+                                "Insert failed",
+                                step="insert_case",
+                                context={
+                                    "detail_url": detail_url,
+                                    "process": process_num,
+                                },
+                            )
                     except Exception as e:
                         logger.exception(
-                            f"[STEP 2.10] Error during deal matching: {e}")
-                        error_items.append({
-                            "detail_url": detail_url,
-                            "error": str(e),
-                            "step": "match_case_to_deal",
-                        })
+                            f"Error processing list item #{idx}: {e}")
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="process_list_item",
+                            context={"detail_url": result.get("detail_url")},
+                        )
 
-                if matched_deal_id:
-                    logger.info(
-                        f"[STEP 2.11] Deal match found (deal_id={matched_deal_id})")
-                    case_doc["deal_id"] = matched_deal_id
+            finally:
+                browser.close()
+                logger.info("[STEP 2.18] Browser closed")
 
-                    if not test_mode:
-                        send_matched_email(case_doc, matched_deal_id)
-                else:
-                    is_usa = False
-                    if interessados_text:
-                        try:
-                            company_details = (
-                                f"Process: {autuacao.get('process', '')}\n"
-                                f"Type: {autuacao.get('type', '')}\n"
-                                f"Registration Date: {autuacao.get('registration_date', '')}\n"
-                                f"Interested Parties (PT): {interessados_text}\n"
-                                f"Interested Parties (EN): {translated}\n"
-                                f"Detail URL: {detail_url}"
-                            )
-                            is_usa = bool(verify_usa_relation(
-                                company_details=company_details,
-                                case_type="BRAZIL",
-                            ))
-                        except Exception as e:
-                            logger.exception(
-                                f"[STEP 2.12] Error verifying USA relation: {e}")
-                            error_items.append({
-                                "detail_url": detail_url,
-                                "error": str(e),
-                                "step": "verify_usa_relation",
-                            })
+        if new_cases:
+            try:
+                serializable = []
+                for c in new_cases:
+                    d = dict(c)
+                    d.pop("_id", None)
+                    serializable.append(d)
+                with open(BACKUP_JSON, "w", encoding="utf-8") as f:
+                    json.dump(serializable, f, indent=2,
+                              ensure_ascii=False, default=str)
+                logger.info(
+                    f"[STEP 2.19] Saved {len(serializable)} cases to {BACKUP_JSON}")
+            except Exception as e:
+                logger.warning(f"[STEP 2.20] Error writing backup JSON: {e}")
 
-                    if is_usa:
-                        logger.info(
-                            "[STEP 2.13] USA-related (unmatched) — sending email")
-                        if not test_mode:
-                            send_usa_related_email(case_doc)
-                    else:
-                        logger.info(
-                            "[STEP 2.14] No match, not USA-related — saving record only")
-
-                inserted_id = insert_case(collection, case_doc)
-                if inserted_id:
-                    logger.info(
-                        f"[STEP 2.15] Inserted into brazil_cases (id={inserted_id})")
-                    backup = dict(case_doc)
-                    backup.pop("_id", None)
-                    new_cases.append(backup)
-                else:
-                    logger.warning("[STEP 2.16] Insert failed")
-
-        except Exception as e:
-            _log_critical_error_and_email(
-                f"[STEP 2.17] Unhandled error in main execution: {e}",
-                {"step": "run_main"},
-            )
-        finally:
-            browser.close()
-            logger.info("[STEP 2.18] Browser closed")
-
-    # Backup JSON
-    if new_cases:
-        try:
-            serializable = []
-            for c in new_cases:
-                d = dict(c)
-                d.pop("_id", None)
-                serializable.append(d)
-            with open(BACKUP_JSON, "w", encoding="utf-8") as f:
-                json.dump(serializable, f, indent=2,
-                          ensure_ascii=False, default=str)
-            logger.info(
-                f"[STEP 2.19] Saved {len(serializable)} cases to {BACKUP_JSON}")
-        except Exception as e:
-            logger.warning(f"[STEP 2.20] Error writing backup JSON: {e}")
-
-    if error_items:
-        logger.warning(
-            f"[STEP 2.21] {len(error_items)} per-case errors collected — sending summary email")
-        send_error_email(
-            script_name=SCRIPT_NAME,
-            error_message=f"[STEP 2.22] {len(error_items)} errors occurred during run",
-            context={
-                "error_count": len(error_items),
-                "errors": error_items[:20],
-            },
-            traceback_str=None,
+    except Exception as e:
+        logger.exception(f"Unhandled error in run_cade_cases_register(): {e}")
+        collect_error(
+            error_items,
+            f"Unhandled error in run_cade_cases_register(): {e}",
+            step="run_main",
         )
 
-    elapsed = round(time.time() - run_start, 1)
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("SUMMARY")
-    logger.info(f"[STEP 2.23] New cases inserted           : {len(new_cases)}")
-    logger.info(
-        f"[STEP 2.24] Errors encountered           : {len(error_items)}")
-    logger.info(f"[STEP 2.25] Total time                   : {elapsed}s")
-    logger.info("=" * 60)
+    finally:
+        send_error_summary(error_items, SCRIPT_NAME)
+
+        elapsed = round(time.time() - run_start, 1)
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("SUMMARY")
+        logger.info(f"[STEP 2.23] New cases inserted           : {len(new_cases)}")
+        logger.info(
+            f"[STEP 2.24] Errors encountered           : {len(error_items)}")
+        logger.info(f"[STEP 2.25] Total time                   : {elapsed}s")
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":
-    try:
-        env_flag = os.getenv("CADE_CASES_TEST_MODE", "").lower()
-        test_mode_env = env_flag in ("1", "true", "yes", "y")
-        run_cade_cases_register(test_mode=False, skip_certidao_transitada=True)
-    except Exception as e:
-        _log_critical_error_and_email(
-            f"Unhandled error in __main__: {e}", {"step": "__main__"})
-        raise
+    env_flag = os.getenv("CADE_CASES_TEST_MODE", "").lower()
+    test_mode_env = env_flag in ("1", "true", "yes", "y")
+    run_cade_cases_register(test_mode=False, skip_certidao_transitada=True)

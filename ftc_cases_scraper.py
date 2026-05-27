@@ -14,7 +14,6 @@ import re
 import sys
 import logging
 import time
-import traceback
 from datetime import date, datetime, timezone, timedelta
 from html import escape as escape_html
 from logging.handlers import RotatingFileHandler
@@ -32,7 +31,7 @@ from mongodb_connection import (
     is_connected,
 )
 from llm_verification_service import verify_usa_relation
-from error_email_service import send_error_email
+from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
 
 load_dotenv(".env")
@@ -91,16 +90,6 @@ if not logger.handlers:
 logger.propagate = False
 
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
-
-
-def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
-    logger.error(msg)
-    send_error_email(
-        script_name=SCRIPT_NAME,
-        error_message=msg,
-        context=context,
-        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
-    )
 
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -419,8 +408,8 @@ RESPONSE FORMAT:
         except Exception:
             return None
     except Exception as e:
-        logger.warning(f"LLM match error: {e}")
-        return None
+        logger.exception(f"LLM match error: {e}")
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -609,19 +598,29 @@ def _process_ftc_case(
         try:
             matched_deal_id = match_case_to_deal(title)
         except Exception as e:
-            logger.warning(f"  Error during deal matching: {e}")
-            error_items.append({
-                "case_id": case_id,
-                "error": str(e),
-                "step": "match_case_to_deal",
-            })
+            logger.exception(f"  Error during deal matching: {e}")
+            collect_error(
+                error_items,
+                str(e),
+                step="match_case_to_deal",
+                context={"case_id": case_id},
+            )
             matched_deal_id = None
 
         if matched_deal_id:
             case_info["deal_id"] = matched_deal_id
             logger.info(
                 f"  Deal match found (deal_id={matched_deal_id}); sending email")
-            send_new_case_email(case_info, matched_deal_id)
+            if not send_new_case_email(case_info, matched_deal_id):
+                collect_error(
+                    error_items,
+                    "Failed to send new-case email",
+                    step="send_email",
+                    context={
+                        "case_id": case_id,
+                        "detail_url": case_info.get("detail_url"),
+                    },
+                )
         else:
             try:
                 case_details_str = prepare_case_payload_for_llm(case_info)
@@ -632,17 +631,27 @@ def _process_ftc_case(
                 )
             except Exception as e:
                 logger.exception(f"Error verifying USA relation: {e}")
-                error_items.append({
-                    "case_id": case_id,
-                    "error": str(e),
-                    "step": "verify_usa_relation",
-                })
+                collect_error(
+                    error_items,
+                    str(e),
+                    step="verify_usa_relation",
+                    context={"case_id": case_id},
+                )
                 is_usa = False
 
             if is_usa:
                 logger.info(
                     "  Case appears USA-related (unmatched); sending email")
-                send_unmatched_usa_related_email(case_info)
+                if not send_unmatched_usa_related_email(case_info):
+                    collect_error(
+                        error_items,
+                        "Failed to send USA-related email",
+                        step="send_email",
+                        context={
+                            "case_id": case_id,
+                            "detail_url": case_info.get("detail_url"),
+                        },
+                    )
 
     inserted_id = insert_case(collection, case_info)
     if inserted_id:
@@ -653,7 +662,12 @@ def _process_ftc_case(
         backup.pop("_id", None)
         return backup
 
-    logger.warning("  Insert failed")
+    collect_error(
+        error_items,
+        "Insert failed",
+        step="insert_case",
+        context={"case_id": case_id},
+    )
     return None
 
 
@@ -672,9 +686,11 @@ def run_ftc_cases_scraper(test_mode: bool = False):
     global LOG_FILE
     LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = time.time()
-    error_count = 0
     error_items: List[Dict[str, Any]] = []
     new_cases: List[Dict[str, Any]] = []
+    all_items: List[Dict[str, Any]] = []
+    unique_items: List[Dict[str, Any]] = []
+    filtered_items: List[Dict[str, Any]] = []
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"
 
     logger.info("=" * 60)
@@ -683,199 +699,204 @@ def run_ftc_cases_scraper(test_mode: bool = False):
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
 
-    # --- MongoDB ---
-    logger.info("[STEP 1.1] Initializing MongoDB connection...")
-    success, message = init_mongodb_connection(ENV_PATH)
-    if not success:
-        _log_critical_error_and_email(
-            f"MongoDB connection failed: {message}",
-            {"step": "mongodb_connect"},
-        )
-        return
-    logger.info(f"[STEP 1.2] {message}")
-
-    if not is_connected():
-        _log_critical_error_and_email(
-            "MongoDB not connected. Exiting.",
-            {"step": "mongodb_connect"},
-        )
-        return
-
-    collection = get_ftc_cases_collection()
-    if collection is None:
-        _log_critical_error_and_email(
-            "Could not access 'ftc_cases' collection. Exiting.",
-            {"step": "get_collection"},
-        )
-        return
-
-    # --- Collect list items ---
-    all_items: List[Dict[str, Any]] = []
-
-    if test_mode:
-        logger.info("[STEP 2] TEST MODE — paginating all pages")
-        page_num = 0
-        while True:
-            url = page_url(page_num)
-            logger.info(f"  Fetching page {page_num}: {url}")
-            html = fetch_list_page(url, attempt_label=f"[page={page_num}]")
-            if not html:
-                logger.error(
-                    f"  Failed to fetch page {page_num}; stopping pagination")
-                break
-            items = parse_list_items(html)
-            if not items:
-                logger.info(
-                    f"  Page {page_num} returned 0 items — end of list")
-                break
-            all_items.extend(items)
-            logger.info(
-                f"  Page {page_num}: {len(items)} items (total so far: {len(all_items)})"
+    try:
+        logger.info("[STEP 1.1] Initializing MongoDB connection...")
+        success, message = init_mongodb_connection(ENV_PATH)
+        if not success:
+            collect_error(
+                error_items,
+                f"MongoDB connection failed: {message}",
+                step="mongodb_connect",
             )
-            page_num += 1
-            time.sleep(2)
-    else:
-        logger.info("[STEP 2] LIVE MODE — fetching first page only")
-        html = fetch_list_page(page_url(0), attempt_label="[page=0]")
-        if not html:
-            logger.error("Failed to fetch first page; exiting")
             return
-        all_items = parse_list_items(html)
-        if not all_items:
-            logger.info("No items found on first page; nothing to process")
+        logger.info(f"[STEP 1.2] {message}")
+
+        if not is_connected():
+            collect_error(
+                error_items,
+                "MongoDB not connected. Exiting.",
+                step="mongodb_connect",
+            )
             return
 
-    logger.info(f"Total list items fetched: {len(all_items)}")
-
-    # --- Deduplicate by case_id ---
-    seen_ids: set = set()
-    unique_items: List[Dict[str, Any]] = []
-    for item in all_items:
-        cid = item.get("case_id")
-        if cid and cid not in seen_ids:
-            seen_ids.add(cid)
-            unique_items.append(item)
-
-    logger.info(f"Unique items after dedup: {len(unique_items)}")
-
-    # --- Filter by cutoff date (>= CUTOFF_DATE) ---
-    filtered_items: List[Dict[str, Any]] = []
-    for item in unique_items:
-        date_parsed = item.get("date_parsed")
-        if date_parsed is None:
-            filtered_items.append(item)
-            continue
-        try:
-            d = date_parsed.date() if hasattr(date_parsed, "date") else date_parsed
-            cutoff = CUTOFF_DATE.date() if hasattr(CUTOFF_DATE, "date") else CUTOFF_DATE
-            if d >= cutoff:
-                filtered_items.append(item)
-        except (AttributeError, TypeError):
-            filtered_items.append(item)
-
-    logger.info(
-        f"Items with date >= {CUTOFF_DATE.strftime('%Y-%m-%d')}: {len(filtered_items)}"
-    )
-
-    if not filtered_items:
-        logger.info("No records for current date window. Done.")
-        return
-
-    # --- Process each item ---
-    for idx, item in enumerate(filtered_items, 1):
-        try:
-            case_id = item.get("case_id", "")
-            title = item.get("title", "")
-
-            logger.info(
-                f"[{idx}/{len(filtered_items)}] Case {case_id}: {title}")
-
-            if not case_id:
-                logger.warning("  Missing case_id; skipping")
-                continue
-
-            if ftc_case_exists(collection, case_id):
-                logger.info(
-                    f"  Case already in DB (case_id={case_id}); skipping")
-                continue
-
-            now_iso = utc_now_iso()
-            case_info: Dict[str, Any] = {
-                "case_id": case_id,
-                "title": item.get("title", ""),
-                "parties_text": item.get("parties_text", ""),
-                "date": notice_datetime_for_mongo(item.get("date_parsed")),
-                "acquiring_party": item.get("acquiring_party", ""),
-                "acquired_party": item.get("acquired_party", ""),
-                "acquired_entities": item.get("acquired_entities", []),
-                "detail_url": item.get("detail_url", ""),
-                "created_at": now_iso,
-                "updated_at": now_iso,
-            }
-
-            backup = _process_ftc_case(
-                collection=collection,
-                case_info=case_info,
-                error_items=error_items,
-                test_mode=test_mode,
+        collection = get_ftc_cases_collection()
+        if collection is None:
+            collect_error(
+                error_items,
+                "Could not access 'ftc_cases' collection. Exiting.",
+                step="get_collection",
             )
-            if backup:
-                new_cases.append(backup)
+            return
 
-        except Exception as e:
-            logger.exception(f"Error processing item #{idx}: {e}")
-            error_items.append({
-                "case_id": item.get("case_id", "N/A"),
-                "error": str(e),
-                "step": "process_list_item",
-            })
-            error_count += 1
-            continue
-
-    # --- Backup JSON ---
-    if new_cases:
-        try:
-            serializable: List[Dict[str, Any]] = []
-            for c in new_cases:
-                d = dict(c)
-                if "_id" in d:
-                    d["_id"] = str(d["_id"])
-                serializable.append(d)
-
-            with open(BACKUP_JSON, "w", encoding="utf-8") as f:
-                json.dump(
-                    serializable,
-                    f,
-                    indent=2,
-                    ensure_ascii=False,
-                    default=str,
+        if test_mode:
+            logger.info("[STEP 2] TEST MODE — paginating all pages")
+            page_num = 0
+            while True:
+                url = page_url(page_num)
+                logger.info(f"  Fetching page {page_num}: {url}")
+                html = fetch_list_page(url, attempt_label=f"[page={page_num}]")
+                if not html:
+                    collect_error(
+                        error_items,
+                        f"Failed to fetch FTC list page {page_num}",
+                        step="fetch_list_page",
+                        context={"url": url, "page": page_num},
+                    )
+                    break
+                items = parse_list_items(html)
+                if not items:
+                    logger.info(
+                        f"  Page {page_num} returned 0 items — end of list")
+                    break
+                all_items.extend(items)
+                logger.info(
+                    f"  Page {page_num}: {len(items)} items (total so far: {len(all_items)})"
                 )
-            logger.info(
-                f"Saved {len(serializable)} new cases to backup JSON: {BACKUP_JSON}")
-        except Exception as e:
-            logger.warning(f"Error writing backup JSON: {e}")
+                page_num += 1
+                time.sleep(2)
+        else:
+            logger.info("[STEP 2] LIVE MODE — fetching first page only")
+            list_url = page_url(0)
+            html = fetch_list_page(list_url, attempt_label="[page=0]")
+            if not html:
+                collect_error(
+                    error_items,
+                    "Failed to fetch first FTC list page",
+                    step="fetch_list_page",
+                    context={"url": list_url},
+                )
+                return
+            all_items = parse_list_items(html)
+            if not all_items:
+                logger.info("No items found on first page; nothing to process")
+                return
 
-    # --- Error summary email ---
-    if error_items:
-        error_count = len(error_items)
-        send_error_email(
-            script_name=SCRIPT_NAME,
-            error_message=f"{error_count} errors occurred during run",
-            context={"error_count": error_count, "errors": error_items[:20]},
-            traceback_str=None,
+        logger.info(f"Total list items fetched: {len(all_items)}")
+
+        seen_ids: set = set()
+        for item in all_items:
+            cid = item.get("case_id")
+            if cid and cid not in seen_ids:
+                seen_ids.add(cid)
+                unique_items.append(item)
+
+        logger.info(f"Unique items after dedup: {len(unique_items)}")
+
+        for item in unique_items:
+            date_parsed = item.get("date_parsed")
+            if date_parsed is None:
+                filtered_items.append(item)
+                continue
+            try:
+                d = date_parsed.date() if hasattr(date_parsed, "date") else date_parsed
+                cutoff = CUTOFF_DATE.date() if hasattr(CUTOFF_DATE, "date") else CUTOFF_DATE
+                if d >= cutoff:
+                    filtered_items.append(item)
+            except (AttributeError, TypeError):
+                filtered_items.append(item)
+
+        logger.info(
+            f"Items with date >= {CUTOFF_DATE.strftime('%Y-%m-%d')}: {len(filtered_items)}"
         )
 
-    elapsed = round(time.time() - run_start, 1)
-    logger.info("=" * 60)
-    logger.info("SUMMARY")
-    logger.info(f"Total items from list      : {len(all_items)}")
-    logger.info(f"Unique items               : {len(unique_items)}")
-    logger.info(f"Items in date window       : {len(filtered_items)}")
-    logger.info(f"New cases inserted         : {len(new_cases)}")
-    logger.info(f"Errors encountered         : {error_count}")
-    logger.info(f"Total time                 : {elapsed}s")
-    logger.info("=" * 60)
-    logger.info("FTC Cases Scraper finished")
+        if not filtered_items:
+            logger.info("No records for current date window. Done.")
+            return
+
+        for idx, item in enumerate(filtered_items, 1):
+            try:
+                case_id = item.get("case_id", "")
+                title = item.get("title", "")
+
+                logger.info(
+                    f"[{idx}/{len(filtered_items)}] Case {case_id}: {title}")
+
+                if not case_id:
+                    logger.warning("  Missing case_id; skipping")
+                    continue
+
+                if ftc_case_exists(collection, case_id):
+                    logger.info(
+                        f"  Case already in DB (case_id={case_id}); skipping")
+                    continue
+
+                now_iso = utc_now_iso()
+                case_info: Dict[str, Any] = {
+                    "case_id": case_id,
+                    "title": item.get("title", ""),
+                    "parties_text": item.get("parties_text", ""),
+                    "date": notice_datetime_for_mongo(item.get("date_parsed")),
+                    "acquiring_party": item.get("acquiring_party", ""),
+                    "acquired_party": item.get("acquired_party", ""),
+                    "acquired_entities": item.get("acquired_entities", []),
+                    "detail_url": item.get("detail_url", ""),
+                    "created_at": now_iso,
+                    "updated_at": now_iso,
+                }
+
+                backup = _process_ftc_case(
+                    collection=collection,
+                    case_info=case_info,
+                    error_items=error_items,
+                    test_mode=test_mode,
+                )
+                if backup:
+                    new_cases.append(backup)
+
+            except Exception as e:
+                logger.exception(f"Error processing item #{idx}: {e}")
+                collect_error(
+                    error_items,
+                    str(e),
+                    step="process_list_item",
+                    context={"case_id": item.get("case_id", "N/A")},
+                )
+                continue
+
+        if new_cases:
+            try:
+                serializable: List[Dict[str, Any]] = []
+                for c in new_cases:
+                    d = dict(c)
+                    if "_id" in d:
+                        d["_id"] = str(d["_id"])
+                    serializable.append(d)
+
+                with open(BACKUP_JSON, "w", encoding="utf-8") as f:
+                    json.dump(
+                        serializable,
+                        f,
+                        indent=2,
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                logger.info(
+                    f"Saved {len(serializable)} new cases to backup JSON: {BACKUP_JSON}")
+            except Exception as e:
+                logger.warning(f"Error writing backup JSON: {e}")
+
+    except Exception as e:
+        logger.exception(f"Unhandled error in run_ftc_cases_scraper(): {e}")
+        collect_error(
+            error_items,
+            f"Unhandled error in run_ftc_cases_scraper(): {e}",
+            step="run_main",
+        )
+
+    finally:
+        send_error_summary(error_items, SCRIPT_NAME)
+
+        elapsed = round(time.time() - run_start, 1)
+        logger.info("=" * 60)
+        logger.info("SUMMARY")
+        logger.info(f"Total items from list      : {len(all_items)}")
+        logger.info(f"Unique items               : {len(unique_items)}")
+        logger.info(f"Items in date window       : {len(filtered_items)}")
+        logger.info(f"New cases inserted         : {len(new_cases)}")
+        logger.info(f"Errors encountered         : {len(error_items)}")
+        logger.info(f"Total time                 : {elapsed}s")
+        logger.info("=" * 60)
+        logger.info("FTC Cases Scraper finished")
 
 
 if __name__ == "__main__":

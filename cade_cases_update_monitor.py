@@ -6,7 +6,6 @@ import logging
 import re
 import base64
 import datetime
-import traceback
 from datetime import timezone, timedelta
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Tuple
@@ -20,7 +19,7 @@ from openai import OpenAI
 from playwright.sync_api import sync_playwright
 
 from llm_verification_service import verify_usa_relation
-from error_email_service import send_error_email
+from scraper_error_utils import collect_error, send_error_summary
 from mongodb_connection import (
     get_database,
     get_deals_collection,
@@ -109,17 +108,6 @@ if not logger.handlers:
 logger.propagate = False
 
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
-
-
-def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
-    """Immediate error email — use ONLY for critical startup / fatal failures."""
-    logger.error(msg)
-    send_error_email(
-        script_name=SCRIPT_NAME,
-        error_message=msg,
-        context=context,
-        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
-    )
 
 
 def utc_now_iso() -> str:
@@ -372,7 +360,13 @@ def handle_image_captcha_if_present(page) -> bool:
 # Detail page extraction (standalone copies)
 # ---------------------------------------------------------------------------
 
-def extract_autuacao_info(page, context, url: str, max_retries: int = 2) -> Dict[str, str]:
+def extract_autuacao_info(
+    page,
+    context,
+    url: str,
+    max_retries: int = 2,
+    error_items: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, str]:
     """Open detail page and extract Autuação info. Retries on timeout."""
     empty_result = {"process": "", "type": "",
                     "registration_date": "", "interessados": ""}
@@ -471,26 +465,28 @@ def extract_autuacao_info(page, context, url: str, max_retries: int = 2) -> Dict
                 f"The CADE SEI portal may be temporarily unavailable, slow to render, "
                 f"or its page structure may have changed."
             )
-            _log_critical_error_and_email(
-                explanation,
-                {
-                    "step": "extract_autuacao_info",
-                    "page_url": url,
-                    "attempts": str(max_retries),
-                    "last_error": str(e),
-                    "possible_causes": (
-                        "1) CADE SEI portal temporarily slow or under maintenance; "
-                        "2) CAPTCHA blocked page load; "
-                        "3) Page HTML structure changed; "
-                        "4) Network issue between server and CADE portal"
-                    ),
-                    "screenshot": screenshot_path or "capture failed",
-                },
-            )
+            if error_items is not None:
+                collect_error(
+                    error_items,
+                    explanation,
+                    step="extract_autuacao_info",
+                    context={
+                        "url": url,
+                        "attempts": max_retries,
+                        "traceback": str(e),
+                        "screenshot": screenshot_path or "capture failed",
+                    },
+                )
             return empty_result
 
 
-def extract_tables(page, context, url: str, max_retries: int = 2) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def extract_tables(
+    page,
+    context,
+    url: str,
+    max_retries: int = 2,
+    error_items: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Extract tblDocumentos + tblHistorico from detail page in one visit. Retries on timeout."""
 
     for attempt in range(1, max_retries + 1):
@@ -616,22 +612,18 @@ def extract_tables(page, context, url: str, max_retries: int = 2) -> Tuple[List[
                 f"The CADE SEI portal may be temporarily unavailable, slow to render, "
                 f"or its page structure may have changed."
             )
-            _log_critical_error_and_email(
-                explanation,
-                {
-                    "step": "extract_tables",
-                    "page_url": url,
-                    "attempts": str(max_retries),
-                    "last_error": str(e),
-                    "possible_causes": (
-                        "1) CADE SEI portal temporarily slow or under maintenance; "
-                        "2) CAPTCHA blocked page load; "
-                        "3) Page HTML structure changed; "
-                        "4) Network issue between server and CADE portal"
-                    ),
-                    "screenshot": screenshot_path or "capture failed",
-                },
-            )
+            if error_items is not None:
+                collect_error(
+                    error_items,
+                    explanation,
+                    step="extract_tables",
+                    context={
+                        "url": url,
+                        "attempts": max_retries,
+                        "traceback": str(e),
+                        "screenshot": screenshot_path or "capture failed",
+                    },
+                )
             return [], []
 
 
@@ -992,285 +984,349 @@ def process_brazil_cases_updates(headless: bool = True):
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
 
-    logger.info("[STEP 1] Initializing MongoDB connection...")
-    ok, msg = init_mongodb_connection(ENV_PATH)
-    if not ok:
-        _log_critical_error_and_email(f"MongoDB connection failed: {msg}", {
-            "step": "mongodb_connect"})
-        return
-    logger.info(f"[STEP 1.1] MongoDB: {msg}")
-
-    if not is_connected():
-        _log_critical_error_and_email("[STEP 1.2] MongoDB not connected after init", {
-            "step": "mongodb_connect"})
-        return
-
-    cases_collection = get_brazil_cases_collection()
-    if cases_collection is None:
-        _log_critical_error_and_email("[STEP 1.3] Could not access 'brazil_cases' collection", {
-            "step": "get_collection"})
-        return
-
-    logger.info("[STEP 1.4] brazil_cases collection ready")
-
-    deals_collection = get_deals_collection()
-    deals_status_filter = {
-        "$or": [
-            {"deal_status": {"$in": ["Open", "Unknown"]}},
-            {"deal_status": None},
-            {"deal_status": {"$exists": False}},
-        ]
-    }
-
-    # Step 1: fetch open records from brazil_cases
-    cases = list(cases_collection.find({"is_open": True}))
-    if not cases:
-        logger.info("[STEP 1.5] No open records in brazil_cases. Exiting.")
-        return
-
-    logger.info(f"[STEP 1.6] Found {len(cases)} open records in brazil_cases")
-
     total_checked = 0
     total_changed = 0
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=headless,
-            args=[
-                "--start-maximized",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
-        context = browser.new_context(
-            viewport={"width": 1920, "height": 1080},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-        )
-        context.on("dialog", lambda dialog: dialog.accept())
-        page = context.new_page()
+    try:
+        logger.info("[STEP 1] Initializing MongoDB connection...")
+        ok, msg = init_mongodb_connection(ENV_PATH)
+        if not ok:
+            collect_error(
+                error_items,
+                f"MongoDB connection failed: {msg}",
+                step="mongodb_connect",
+            )
+            return
+        logger.info(f"[STEP 1.1] MongoDB: {msg}")
 
-        try:
-            for idx, case_doc in enumerate(cases, 1):
-                logger.info(
-                    f"[STEP 2] Checking case: {case_doc.get('process', 'N/A')}")
-                logger.info(
-                    f"[STEP 2.1] Detail URL: {case_doc.get('detail_url', 'N/A')}")
-                logger.info(f"[STEP 2.2]  type: {case_doc.get('type', 'N/A')}")
-                logger.info(
-                    f"[STEP 2.3]  interessados: {case_doc.get('interessados', 'N/A')}")
+        if not is_connected():
+            collect_error(
+                error_items,
+                "MongoDB not connected after init",
+                step="mongodb_connect",
+            )
+            return
 
-                total_checked += 1
-                process_num = case_doc.get("process", "N/A")
-                detail_url = case_doc.get("detail_url")
+        cases_collection = get_brazil_cases_collection()
+        if cases_collection is None:
+            collect_error(
+                error_items,
+                "Could not access 'brazil_cases' collection",
+                step="get_collection",
+            )
+            return
 
-                logger.info(
-                    f"[STEP 2.4] [{idx}/{len(cases)}] Process {process_num}")
+        logger.info("[STEP 1.4] brazil_cases collection ready")
 
-                if not detail_url:
-                    logger.warning("[STEP 2.5] No detail_url; skipping")
-                    continue
+        deals_collection = get_deals_collection()
+        deals_status_filter = {
+            "$or": [
+                {"deal_status": {"$in": ["Open", "Unknown"]}},
+                {"deal_status": None},
+                {"deal_status": {"$exists": False}},
+            ]
+        }
 
-                # Step 3: extract fresh data from live page
-                autuacao = extract_autuacao_info(page, context, detail_url)
-                live_type = autuacao.get("type", "")
-                live_interessados = autuacao.get("interessados", "")
+        cases = list(cases_collection.find({"is_open": True}))
+        if not cases:
+            logger.info("[STEP 1.5] No open records in brazil_cases. Exiting.")
+            return
 
-                live_table, live_historico = extract_tables(
-                    page, context, detail_url)
-                logger.info(f"[STEP 2.6] Live: type={live_type[:50]}..., "
-                            f"table_records={len(live_table)}, historico={len(live_historico)}")
+        logger.info(f"[STEP 1.6] Found {len(cases)} open records in brazil_cases")
 
-                if live_detail_scrape_looks_incomplete(
-                    case_doc,
-                    live_type,
-                    live_interessados,
-                    live_table,
-                    live_historico,
-                ):
-                    logger.warning(
-                        "[STEP 2.6b] Live scrape looks incomplete (empty tables vs stored "
-                        "expectations); skipping updates and notifications — retry next run"
-                    )
-                    continue
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=headless,
+                args=[
+                    "--start-maximized",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
+            context = browser.new_context(
+                viewport={"width": 1920, "height": 1080},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            )
+            context.on("dialog", lambda dialog: dialog.accept())
+            page = context.new_page()
 
-                should_close = any(
-                    rec.get("tipo_documento", "").strip(
-                    ) == "Certidão de Trânsito em Julgado"
-                    for rec in live_table
-                )
-                if should_close:
-                    logger.info(
-                        "[STEP 2.7] 'Certidão de Trânsito em Julgado' found — will set is_open=False")
-
-                # Step 4: detect changes
-                changes = detect_changes(
-                    case_doc, live_type, live_interessados, live_table, live_historico,
-                )
-
-                if not changes and not should_close:
-                    logger.info("[STEP 2.8] No changes detected")
-                    continue
-
-                if not changes and should_close:
-                    logger.info(
-                        "[STEP 2.9] No field changes but closing case (is_open → False)")
-                    update_case_in_db(
-                        cases_collection, case_doc, changes,
-                        live_table, live_historico,
-                        close_case=True,
-                    )
-                    continue
-
-                total_changed += 1
-                logger.info(f"[STEP 2.10] {len(changes)} change(s) detected:")
-                for field, old_val, new_val, ctype in changes:
-                    if ctype == "new_items":
-                        logger.info(
-                            f"[STEP 2.11]    {field}: {len(new_val)} new item(s)")
-                    else:
-                        logger.info(
-                            f"[STEP 2.12]    {field}: {old_val} → {new_val} ({ctype})")
-
-                # Step 5: branch on deal_id
-                deal = None
-                deal_id = case_doc.get("deal_id")
-
-                if deal_id and deals_collection is not None:
-                    # Has deal_id → resolve deal, send email, update DB
+            try:
+                for idx, case_doc in enumerate(cases, 1):
                     try:
-                        deal = deals_collection.find_one(
-                            {"_id": ObjectId(deal_id), **deals_status_filter}
-                        )
-                    except Exception as e:
-                        logger.exception(f"[STEP 2.13] Invalid deal_id: {e}")
-                        error_items.append(
-                            {"process": process_num, "error": str(e), "step": "resolve_deal"})
+                        logger.info(
+                            f"[STEP 2] Checking case: {case_doc.get('process', 'N/A')}")
+                        logger.info(
+                            f"[STEP 2.1] Detail URL: {case_doc.get('detail_url', 'N/A')}")
+                        logger.info(f"[STEP 2.2]  type: {case_doc.get('type', 'N/A')}")
+                        logger.info(
+                            f"[STEP 2.3]  interessados: {case_doc.get('interessados', 'N/A')}")
 
-                    if deal:
-                        logger.info("[STEP 2.14] Deal linked — sending email")
-                        send_update_email(case_doc, changes, deal)
-                        update_case_in_db(
-                            cases_collection, case_doc, changes,
-                            live_table, live_historico,
-                            close_case=should_close,
+                        total_checked += 1
+                        process_num = case_doc.get("process", "N/A")
+                        detail_url = case_doc.get("detail_url")
+
+                        logger.info(
+                            f"[STEP 2.4] [{idx}/{len(cases)}] Process {process_num}")
+
+                        if not detail_url:
+                            logger.warning("[STEP 2.5] No detail_url; skipping")
+                            continue
+
+                        autuacao = extract_autuacao_info(
+                            page, context, detail_url, error_items=error_items)
+                        live_type = autuacao.get("type", "")
+                        live_interessados = autuacao.get("interessados", "")
+
+                        live_table, live_historico = extract_tables(
+                            page, context, detail_url, error_items=error_items)
+                        logger.info(f"[STEP 2.6] Live: type={live_type[:50]}..., "
+                                    f"table_records={len(live_table)}, historico={len(live_historico)}")
+
+                        if live_detail_scrape_looks_incomplete(
+                            case_doc,
+                            live_type,
+                            live_interessados,
+                            live_table,
+                            live_historico,
+                        ):
+                            logger.warning(
+                                "[STEP 2.6b] Live scrape looks incomplete (empty tables vs stored "
+                                "expectations); skipping updates and notifications — retry next run"
+                            )
+                            continue
+
+                        should_close = any(
+                            rec.get("tipo_documento", "").strip(
+                            ) == "Certidão de Trânsito em Julgado"
+                            for rec in live_table
+                        )
+                        if should_close:
+                            logger.info(
+                                "[STEP 2.7] 'Certidão de Trânsito em Julgado' found — will set is_open=False")
+
+                        changes = detect_changes(
+                            case_doc, live_type, live_interessados, live_table, live_historico,
+                        )
+
+                        if not changes and not should_close:
+                            logger.info("[STEP 2.8] No changes detected")
+                            continue
+
+                        if not changes and should_close:
+                            logger.info(
+                                "[STEP 2.9] No field changes but closing case (is_open → False)")
+                            if not update_case_in_db(
+                                cases_collection, case_doc, changes,
+                                live_table, live_historico,
+                                close_case=True,
+                            ):
+                                collect_error(
+                                    error_items,
+                                    "Failed to update case document",
+                                    step="update_case",
+                                    context={"process": process_num, "detail_url": detail_url},
+                                )
+                            continue
+
+                        total_changed += 1
+                        logger.info(f"[STEP 2.10] {len(changes)} change(s) detected:")
+                        for field, old_val, new_val, ctype in changes:
+                            if ctype == "new_items":
+                                logger.info(
+                                    f"[STEP 2.11]    {field}: {len(new_val)} new item(s)")
+                            else:
+                                logger.info(
+                                    f"[STEP 2.12]    {field}: {old_val} → {new_val} ({ctype})")
+
+                        deal = None
+                        deal_id = case_doc.get("deal_id")
+
+                        if deal_id and deals_collection is not None:
+                            try:
+                                deal = deals_collection.find_one(
+                                    {"_id": ObjectId(deal_id), **deals_status_filter}
+                                )
+                            except Exception as e:
+                                logger.exception(f"[STEP 2.13] Invalid deal_id: {e}")
+                                collect_error(
+                                    error_items,
+                                    str(e),
+                                    step="resolve_deal",
+                                    context={"process": process_num},
+                                )
+
+                            if deal:
+                                logger.info("[STEP 2.14] Deal linked — sending email")
+                                if not send_update_email(case_doc, changes, deal):
+                                    collect_error(
+                                        error_items,
+                                        "Failed to send update email",
+                                        step="send_email",
+                                        context={"process": process_num, "detail_url": detail_url},
+                                    )
+                                if not update_case_in_db(
+                                    cases_collection, case_doc, changes,
+                                    live_table, live_historico,
+                                    close_case=should_close,
+                                ):
+                                    collect_error(
+                                        error_items,
+                                        "Failed to update case document",
+                                        step="update_case",
+                                        context={"process": process_num, "detail_url": detail_url},
+                                    )
+                                continue
+
+                        interessados_text = case_doc.get(
+                            "interessados") or live_interessados
+                        translated_text = case_doc.get(
+                            "interessados_en") or translate_to_english(interessados_text) if interessados_text else ""
+
+                        matched_deal_id = None
+                        if interessados_text:
+                            try:
+                                matched_deal_id = match_case_to_deal(
+                                    interessados_text, translated_text)
+                            except Exception as e:
+                                logger.exception(
+                                    f"[STEP 2.15] Error during deal matching: {e}")
+                                collect_error(
+                                    error_items,
+                                    str(e),
+                                    step="match_case_to_deal",
+                                    context={"process": process_num, "detail_url": detail_url},
+                                )
+
+                        if matched_deal_id:
+                            logger.info(
+                                f"[STEP 2.16] Deal match found (deal_id={matched_deal_id})")
+                            matched_deal = None
+                            if deals_collection is not None:
+                                try:
+                                    matched_deal = deals_collection.find_one(
+                                        {"_id": ObjectId(matched_deal_id)}
+                                    )
+                                except Exception as e:
+                                    logger.exception(
+                                        f"[STEP 2.17] Error resolving matched deal: {e}")
+                                    collect_error(
+                                        error_items,
+                                        str(e),
+                                        step="resolve_matched_deal",
+                                        context={"process": process_num},
+                                    )
+
+                            if not send_update_email(case_doc, changes, matched_deal):
+                                collect_error(
+                                    error_items,
+                                    "Failed to send update email",
+                                    step="send_email",
+                                    context={"process": process_num, "detail_url": detail_url},
+                                )
+                            if not update_case_in_db(
+                                cases_collection, case_doc, changes,
+                                live_table, live_historico,
+                                close_case=should_close,
+                                new_deal_id=matched_deal_id,
+                            ):
+                                collect_error(
+                                    error_items,
+                                    "Failed to update case document",
+                                    step="update_case",
+                                    context={"process": process_num, "detail_url": detail_url},
+                                )
+                        else:
+                            is_usa = False
+                            if interessados_text:
+                                try:
+                                    company_details = (
+                                        f"Process: {process_num}\n"
+                                        f"Type: {live_type}\n"
+                                        f"Registration Date: {case_doc.get('registration_date', '')}\n"
+                                        f"Interested Parties (PT): {interessados_text}\n"
+                                        f"Interested Parties (EN): {case_doc.get('interessados_en', '')}\n"
+                                        f"Detail URL: {detail_url}"
+                                    )
+                                    is_usa = bool(verify_usa_relation(
+                                        company_details=company_details,
+                                        case_type="BRAZIL",
+                                    ))
+                                except Exception as e:
+                                    logger.exception(
+                                        f"[STEP 2.18] Error verifying USA relation: {e}")
+                                    collect_error(
+                                        error_items,
+                                        str(e),
+                                        step="verify_usa_relation",
+                                        context={"process": process_num, "detail_url": detail_url},
+                                    )
+
+                            if is_usa:
+                                logger.info("[STEP 2.19] USA-related — sending email")
+                                if not send_update_email(case_doc, changes, None):
+                                    collect_error(
+                                        error_items,
+                                        "Failed to send update email",
+                                        step="send_email",
+                                        context={"process": process_num, "detail_url": detail_url},
+                                    )
+
+                            if not update_case_in_db(
+                                cases_collection, case_doc, changes,
+                                live_table, live_historico,
+                                close_case=should_close,
+                            ):
+                                collect_error(
+                                    error_items,
+                                    "Failed to update case document",
+                                    step="update_case",
+                                    context={"process": process_num, "detail_url": detail_url},
+                                )
+
+                        time.sleep(2)
+
+                    except Exception as e:
+                        logger.exception(f"Error processing case #{idx}: {e}")
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="process_case",
+                            context={
+                                "process": case_doc.get("process", "N/A"),
+                                "detail_url": case_doc.get("detail_url"),
+                            },
                         )
                         continue
 
-                # No deal_id (or deal not found) → try LLM deal matching first
-                interessados_text = case_doc.get(
-                    "interessados") or live_interessados
-                translated_text = case_doc.get(
-                    "interessados_en") or translate_to_english(interessados_text) if interessados_text else ""
+            finally:
+                browser.close()
+                logger.info("[STEP 2.20] Browser closed")
 
-                matched_deal_id = None
-                if interessados_text:
-                    try:
-                        matched_deal_id = match_case_to_deal(
-                            interessados_text, translated_text)
-                    except Exception as e:
-                        logger.exception(
-                            f"[STEP 2.15] Error during deal matching: {e}")
-                        error_items.append(
-                            {"process": process_num, "error": str(e), "step": "match_case_to_deal"})
-
-                if matched_deal_id:
-                    logger.info(
-                        f"[STEP 2.16] Deal match found (deal_id={matched_deal_id})")
-                    matched_deal = None
-                    if deals_collection is not None:
-                        try:
-                            matched_deal = deals_collection.find_one(
-                                {"_id": ObjectId(matched_deal_id)}
-                            )
-                        except Exception as e:
-                            logger.exception(
-                                f"[STEP 2.17] Error resolving matched deal: {e}")
-                            error_items.append({"process": process_num, "error": str(
-                                e), "step": "resolve_matched_deal"})
-
-                    send_update_email(case_doc, changes, matched_deal)
-                    update_case_in_db(
-                        cases_collection, case_doc, changes,
-                        live_table, live_historico,
-                        close_case=should_close,
-                        new_deal_id=matched_deal_id,
-                    )
-                else:
-                    # No deal match → fall back to USA relation check
-                    is_usa = False
-                    if interessados_text:
-                        try:
-                            company_details = (
-                                f"Process: {process_num}\n"
-                                f"Type: {live_type}\n"
-                                f"Registration Date: {case_doc.get('registration_date', '')}\n"
-                                f"Interested Parties (PT): {interessados_text}\n"
-                                f"Interested Parties (EN): {case_doc.get('interessados_en', '')}\n"
-                                f"Detail URL: {detail_url}"
-                            )
-                            is_usa = bool(verify_usa_relation(
-                                company_details=company_details,
-                                case_type="BRAZIL",
-                            ))
-                        except Exception as e:
-                            logger.exception(
-                                f"[STEP 2.18] Error verifying USA relation: {e}")
-                            error_items.append(
-                                {"process": process_num, "error": str(e), "step": "verify_usa_relation"})
-
-                    if is_usa:
-                        logger.info("[STEP 2.19] USA-related — sending email")
-                        send_update_email(case_doc, changes, None)
-
-                    update_case_in_db(
-                        cases_collection, case_doc, changes,
-                        live_table, live_historico,
-                        close_case=should_close,
-                    )
-
-                time.sleep(2)
-
-        except Exception as e:
-            _log_critical_error_and_email(
-                f"[STEP 2.16] Unhandled error in monitoring: {e}",
-                {"step": "run_main"},
-            )
-        finally:
-            browser.close()
-            logger.info("[STEP 2.20] Browser closed")
-
-    if error_items:
-        logger.warning(
-            f"[STEP 2.21] {len(error_items)} per-case errors collected — sending summary email")
-        send_error_email(
-            script_name=SCRIPT_NAME,
-            error_message=f"[STEP 2.22] {len(error_items)} errors occurred during run",
-            context={
-                "error_count": len(error_items),
-                "errors": error_items[:20],
-            },
-            traceback_str=None,
+    except Exception as e:
+        logger.exception(f"Unhandled error in process_brazil_cases_updates(): {e}")
+        collect_error(
+            error_items,
+            f"Unhandled error in process_brazil_cases_updates(): {e}",
+            step="run_main",
         )
 
-    elapsed = round(time.time() - run_start, 1)
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("SUMMARY")
-    logger.info(f"[STEP 2.23] Total records checked        : {total_checked}")
-    logger.info(f"[STEP 2.24] Records with changes         : {total_changed}")
-    logger.info(
-        f"[STEP 2.25] Errors encountered           : {len(error_items)}")
-    logger.info(f"[STEP 2.26] Total time                   : {elapsed}s")
-    logger.info("=" * 60)
+    finally:
+        send_error_summary(error_items, SCRIPT_NAME)
+
+        elapsed = round(time.time() - run_start, 1)
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("SUMMARY")
+        logger.info(f"[STEP 2.23] Total records checked        : {total_checked}")
+        logger.info(f"[STEP 2.24] Records with changes         : {total_changed}")
+        logger.info(
+            f"[STEP 2.25] Errors encountered           : {len(error_items)}")
+        logger.info(f"[STEP 2.26] Total time                   : {elapsed}s")
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":
-    try:
-        process_brazil_cases_updates(headless=True)
-    except Exception as e:
-        _log_critical_error_and_email(
-            f"Unhandled error in __main__: {e}", {"step": "__main__"})
-        raise
+    process_brazil_cases_updates(headless=True)

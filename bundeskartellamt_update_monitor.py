@@ -41,7 +41,7 @@ from mongodb_connection import (
 from html import escape as escape_html
 from llm_verification_service import verify_country_relation
 from bundeskartellamt_initial_proxy import match_deal_with_llm
-from error_email_service import send_error_email
+from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
 
 load_dotenv(".env")
@@ -114,16 +114,6 @@ if not logger.handlers:
 logger.propagate = False
 
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
-
-
-def _log_critical_error_and_email(msg: str, context: Optional[dict] = None):
-    logger.error(msg)
-    send_error_email(
-        script_name=SCRIPT_NAME,
-        error_message=msg,
-        context=context or {},
-        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +224,7 @@ def update_german_case(collection, doc_id, update_fields: Dict) -> bool:
             {"_id": doc_id},
             {"$set": update_fields},
         )
-        return result.modified_count > 0
+        return result.modified_count > 0 or result.matched_count > 0
     except Exception as e:
         logger.warning(f"   Error updating german_case: {e}")
         return False
@@ -310,7 +300,9 @@ def _page_url(page_num: int) -> str:
     return f"{LAUFENDE_VERFAHREN_URL}&gtp=83488_list%253D{page_num}#pagination-83488"
 
 
-def fetch_all_listing_rows() -> Dict[str, Dict[str, str]]:
+def fetch_all_listing_rows(
+    error_items: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Dict[str, str]]:
     """Fetch every page and return {file_number: live_row} lookup."""
     lookup: Dict[str, Dict[str, str]] = {}
     seen: Set[str] = set()
@@ -322,13 +314,20 @@ def fetch_all_listing_rows() -> Dict[str, Dict[str, str]]:
         logger.info(f"   Page {page_num}: fetching...")
         try:
             html = fetch_html_with_proxy(url)
-            logger.info(f"HTML: {html}")
+            logger.info(f"   HTML fetched ({len(html):,} chars)")
         except RuntimeError as e:
             logger.error(f"   Failed to fetch page {page_num}: {e}")
+            if error_items is not None:
+                collect_error(
+                    error_items,
+                    str(e),
+                    step="fetch_listing_page",
+                    context={"page": page_num, "url": url},
+                )
             break
 
         rows = extract_raw_table_rows(html)
-        logger.info(f"Rows: {rows}")
+        logger.info(f"   Page {page_num}: extracted {len(rows)} rows")
         if not rows:
             logger.info(f"   No rows on page {page_num}, stopping")
             break
@@ -530,222 +529,275 @@ def main():
     LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = time.time()
     error_items: List[Dict[str, Any]] = []
+    stats = {"checked": 0, "unchanged": 0, "updated": 0, "not_found": 0,
+             "email_sent": 0, "matched_new": 0, "usa_related": 0}
     logger.info("=" * 60)
     logger.info("[STEP 1] Starting Germany Cases Update Monitor")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
     logger.info("BUNDESKARTELLAMT UPDATE MONITOR")
 
-    success, message = init_mongodb_connection(".env")
-    if not success:
-        _log_critical_error_and_email(f"MongoDB init failed: {message}", {
-                                      "step": "init_mongodb_connection"})
-        return {"success": False, "error": message}
+    try:
+        success, message = init_mongodb_connection(".env")
+        if not success:
+            collect_error(
+                error_items,
+                f"MongoDB init failed: {message}",
+                step="init_mongodb_connection",
+            )
+            return {"success": False, "error": message}
 
-    # 1. Fetch deals
-    deals = fetch_deals()
-    deal_by_id = {str(d.get("deal_id", ""))
-                      : d for d in deals if d.get("deal_id")}
+        deals = fetch_deals()
+        deal_by_id = {str(d.get("deal_id", "")): d for d in deals if d.get("deal_id")}
 
-    # 2. Fetch german_cases (is_open=True)
-    gc_collection = get_german_cases_collection()
-    if gc_collection is None:
-        _log_critical_error_and_email("german_cases collection not available", {
-                                      "step": "get_german_cases_collection"})
-        return {"success": False, "error": "german_cases collection unavailable"}
+        gc_collection = get_german_cases_collection()
+        if gc_collection is None:
+            collect_error(
+                error_items,
+                "german_cases collection not available",
+                step="get_german_cases_collection",
+            )
+            return {"success": False, "error": "german_cases collection unavailable"}
 
-    open_cases = fetch_open_german_cases(gc_collection)
-    logger.info(f"Open cases: {open_cases}")
-    if not open_cases:
-        logger.info("No open german_cases to monitor")
-        return {"success": True, "message": "No open cases"}
+        open_cases = fetch_open_german_cases(gc_collection)
+        logger.info(f"Loaded {len(open_cases)} open german_cases to monitor")
+        if not open_cases:
+            logger.info("No open german_cases to monitor")
+            return {"success": True, "message": "No open cases"}
 
-    # 3. Fetch ALL listing pages → build file_number → live_row lookup
-    logger.info("Fetching complete listing for comparison...")
-    live_lookup = fetch_all_listing_rows()
+        logger.info("Fetching complete listing for comparison...")
+        live_lookup = fetch_all_listing_rows(error_items=error_items)
 
-    # 4. Compare each stored case against live data
-    stats = {"checked": 0, "unchanged": 0, "updated": 0, "not_found": 0,
-             "email_sent": 0, "matched_new": 0, "usa_related": 0}
+        logger.info(f"Checking {len(open_cases)} open cases for updates...")
 
-    logger.info(f"Checking {len(open_cases)} open cases for updates...")
+        for idx, stored in enumerate(open_cases, 1):
+            try:
+                fn = stored.get("file_number", "")
+                doc_id = stored.get("_doc_id") or stored.get("_id")
+                stats["checked"] += 1
 
-    for idx, stored in enumerate(open_cases, 1):
-        fn = stored.get("file_number", "")
-        doc_id = stored.get("_doc_id") or stored.get("_id")
-        stats["checked"] += 1
+                logger.info(f"[{idx}/{len(open_cases)}] {fn}")
 
-        logger.info(f"[{idx}/{len(open_cases)}] {fn}")
+                live = live_lookup.get(fn)
+                if live is None:
+                    logger.info(f"  Not found in listing — skipping")
+                    stats["not_found"] += 1
+                    continue
 
-        # Find live row
-        live = live_lookup.get(fn)
-        if live is None:
-            logger.info(f"  Not found in listing — skipping")
-            stats["not_found"] += 1
-            continue
+                changes = detect_changes(stored, live)
+                logger.info(f"Changes: {changes}")
+                if not changes:
+                    logger.info(f"  No changes")
+                    stats["unchanged"] += 1
+                    continue
 
-        # Detect changes
-        changes = detect_changes(stored, live)
-        logger.info(f"Changes: {changes}")
-        if not changes:
-            logger.info(f"  No changes")
-            stats["unchanged"] += 1
-            continue
+                changed_field_names = [f for f, _, _ in changes]
+                logger.info(f"  Changes: {', '.join(changed_field_names)}")
 
-        changed_field_names = [f for f, _, _ in changes]
-        logger.info(f"  Changes: {', '.join(changed_field_names)}")
+                update_fields: Dict[str, Any] = {}
+                for field, old_val, new_val in changes:
+                    update_fields[field] = new_val
+                    en_key = f"{field}_en"
+                    if field in ("pursue", "product_area", "diploma") and new_val:
+                        update_fields[en_key] = translate_to_english(new_val)
 
-        # Build update dict with new values + translations for changed fields
-        update_fields: Dict[str, Any] = {}
-        for field, old_val, new_val in changes:
-            update_fields[field] = new_val
-            en_key = f"{field}_en"
-            if field in ("pursue", "product_area", "diploma") and new_val:
-                update_fields[en_key] = translate_to_english(new_val)
+                new_diploma = update_fields.get(
+                    "diploma", stored.get("diploma", ""))
+                new_is_open = determine_is_open(new_diploma)
+                if new_is_open != stored.get("is_open"):
+                    update_fields["is_open"] = new_is_open
+                    logger.info(
+                        f"  is_open: {stored.get('is_open')} → {new_is_open}")
 
-        # Recalculate is_open from diploma
-        new_diploma = update_fields.get("diploma", stored.get("diploma", ""))
-        new_is_open = determine_is_open(new_diploma)
-        if new_is_open != stored.get("is_open"):
-            update_fields["is_open"] = new_is_open
-            logger.info(f"  is_open: {stored.get('is_open')} → {new_is_open}")
+                merged = {**stored, **update_fields}
 
-        # Update stored dict in-memory for email generation
-        merged = {**stored, **update_fields}
+                deal = None
+                stored_deal_id = stored.get("deal_id")
 
-        # Determine email path
-        deal = None
-        stored_deal_id = stored.get("deal_id")
+                if stored_deal_id:
+                    deal = deal_by_id.get(str(stored_deal_id))
+                    if not deal:
+                        try:
+                            deals_coll = get_deals_collection()
+                            deal_doc = deals_coll.find_one(
+                                {"_id": ObjectId(stored_deal_id)})
+                            if deal_doc:
+                                deal_doc["deal_id"] = str(deal_doc["_id"])
+                                deal = deal_doc
+                        except Exception as e:
+                            logger.exception(f"Could not fetch deal: {e}")
+                            collect_error(
+                                error_items,
+                                str(e),
+                                step="fetch_deal",
+                                context={"file_number": fn,
+                                         "deal_id": str(stored_deal_id)},
+                            )
+                    if deal:
+                        logger.info(
+                            f"  Has deal_id → sending [FRMD] update email")
+                        subject, html = generate_update_email(
+                            merged, changes, deal)
+                        stats["email_sent"] += 1
+                        if not send_email_via_webhook(
+                            subject, html, fn,
+                            deal_id=str(stored_deal_id),
+                            changed_fields=changed_field_names,
+                        ):
+                            collect_error(
+                                error_items,
+                                "Failed to send update email",
+                                step="send_email",
+                                context={"file_number": fn,
+                                         "deal_id": str(stored_deal_id)},
+                            )
+                    else:
+                        logger.warning(
+                            f"  deal_id {stored_deal_id} not found in deals — treating as unmatched")
+                        stored_deal_id = None
 
-        if stored_deal_id:
-            # Path A: deal_id already present → resolve deal, send [FRMD]
-            deal = deal_by_id.get(str(stored_deal_id))
-            if not deal:
-                try:
-                    deals_coll = get_deals_collection()
-                    deal_doc = deals_coll.find_one(
-                        {"_id": ObjectId(stored_deal_id)})
-                    if deal_doc:
-                        deal_doc["deal_id"] = str(deal_doc["_id"])
-                        deal = deal_doc
-                except Exception:
-                    pass
-            if deal:
-                logger.info(f"  Has deal_id → sending [FRMD] update email")
-                subject, html = generate_update_email(merged, changes, deal)
-                send_email_via_webhook(subject, html, fn,
-                                       deal_id=str(stored_deal_id),
-                                       changed_fields=changed_field_names)
-                stats["email_sent"] += 1
-            else:
-                logger.warning(
-                    f"  deal_id {stored_deal_id} not found in deals — treating as unmatched")
-                stored_deal_id = None
+                if not stored_deal_id:
+                    pursue_en = merged.get(
+                        "pursue_en") or stored.get("pursue_en", "")
+                    if not pursue_en or pursue_en == "[Translation failed]":
+                        pursue_text = merged.get("pursue", "")
+                        if pursue_text:
+                            pursue_en = translate_to_english(pursue_text)
 
-        if not stored_deal_id:
-            # Path B: no deal_id → LLM match
-            pursue_en = merged.get("pursue_en") or stored.get("pursue_en", "")
-            if not pursue_en or pursue_en == "[Translation failed]":
-                pursue_text = merged.get("pursue", "")
-                if pursue_text:
-                    pursue_en = translate_to_english(pursue_text)
+                    try:
+                        match_result = match_deal_with_llm(pursue_en, deals)
+                    except Exception as e:
+                        logger.exception(f"LLM match failed: {e}")
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="match_deal_with_llm",
+                            context={"file_number": fn},
+                        )
+                        match_result = None
 
-            match_result = match_deal_with_llm(pursue_en, deals)
-            deal_match, matched_company, matched_role = parse_llm_match(
-                match_result, deal_by_id)
+                    deal_match, matched_company, matched_role = parse_llm_match(
+                        match_result or "", deal_by_id)
 
-            if deal_match:
-                # Matched → send [FRMD], set deal_id
-                deal = deal_match
-                update_fields["deal_id"] = deal_match.get("deal_id")
-                logger.info(
-                    f"  New match: {matched_company} → sending [FRMD] update email")
-                subject, html = generate_update_email(merged, changes, deal)
-                send_email_via_webhook(subject, html, fn,
-                                       deal_id=deal_match.get("deal_id"),
-                                       changed_fields=changed_field_names)
-                stats["email_sent"] += 1
-                stats["matched_new"] += 1
-            else:
-                # Path C: no match → USA check
-                logger.info(f"  No deal match")
-                try:
-                    company_details = {
-                        "today_date": datetime.now().strftime("%Y-%m-%d"),
-                        "record": merged,
-                    }
-                    is_usa = verify_country_relation(
-                        company_details=company_details, country="USA", case_type="GERMANY"
-                    )
-                except Exception as e:
-                    logger.exception(f"USA check failed: {e}")
-                    error_items.append({
-                        "file_number": fn,
-                        "error": str(e),
-                        "step": "verify_country_relation",
-                    })
-                    is_usa = False
+                    if deal_match:
+                        deal = deal_match
+                        update_fields["deal_id"] = deal_match.get("deal_id")
+                        logger.info(
+                            f"  New match: {matched_company} → sending [FRMD] update email")
+                        subject, html = generate_update_email(
+                            merged, changes, deal)
+                        stats["email_sent"] += 1
+                        stats["matched_new"] += 1
+                        if not send_email_via_webhook(
+                            subject, html, fn,
+                            deal_id=deal_match.get("deal_id"),
+                            changed_fields=changed_field_names,
+                        ):
+                            collect_error(
+                                error_items,
+                                "Failed to send update email",
+                                step="send_email",
+                                context={"file_number": fn,
+                                         "deal_id": deal_match.get("deal_id")},
+                            )
+                    else:
+                        logger.info(f"  No deal match")
+                        try:
+                            company_details = {
+                                "today_date": datetime.now().strftime("%Y-%m-%d"),
+                                "record": merged,
+                            }
+                            is_usa = verify_country_relation(
+                                company_details=company_details, country="USA", case_type="GERMANY"
+                            )
+                        except Exception as e:
+                            logger.exception(f"USA check failed: {e}")
+                            collect_error(
+                                error_items,
+                                str(e),
+                                step="verify_country_relation",
+                                context={"file_number": fn},
+                            )
+                            is_usa = False
 
-                if is_usa:
-                    # Path C1: USA-related → send [FRUD]
-                    logger.info(f"  USA-related → sending [FRUD] update email")
-                    subject, html = generate_update_email(
-                        merged, changes, None)
-                    send_email_via_webhook(subject, html, fn,
-                                           changed_fields=changed_field_names)
-                    stats["email_sent"] += 1
-                    stats["usa_related"] += 1
-                else:
-                    # Path C2: not USA → silent update
-                    logger.info(f"  Not USA-related → silent update")
+                        if is_usa:
+                            logger.info(
+                                f"  USA-related → sending [FRUD] update email")
+                            subject, html = generate_update_email(
+                                merged, changes, None)
+                            stats["email_sent"] += 1
+                            stats["usa_related"] += 1
+                            if not send_email_via_webhook(
+                                subject, html, fn,
+                                changed_fields=changed_field_names,
+                            ):
+                                collect_error(
+                                    error_items,
+                                    "Failed to send USA-related update email",
+                                    step="send_email",
+                                    context={"file_number": fn},
+                                )
+                        else:
+                            logger.info(f"  Not USA-related → silent update")
 
-        # Always update DB
-        if update_fields and doc_id:
-            ok = update_german_case(gc_collection, doc_id, update_fields)
-            if ok:
-                stats["updated"] += 1
-                logger.info(f"  DB updated")
-            else:
-                logger.error(f"  DB update failed")
+                if update_fields and doc_id:
+                    ok = update_german_case(
+                        gc_collection, doc_id, update_fields)
+                    if ok:
+                        stats["updated"] += 1
+                        logger.info(f"  DB updated")
+                    else:
+                        logger.error(f"  DB update failed")
+                        collect_error(
+                            error_items,
+                            "DB update failed",
+                            step="update_german_case",
+                            context={"file_number": fn},
+                        )
+            except Exception as e:
+                logger.exception(f"Error processing case #{idx}: {e}")
+                collect_error(
+                    error_items,
+                    str(e),
+                    step="process_case",
+                    context={"file_number": (
+                        stored.get("file_number") or "").strip()},
+                )
 
-    if error_items:
-        send_error_email(
-            script_name=SCRIPT_NAME,
-            error_message=f"{len(error_items)} errors occurred during run",
-            context={
-                "error_count": len(error_items),
-                "errors": error_items[:20],
-            },
-            traceback_str=None,
+        return {
+            "success": True,
+            "checked": stats["checked"],
+            "unchanged": stats["unchanged"],
+            "updated": stats["updated"],
+            "email_sent": stats["email_sent"],
+        }
+
+    except Exception as e:
+        logger.exception(f"Unhandled error in main: {e}")
+        collect_error(
+            error_items,
+            f"Unhandled error in main: {e}",
+            step="run_main",
         )
+        return {"success": False, "error": str(e)}
 
-    # Summary
-    elapsed = round(time.time() - run_start, 1)
-    logger.info("=" * 60)
-    logger.info("SUMMARY")
-    logger.info(f"  Checked                      : {stats['checked']}")
-    logger.info(f"  Unchanged                    : {stats['unchanged']}")
-    logger.info(f"  Not found in listing         : {stats['not_found']}")
-    logger.info(f"  Updated                      : {stats['updated']}")
-    logger.info(f"  Emails sent                  : {stats['email_sent']}")
-    logger.info(f"  New deal matches             : {stats['matched_new']}")
-    logger.info(f"  USA-related                  : {stats['usa_related']}")
-    logger.info(f"  Total time                   : {elapsed}s")
-    logger.info("=" * 60)
+    finally:
+        send_error_summary(error_items, SCRIPT_NAME)
 
-    return {
-        "success": True,
-        "checked": stats["checked"],
-        "unchanged": stats["unchanged"],
-        "updated": stats["updated"],
-        "email_sent": stats["email_sent"],
-    }
+        elapsed = round(time.time() - run_start, 1)
+        logger.info("=" * 60)
+        logger.info("SUMMARY")
+        logger.info(f"  Checked                      : {stats['checked']}")
+        logger.info(f"  Unchanged                    : {stats['unchanged']}")
+        logger.info(f"  Not found in listing         : {stats['not_found']}")
+        logger.info(f"  Updated                      : {stats['updated']}")
+        logger.info(f"  Emails sent                  : {stats['email_sent']}")
+        logger.info(f"  New deal matches             : {stats['matched_new']}")
+        logger.info(f"  USA-related                  : {stats['usa_related']}")
+        logger.info(f"  Errors encountered           : {len(error_items)}")
+        logger.info(f"  Total time                   : {elapsed}s")
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        _log_critical_error_and_email(
-            f"Unhandled error in main: {e}", {"step": "main"})
-        raise
+    main()

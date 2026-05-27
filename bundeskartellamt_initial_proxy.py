@@ -33,7 +33,7 @@ from mongodb_connection import (
 )
 from html import escape as escape_html
 from llm_verification_service import verify_country_relation
-from error_email_service import send_error_email
+from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
 
 load_dotenv(".env")
@@ -104,16 +104,6 @@ if not logger.handlers:
 logger.propagate = False
 
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
-
-
-def _log_critical_error_and_email(msg: str, context: Optional[dict] = None):
-    logger.error(msg)
-    send_error_email(
-        script_name=SCRIPT_NAME,
-        error_message=msg,
-        context=context or {},
-        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +352,10 @@ def _page_url(page_num: int) -> str:
     return f"{LAUFENDE_VERFAHREN_URL}&gtp=83488_list%253D{page_num}#pagination-83488"
 
 
-def fetch_all_records_with_pagination(cutoff: date) -> List[Dict]:
+def fetch_all_records_with_pagination(
+    cutoff: date,
+    error_items: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict]:
     """Fetch pages from the Bundeskartellamt until all records newer than cutoff are collected."""
     all_records = []
     seen_file_numbers: Set[str] = set()
@@ -377,6 +370,13 @@ def fetch_all_records_with_pagination(cutoff: date) -> List[Dict]:
             logger.info(f"HTML: {html}")
         except RuntimeError as e:
             logger.error(f"   Failed to fetch page {page_num}: {e}")
+            if error_items is not None:
+                collect_error(
+                    error_items,
+                    str(e),
+                    step="fetch_listing_page",
+                    context={"page": page_num, "url": url},
+                )
             break
 
         raw_rows = extract_raw_table_rows(html)
@@ -490,7 +490,7 @@ RESPONSE FORMAT:
         return result
     except Exception as e:
         logger.warning(f"LLM Error: {e}")
-        return "None"
+        raise
 
 
 def parse_llm_match(result: str, deal_by_id: Dict) -> Tuple[Optional[Dict], str, str]:
@@ -636,196 +636,235 @@ def main():
     LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = time.time()
     error_items: List[Dict[str, Any]] = []
+    all_raw_records: List[Dict] = []
+    stats = {"new": 0, "skipped": 0, "matched": 0,
+             "usa_related": 0, "saved": 0}
+    cutoff = CUTOFF_DATE.date() if isinstance(
+        CUTOFF_DATE, datetime) else CUTOFF_DATE
     logger.info("=" * 60)
     logger.info("[STEP 1] Starting Germany Cases Register")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
     logger.info("BUNDESKARTELLAMT LAUFENDE VERFAHREN (Proxy)")
 
-    # Step 1: MongoDB init
-    success, message = init_mongodb_connection(".env")
-    if not success:
-        _log_critical_error_and_email(f"MongoDB init failed: {message}", {
-                                      "step": "init_mongodb_connection"})
-        return {"success": False, "error": message}
-
-    # Step 1a: Fetch deals
-    deals = fetch_deals()
-    deal_by_id = {str(d.get("deal_id", ""))
-                      : d for d in deals if d.get("deal_id")}
-
-    # Step 2: Fetch all german_cases file_numbers for dedup (open + closed)
-    gc_collection = get_german_cases_collection()
-    if gc_collection is None:
-        _log_critical_error_and_email("german_cases collection not available", {
-                                      "step": "get_german_cases_collection"})
-        return {"success": False, "error": "german_cases collection unavailable"}
-
-    existing_file_numbers = fetch_existing_german_case_file_numbers(
-        gc_collection)
-
-    # Step 3+4+5: Fetch HTML, extract rows, paginate until cutoff
-    cutoff = CUTOFF_DATE.date() if isinstance(
-        CUTOFF_DATE, datetime) else CUTOFF_DATE
-    logger.info(f"Fetching records (cutoff >= {cutoff})...")
-    all_raw_records = fetch_all_records_with_pagination(cutoff)
-    logger.info(f"All raw records: {all_raw_records}")
-    logger.info(f"   Total records after cutoff: {len(all_raw_records)}")
-
-    # Save raw extracted records
     try:
-        with open(EXTRACTED_RECORDS_JSON, "w", encoding="utf-8") as f:
-            json.dump(all_raw_records, f, ensure_ascii=False, indent=2)
-        logger.info(f"Saved raw records to {EXTRACTED_RECORDS_JSON}")
-    except Exception as e:
-        logger.warning(f"Could not save JSON: {e}")
+        success, message = init_mongodb_connection(".env")
+        if not success:
+            collect_error(
+                error_items,
+                f"MongoDB init failed: {message}",
+                step="init_mongodb_connection",
+            )
+            return {"success": False, "error": message}
 
-    # Step 6–10: Process each record
-    stats = {"new": 0, "skipped": 0, "matched": 0,
-             "usa_related": 0, "saved": 0}
+        deals = fetch_deals()
+        deal_by_id = {str(d.get("deal_id", ""))
+                          : d for d in deals if d.get("deal_id")}
 
-    logger.info(f"Processing {len(all_raw_records)} records...")
+        gc_collection = get_german_cases_collection()
+        if gc_collection is None:
+            collect_error(
+                error_items,
+                "german_cases collection not available",
+                step="get_german_cases_collection",
+            )
+            return {"success": False, "error": "german_cases collection unavailable"}
 
-    for idx, raw in enumerate(all_raw_records, 1):
-        fn = (raw.get("file_number") or "").strip()
-        logger.info(
-            f"[{idx}/{len(all_raw_records)}] {fn} — {raw.get('pursue', '')[:60]}...")
+        existing_file_numbers = fetch_existing_german_case_file_numbers(
+            gc_collection)
 
-        if not fn:
-            logger.warning("  Missing file_number, skipping row")
-            continue
+        logger.info(f"Fetching records (cutoff >= {cutoff})...")
+        all_raw_records = fetch_all_records_with_pagination(
+            cutoff, error_items=error_items)
+        logger.info(f"All raw records: {all_raw_records}")
+        logger.info(f"   Total records after cutoff: {len(all_raw_records)}")
 
-        # Step 6: Dedup — skip if file_number exists in german_cases (any is_open)
-        if fn in existing_file_numbers:
-            logger.info(f"  Already in german_cases, skipping")
-            stats["skipped"] += 1
-            continue
+        try:
+            with open(EXTRACTED_RECORDS_JSON, "w", encoding="utf-8") as f:
+                json.dump(all_raw_records, f, ensure_ascii=False, indent=2)
+            logger.info(f"Saved raw records to {EXTRACTED_RECORDS_JSON}")
+        except Exception as e:
+            logger.warning(f"Could not save JSON: {e}")
+            collect_error(
+                error_items,
+                f"Could not save JSON: {e}",
+                step="write_extracted_json",
+            )
 
-        # Step 7: Translate new record
-        pursue_en = translate_to_english(
-            raw["pursue"]) if raw.get("pursue") else ""
-        product_area_en = translate_to_english(
-            raw["product_area"]) if raw.get("product_area") else ""
-        diploma_en = translate_to_english(
-            raw["diploma"]) if raw.get("diploma") else ""
+        logger.info(f"Processing {len(all_raw_records)} records...")
 
-        is_open = determine_is_open(raw.get("diploma", ""))
+        for idx, raw in enumerate(all_raw_records, 1):
+            try:
+                fn = (raw.get("file_number") or "").strip()
+                logger.info(
+                    f"[{idx}/{len(all_raw_records)}] {fn} — {raw.get('pursue', '')[:60]}...")
 
-        record = {
-            "file_number": fn,
-            "date": raw.get("date", ""),
-            "pursue": raw.get("pursue", ""),
-            "pursue_en": pursue_en,
-            "product_area": raw.get("product_area", ""),
-            "product_area_en": product_area_en,
-            "diploma": raw.get("diploma", ""),
-            "diploma_en": diploma_en,
-            "is_open": is_open,
-            "deal_id": None,
+                if not fn:
+                    logger.warning("  Missing file_number, skipping row")
+                    continue
+
+                if fn in existing_file_numbers:
+                    logger.info(f"  Already in german_cases, skipping")
+                    stats["skipped"] += 1
+                    continue
+
+                pursue_en = translate_to_english(
+                    raw["pursue"]) if raw.get("pursue") else ""
+                product_area_en = translate_to_english(
+                    raw["product_area"]) if raw.get("product_area") else ""
+                diploma_en = translate_to_english(
+                    raw["diploma"]) if raw.get("diploma") else ""
+
+                is_open = determine_is_open(raw.get("diploma", ""))
+
+                record = {
+                    "file_number": fn,
+                    "date": raw.get("date", ""),
+                    "pursue": raw.get("pursue", ""),
+                    "pursue_en": pursue_en,
+                    "product_area": raw.get("product_area", ""),
+                    "product_area_en": product_area_en,
+                    "diploma": raw.get("diploma", ""),
+                    "diploma_en": diploma_en,
+                    "is_open": is_open,
+                    "deal_id": None,
+                }
+
+                logger.info(
+                    f"  {fn}: pursue_en={pursue_en[:50]}... | is_open={is_open}")
+
+                deal_match = None
+                matched_company = ""
+                matched_role = ""
+
+                if pursue_en and pursue_en != "[Translation failed]":
+                    try:
+                        match_result = match_deal_with_llm(pursue_en, deals)
+                    except Exception as e:
+                        logger.exception(f"LLM match failed: {e}")
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="match_deal_with_llm",
+                            context={"file_number": fn},
+                        )
+                        match_result = None
+                    if match_result:
+                        deal_match, matched_company, matched_role = parse_llm_match(
+                            match_result, deal_by_id)
+
+                is_usa = False
+                if deal_match:
+                    record["deal_id"] = deal_match.get("deal_id")
+                    logger.info(f"  Matched: {matched_company} ({matched_role})")
+                else:
+                    logger.info(f"  No deal match")
+                    try:
+                        company_details = {
+                            "today_date": datetime.now().strftime("%Y-%m-%d"),
+                            "record": record,
+                        }
+                        is_usa = verify_country_relation(
+                            company_details=company_details, country="USA", case_type="GERMANY"
+                        )
+                    except Exception as e:
+                        logger.exception(f"USA check failed: {e}")
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="verify_country_relation",
+                            context={"file_number": fn},
+                        )
+                        is_usa = False
+
+                    if is_usa:
+                        logger.info(f"  USA-related (notify only if new insert)")
+                    else:
+                        logger.info(f"  Not USA-related → silent save")
+
+                doc_id, inserted_new = upsert_german_case(gc_collection, record)
+                if doc_id:
+                    stats["saved"] += 1
+                    existing_file_numbers.add(fn)
+                    logger.info(
+                        f"  Saved to german_cases (id={doc_id}, new_insert={inserted_new})")
+                    if inserted_new:
+                        stats["new"] += 1
+                        if deal_match:
+                            subject, html = generate_matched_email(record, deal_match)
+                            stats["matched"] += 1
+                            if not send_email_via_webhook(
+                                subject, html, fn, deal_id=deal_match.get("deal_id")
+                            ):
+                                collect_error(
+                                    error_items,
+                                    "Failed to send matched-case email",
+                                    step="send_email",
+                                    context={"file_number": fn},
+                                )
+                        elif is_usa:
+                            logger.info(f"  Sending [FRUD] email (first insert)")
+                            subject, html = generate_usa_related_email(record)
+                            stats["usa_related"] += 1
+                            if not send_email_via_webhook(subject, html, fn):
+                                collect_error(
+                                    error_items,
+                                    "Failed to send USA-related email",
+                                    step="send_email",
+                                    context={"file_number": fn},
+                                )
+                else:
+                    logger.error(f"  Failed to save to german_cases")
+                    collect_error(
+                        error_items,
+                        "Failed to save to german_cases",
+                        step="upsert_german_case",
+                        context={"file_number": fn},
+                    )
+            except Exception as e:
+                logger.exception(f"Error processing record #{idx}: {e}")
+                collect_error(
+                    error_items,
+                    str(e),
+                    step="process_record",
+                    context={"file_number": (raw.get("file_number") or "").strip()},
+                )
+
+        return {
+            "success": True,
+            "extraction_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "total_extracted": len(all_raw_records),
+            "skipped": stats["skipped"],
+            "new_saved": stats["new"],
+            "matched": stats["matched"],
+            "usa_related": stats["usa_related"],
+            "cutoff_date": cutoff.isoformat(),
         }
 
-        logger.info(
-            f"  {fn}: pursue_en={pursue_en[:50]}... | is_open={is_open}")
-
-        # Step 8: LLM match against deals
-        deal_match = None
-        matched_company = ""
-        matched_role = ""
-
-        if pursue_en and pursue_en != "[Translation failed]":
-            match_result = match_deal_with_llm(pursue_en, deals)
-            deal_match, matched_company, matched_role = parse_llm_match(
-                match_result, deal_by_id)
-
-        is_usa = False
-        if deal_match:
-            record["deal_id"] = deal_match.get("deal_id")
-            logger.info(f"  Matched: {matched_company} ({matched_role})")
-        else:
-            logger.info(f"  No deal match")
-            try:
-                company_details = {
-                    "today_date": datetime.now().strftime("%Y-%m-%d"),
-                    "record": record,
-                }
-                is_usa = verify_country_relation(
-                    company_details=company_details, country="USA", case_type="GERMANY"
-                )
-            except Exception as e:
-                logger.exception(f"USA check failed: {e}")
-                error_items.append({
-                    "file_number": fn,
-                    "error": str(e),
-                    "step": "verify_country_relation",
-                })
-                is_usa = False
-
-            if is_usa:
-                logger.info(f"  USA-related (notify only if new insert)")
-            else:
-                logger.info(f"  Not USA-related → silent save")
-
-        # Step 9: Upsert to german_cases (one doc per file_number)
-        doc_id, inserted_new = upsert_german_case(gc_collection, record)
-        if doc_id:
-            stats["saved"] += 1
-            existing_file_numbers.add(fn)
-            logger.info(
-                f"  Saved to german_cases (id={doc_id}, new_insert={inserted_new})")
-            if inserted_new:
-                stats["new"] += 1
-                if deal_match:
-                    subject, html = generate_matched_email(record, deal_match)
-                    send_email_via_webhook(
-                        subject, html, fn, deal_id=deal_match.get("deal_id"))
-                    stats["matched"] += 1
-                elif is_usa:
-                    logger.info(f"  Sending [FRUD] email (first insert)")
-                    subject, html = generate_usa_related_email(record)
-                    send_email_via_webhook(subject, html, fn)
-                    stats["usa_related"] += 1
-        else:
-            logger.error(f"  Failed to save to german_cases")
-
-    if error_items:
-        send_error_email(
-            script_name=SCRIPT_NAME,
-            error_message=f"{len(error_items)} errors occurred during run",
-            context={
-                "error_count": len(error_items),
-                "errors": error_items[:20],
-            },
-            traceback_str=None,
+    except Exception as e:
+        logger.exception(f"Unhandled error in main: {e}")
+        collect_error(
+            error_items,
+            f"Unhandled error in main: {e}",
+            step="run_main",
         )
+        return {"success": False, "error": str(e)}
 
-    # Summary
-    elapsed = round(time.time() - run_start, 1)
-    logger.info("=" * 60)
-    logger.info("SUMMARY")
-    logger.info(f"  Total extracted              : {len(all_raw_records)}")
-    logger.info(f"  Skipped (existing)           : {stats['skipped']}")
-    logger.info(f"  New records saved            : {stats['new']}")
-    logger.info(f"  Deal matches                 : {stats['matched']}")
-    logger.info(f"  USA-related                  : {stats['usa_related']}")
-    logger.info(f"  Total time                   : {elapsed}s")
-    logger.info("=" * 60)
+    finally:
+        send_error_summary(error_items, SCRIPT_NAME)
 
-    return {
-        "success": True,
-        "extraction_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "total_extracted": len(all_raw_records),
-        "skipped": stats["skipped"],
-        "new_saved": stats["new"],
-        "matched": stats["matched"],
-        "usa_related": stats["usa_related"],
-        "cutoff_date": cutoff.isoformat(),
-    }
+        elapsed = round(time.time() - run_start, 1)
+        logger.info("=" * 60)
+        logger.info("SUMMARY")
+        logger.info(f"  Total extracted              : {len(all_raw_records)}")
+        logger.info(f"  Skipped (existing)           : {stats['skipped']}")
+        logger.info(f"  New records saved            : {stats['new']}")
+        logger.info(f"  Deal matches                 : {stats['matched']}")
+        logger.info(f"  USA-related                  : {stats['usa_related']}")
+        logger.info(f"  Errors encountered           : {len(error_items)}")
+        logger.info(f"  Total time                   : {elapsed}s")
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        _log_critical_error_and_email(
-            f"Unhandled error in main: {e}", {"step": "main"})
-        raise
+    main()

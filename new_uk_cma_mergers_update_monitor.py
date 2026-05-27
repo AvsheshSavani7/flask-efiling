@@ -13,8 +13,8 @@ from bs4 import BeautifulSoup
 from html import escape as escape_html
 from openai import OpenAI
 from pymongo import MongoClient
-from typing import Optional, Tuple
-from error_email_service import send_error_email
+from typing import Any, Dict, List, Optional, Tuple
+from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
 
 # ---------------------------------------------------------------------------
@@ -75,17 +75,6 @@ if not logger.handlers:
 logger.propagate = False
 
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
-
-
-def _log_critical_error_and_email(msg: str, context: Optional[dict] = None):
-    """Immediate error email — use ONLY for critical startup / fatal failures."""
-    logger.error(msg)
-    send_error_email(
-        script_name=SCRIPT_NAME,
-        error_message=msg,
-        context=context or {},
-        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
-    )
 
 
 FIELDS_TO_COMPARE = [
@@ -354,7 +343,11 @@ def extract_published_dates(soup):
     return result
 
 
-def scrape_detail_page(url, max_retries: int = 2):
+def scrape_detail_page(
+    url,
+    max_retries: int = 2,
+    error_items: Optional[List[Dict[str, Any]]] = None,
+):
     """Fetch the detail page HTML and extract all fields. Retries on failure."""
     last_error = None
     last_status = None
@@ -398,21 +391,19 @@ def scrape_detail_page(url, max_retries: int = 2):
         f"URL: {url}. Last error: {last_error}. "
         f"The page may be temporarily unavailable or its structure may have changed."
     )
-    _log_critical_error_and_email(
-        explanation,
-        {
-            "step": "scrape_detail_page",
-            "page_url": url,
-            "attempts": str(max_retries),
-            "last_http_status": str(last_status) if last_status else "no response",
-            "last_error": str(last_error),
-            "possible_causes": (
-                "1) UK CMA website temporarily down or slow; "
-                "2) Network issue between server and gov.uk; "
-                "3) Page HTML structure changed (parser broken)"
-            ),
-        },
-    )
+    logger.error(explanation)
+    if error_items is not None:
+        collect_error(
+            error_items,
+            explanation,
+            step="scrape_detail_page",
+            context={
+                "url": url,
+                "attempts": max_retries,
+                "http_status": str(last_status) if last_status else "no response",
+                "last_error": str(last_error),
+            },
+        )
     return None
 
 
@@ -536,7 +527,7 @@ If no deal satisfies this rule, respond exactly: None"""
             return None
     except Exception as e:
         print(f"  ❌ LLM error: {e}")
-        return None
+        raise
 
 
 def find_deal_by_id(deal_id):
@@ -588,7 +579,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
         return False
     except Exception as e:
         print(f"⚠️ LLM USA-relation error: {e}")
-        return False
+        raise
 
 
 # ===================================================================
@@ -829,35 +820,60 @@ def send_email_via_webhook(subject, html_email, extra_payload=None):
 # Process a single open case
 # ===================================================================
 
-def process_case(db_record):
+def process_case(db_record, error_items: List[Dict[str, Any]]):
     doc_id = db_record.get("_id")
     detail_url = db_record.get("detail_url", "")
     title = db_record.get("title", "N/A")
     print(f"STEP 1.5.2: DB record: {db_record}")
     print(f"STEP 1.5.3: Detail URL: {detail_url}")
     print(f"STEP 1.5.4: Title: {title}")
-    if not detail_url:
-        print(f"  ⏩ Skipped (no detail_url): {title[:60]}")
-        print(f"STEP 1.5.5: Skipped (no detail_url): {title[:60]}")
-        return False
 
-    # Scrape current state of the detail page
-    scraped = scrape_detail_page(detail_url)
-    print(f" Scraped: {scraped}")
-    if not scraped:
-        print(f"  ⚠️ Failed to scrape, skipping: {title[:60]}")
-        print(f"STEP 1.5.6: Failed to scrape, skipping: {title[:60]}")
-        return False
+    try:
+        if not detail_url:
+            print(f"  ⏩ Skipped (no detail_url): {title[:60]}")
+            print(f"STEP 1.5.5: Skipped (no detail_url): {title[:60]}")
+            return False
 
-    # Detect changes
-    changes = detect_changes(db_record, scraped)
-    print(f"Changes: {changes}")
+        scraped = scrape_detail_page(detail_url, error_items=error_items)
+        print(f" Scraped: {scraped}")
+        if not scraped:
+            print(f"  ⚠️ Failed to scrape, skipping: {title[:60]}")
+            print(f"STEP 1.5.6: Failed to scrape, skipping: {title[:60]}")
+            return False
 
-    if not changes:
-        print(f"  ✅ No changes detected")
-        print(f"STEP 1.5.7: No changes detected")
-        # Still update the scraped fields to keep data fresh
-        update_uk_cma_case(doc_id, {
+        changes = detect_changes(db_record, scraped)
+        print(f"Changes: {changes}")
+
+        if not changes:
+            print(f"  ✅ No changes detected")
+            print(f"STEP 1.5.7: No changes detected")
+            if not update_uk_cma_case(doc_id, {
+                "title": scraped.get("title") or title,
+                "description": scraped.get("description"),
+                "case_type": scraped.get("case_type"),
+                "case_state": scraped.get("case_state"),
+                "market_sector": scraped.get("market_sector"),
+                "outcome": scraped.get("outcome"),
+                "opened_date": scraped.get("opened_date"),
+                "closed_date": scraped.get("closed_date"),
+                "history": scraped.get("history", []),
+                "published_date": scraped.get("published_date"),
+                "last_updated": scraped.get("last_updated"),
+            }):
+                collect_error(
+                    error_items,
+                    "Failed to refresh case document",
+                    step="update_uk_cma_case",
+                    context={"title": title[:80], "detail_url": detail_url},
+                )
+            print("STEP 1.5.8: Updated DB record (no-change refresh)")
+            return False
+
+        print(f"  📝 Changes detected: {list(changes.keys())}")
+        print(f"STEP 1.5.9: Changes detected: {list(changes.keys())}")
+
+        case_info = {
+            "detail_url": detail_url,
             "title": scraped.get("title") or title,
             "description": scraped.get("description"),
             "case_type": scraped.get("case_type"),
@@ -869,123 +885,150 @@ def process_case(db_record):
             "history": scraped.get("history", []),
             "published_date": scraped.get("published_date"),
             "last_updated": scraped.get("last_updated"),
-        })
-        print("STEP 1.5.8: Updated DB record (no-change refresh)")
-        return False
-
-    print(f"  📝 Changes detected: {list(changes.keys())}")
-    print(f"STEP 1.5.9: Changes detected: {list(changes.keys())}")
-
-    # Build case_info for email (use scraped data as current)
-    case_info = {
-        "detail_url": detail_url,
-        "title": scraped.get("title") or title,
-        "description": scraped.get("description"),
-        "case_type": scraped.get("case_type"),
-        "case_state": scraped.get("case_state"),
-        "market_sector": scraped.get("market_sector"),
-        "outcome": scraped.get("outcome"),
-        "opened_date": scraped.get("opened_date"),
-        "closed_date": scraped.get("closed_date"),
-        "history": scraped.get("history", []),
-        "published_date": scraped.get("published_date"),
-        "last_updated": scraped.get("last_updated"),
-    }
-    print(f"STEP 1.5.10: Case info: {case_info}")
-    deal_id = db_record.get("deal_id")
-    deal_match = None
-    print(f"STEP 1.5.11: Deal ID: {deal_id}")
-    if deal_id:
-        # Already has a deal_id -> find deal and send update email
-        deal_match = find_deal_by_id(deal_id)
-        print(f"STEP 1.5.12: Deal match: {deal_match}")
-        if deal_match:
-            print(f"  🎯 Existing deal_id: {deal_id}")
-            print(f"STEP 1.5.13: Existing deal_id: {deal_id}")
-            subj, html = generate_update_email_html(
-                case_info, changes, deal_match)
-            send_email_via_webhook(subj, html, {
-                "deal_id": deal_id,
-                "title": case_info["title"],
-                "url": detail_url,
-                "is_update": True,
-            })
-            print(f"STEP 1.5.14: Email sent: {subj}")
-        else:
-            print(
-                f"  ⚠️ deal_id {deal_id} not found in deals list, treating as unmatched")
-            deal_id = None
-            print(f"STEP 1.5.15: No deal match for: {case_info['title'][:60]}")
-    if not deal_id:
-        # No deal_id -> try LLM matching
-        matched_deal_id = match_title_with_deals(case_info["title"])
-        print(f"STEP 1.5.16: Matched deal ID: {matched_deal_id}")
-        deal_match = find_deal_by_id(
-            matched_deal_id) if matched_deal_id else None
-        print(f"STEP 1.5.17: Deal match: {deal_match}")
-        if deal_match:
-            acquirer = deal_match.get(
-                "acquirer") or deal_match.get("acquire_name", "N/A")
-            target = deal_match.get("target") or deal_match.get(
-                "target_name", "N/A")
-            print(f"  🎯 New match: {acquirer} / {target}")
-            print(f"STEP 1.5.18: New match: {acquirer} / {target}")
-            deal_id = matched_deal_id
-
-            subj, html = generate_update_email_html(
-                case_info, changes, deal_match)
-            send_email_via_webhook(subj, html, {
-                "deal_id": deal_id,
-                "title": case_info["title"],
-                "url": detail_url,
-                "is_update": True,
-            })
-            print(f"STEP 1.5.19: Email sent: {subj}")
-        else:
-            if matched_deal_id:
-                print(f"  ⚠️ Deal ID from LLM not found: {matched_deal_id}")
-            # No match -> check USA relation
-            print(f"  ➖ No deal match for: {case_info['title'][:60]}")
-            print(f"STEP 1.5.20: No deal match for: {case_info['title'][:60]}")
+        }
+        print(f"STEP 1.5.10: Case info: {case_info}")
+        deal_id = db_record.get("deal_id")
+        deal_match = None
+        print(f"STEP 1.5.11: Deal ID: {deal_id}")
+        if deal_id:
+            deal_match = find_deal_by_id(deal_id)
+            print(f"STEP 1.5.12: Deal match: {deal_match}")
+            if deal_match:
+                print(f"  🎯 Existing deal_id: {deal_id}")
+                print(f"STEP 1.5.13: Existing deal_id: {deal_id}")
+                subj, html = generate_update_email_html(
+                    case_info, changes, deal_match)
+                if not send_email_via_webhook(subj, html, {
+                    "deal_id": deal_id,
+                    "title": case_info["title"],
+                    "url": detail_url,
+                    "is_update": True,
+                }):
+                    collect_error(
+                        error_items,
+                        "Failed to send update email",
+                        step="send_email",
+                        context={"title": title[:80], "detail_url": detail_url, "deal_id": deal_id},
+                    )
+                print(f"STEP 1.5.14: Email sent: {subj}")
+            else:
+                print(
+                    f"  ⚠️ deal_id {deal_id} not found in deals list, treating as unmatched")
+                deal_id = None
+                print(f"STEP 1.5.15: No deal match for: {case_info['title'][:60]}")
+        if not deal_id:
             try:
-                is_usa = verify_usa_relation(case_info["title"])
-                print(f"STEP 1.5.21: USA relation: {is_usa}")
-                if is_usa:
-                    print(f"  🇺🇸 USA-related - sending update email")
-                    print(f"STEP 1.5.22: Sending update email")
-                    subj, html = generate_update_email_html(case_info, changes)
-                    send_email_via_webhook(subj, html, {
-                        "title": case_info["title"],
-                        "url": detail_url,
-                        "is_update": True,
-                        "usa_related": True,
-                    })
-                    print(f"STEP 1.5.23: Email sent: {subj}")
-                else:
-                    print(f"  ℹ️ Not USA-related - no email, updating DB only")
+                matched_deal_id = match_title_with_deals(case_info["title"])
             except Exception as e:
-                logger.exception(f"  Error checking USA relation: {e}")
-                print(f"STEP 1.5.24: Error checking USA relation: {e}")
-    # Update the DB record with all scraped fields
-    update_fields = {
-        "title": scraped.get("title") or title,
-        "description": scraped.get("description"),
-        "case_type": scraped.get("case_type"),
-        "case_state": scraped.get("case_state"),
-        "market_sector": scraped.get("market_sector"),
-        "outcome": scraped.get("outcome"),
-        "opened_date": scraped.get("opened_date"),
-        "closed_date": scraped.get("closed_date"),
-        "history": scraped.get("history", []),
-        "published_date": scraped.get("published_date"),
-        "last_updated": scraped.get("last_updated"),
-    }
-    if deal_id:
-        update_fields["deal_id"] = deal_id
-    print(f"STEP 1.5.25: Update fields: {update_fields}")
-    update_uk_cma_case(doc_id, update_fields)
-    print(f"STEP 1.5.26: Updated DB record: {update_fields}")
-    return True
+                logger.exception(f"Deal matching error: {e}")
+                collect_error(
+                    error_items,
+                    str(e),
+                    step="match_title_with_deals",
+                    context={"title": case_info["title"][:80], "detail_url": detail_url},
+                )
+                matched_deal_id = None
+
+            print(f"STEP 1.5.16: Matched deal ID: {matched_deal_id}")
+            deal_match = find_deal_by_id(
+                matched_deal_id) if matched_deal_id else None
+            print(f"STEP 1.5.17: Deal match: {deal_match}")
+            if deal_match:
+                acquirer = deal_match.get(
+                    "acquirer") or deal_match.get("acquire_name", "N/A")
+                target = deal_match.get("target") or deal_match.get(
+                    "target_name", "N/A")
+                print(f"  🎯 New match: {acquirer} / {target}")
+                print(f"STEP 1.5.18: New match: {acquirer} / {target}")
+                deal_id = matched_deal_id
+
+                subj, html = generate_update_email_html(
+                    case_info, changes, deal_match)
+                if not send_email_via_webhook(subj, html, {
+                    "deal_id": deal_id,
+                    "title": case_info["title"],
+                    "url": detail_url,
+                    "is_update": True,
+                }):
+                    collect_error(
+                        error_items,
+                        "Failed to send update email",
+                        step="send_email",
+                        context={"title": title[:80], "detail_url": detail_url, "deal_id": deal_id},
+                    )
+                print(f"STEP 1.5.19: Email sent: {subj}")
+            else:
+                if matched_deal_id:
+                    print(f"  ⚠️ Deal ID from LLM not found: {matched_deal_id}")
+                print(f"  ➖ No deal match for: {case_info['title'][:60]}")
+                print(f"STEP 1.5.20: No deal match for: {case_info['title'][:60]}")
+                try:
+                    is_usa = verify_usa_relation(case_info["title"])
+                    print(f"STEP 1.5.21: USA relation: {is_usa}")
+                    if is_usa:
+                        print(f"  🇺🇸 USA-related - sending update email")
+                        print(f"STEP 1.5.22: Sending update email")
+                        subj, html = generate_update_email_html(case_info, changes)
+                        if not send_email_via_webhook(subj, html, {
+                            "title": case_info["title"],
+                            "url": detail_url,
+                            "is_update": True,
+                            "usa_related": True,
+                        }):
+                            collect_error(
+                                error_items,
+                                "Failed to send USA-related update email",
+                                step="send_email",
+                                context={"title": title[:80], "detail_url": detail_url},
+                            )
+                        print(f"STEP 1.5.23: Email sent: {subj}")
+                    else:
+                        print(f"  ℹ️ Not USA-related - no email, updating DB only")
+                except Exception as e:
+                    logger.exception(f"  Error checking USA relation: {e}")
+                    print(f"STEP 1.5.24: Error checking USA relation: {e}")
+                    collect_error(
+                        error_items,
+                        str(e),
+                        step="verify_usa_relation",
+                        context={"title": title[:80], "detail_url": detail_url},
+                    )
+
+        update_fields = {
+            "title": scraped.get("title") or title,
+            "description": scraped.get("description"),
+            "case_type": scraped.get("case_type"),
+            "case_state": scraped.get("case_state"),
+            "market_sector": scraped.get("market_sector"),
+            "outcome": scraped.get("outcome"),
+            "opened_date": scraped.get("opened_date"),
+            "closed_date": scraped.get("closed_date"),
+            "history": scraped.get("history", []),
+            "published_date": scraped.get("published_date"),
+            "last_updated": scraped.get("last_updated"),
+        }
+        if deal_id:
+            update_fields["deal_id"] = deal_id
+        print(f"STEP 1.5.25: Update fields: {update_fields}")
+        if not update_uk_cma_case(doc_id, update_fields):
+            collect_error(
+                error_items,
+                "Failed to update case document",
+                step="update_uk_cma_case",
+                context={"title": title[:80], "detail_url": detail_url},
+            )
+            return False
+        print(f"STEP 1.5.26: Updated DB record: {update_fields}")
+        return True
+    except Exception as e:
+        logger.exception(f"Error processing case: {e}")
+        collect_error(
+            error_items,
+            str(e),
+            step="process_case",
+            context={"title": title[:80], "detail_url": detail_url},
+        )
+        return False
 
 
 # ===================================================================
@@ -996,6 +1039,10 @@ def main():
     global LOG_FILE
     LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = datetime.datetime.now()
+    error_items: List[Dict[str, Any]] = []
+    updated_count = 0
+    unchanged_count = 0
+    open_cases: List[Dict[str, Any]] = []
     logger.info("=" * 60)
     logger.info("STEP 1: Starting UK CMA Cases Update Monitor")
     logger.info(f"Log file: {LOG_FILE}")
@@ -1004,74 +1051,75 @@ def main():
     print("STEP 1.1: UK CMA Open Mergers Update Monitor")
     print(f"{'='*60}\n")
 
-    # Step 1: MongoDB connection
-    print("STEP 1.2: Connecting to MongoDB...")
-    success, msg = init_mongodb_connection()
-    if success:
-        print(f"✅ {msg}\n")
-    else:
-        _log_critical_error_and_email(
-            f"MongoDB connection failed: {msg}",
-            {"step": "mongodb_connect"},
-        )
-        return
-
-    # Step 2: Load deals
-    print("STEP 1.3: Loading deals from MongoDB...")
-    load_deals()
-
-    # Step 3: Fetch open cases from uk_cma_cases
-    print("\nSTEP 1.4: Fetching open cases from uk_cma_cases...")
-    open_cases = get_open_cases()
-    if not open_cases:
-        print("STEP 1.4.1: No open cases to monitor. Exiting.")
-        return
-
-    # Step 4: Process each open case
-    print(f"\n{'='*60}")
-    print("STEP 1.5: PROCESSING OPEN CASES")
-    print(f"{'='*60}\n")
-
-    updated_count = 0
-    unchanged_count = 0
-
-    for idx, case in enumerate(open_cases, 1):
-        print(f"STEP 1.5.1: Case: {case}")
-        title = case.get("title", "N/A")
-        print(f"\n[{idx}/{len(open_cases)}] {title[:70]}")
-
-        had_changes = process_case(case)
-        print(f"STEP 1.5.3: Had changes: {had_changes}")
-        if had_changes:
-            updated_count += 1
+    try:
+        print("STEP 1.2: Connecting to MongoDB...")
+        success, msg = init_mongodb_connection()
+        if success:
+            print(f"✅ {msg}\n")
         else:
-            print(f"STEP 1.5.4: Unchanged")
-            unchanged_count += 1
+            collect_error(
+                error_items,
+                f"MongoDB connection failed: {msg}",
+                step="mongodb_connect",
+            )
+            return
 
-    # Summary
-    print(f"\n{'='*60}")
-    print("STEP 1.6: ALL DONE!")
-    print(f"{'='*60}")
-    print(f"STEP 1.6.1: Total open cases checked: {len(open_cases)}")
-    print(f"STEP 1.6.2: Cases with updates: {updated_count}")
-    print(f"STEP 1.6.3: Cases unchanged: {unchanged_count}")
-    print(f"{'='*60}\n")
-    elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
-    logger.info("=" * 60)
-    logger.info("SUMMARY")
-    logger.info(
-        f"STEP 1.6.4: Total open cases checked     : {len(open_cases)}")
-    logger.info(f"STEP 1.6.5: Cases with updates           : {updated_count}")
-    logger.info(
-        f"STEP 1.6.6: Cases unchanged              : {unchanged_count}")
-    logger.info(f"STEP 1.6.7: Total time                   : {elapsed}s")
-    logger.info("=" * 60)
+        print("STEP 1.3: Loading deals from MongoDB...")
+        load_deals()
+
+        print("\nSTEP 1.4: Fetching open cases from uk_cma_cases...")
+        open_cases = get_open_cases()
+        if not open_cases:
+            print("STEP 1.4.1: No open cases to monitor. Exiting.")
+            return
+
+        print(f"\n{'='*60}")
+        print("STEP 1.5: PROCESSING OPEN CASES")
+        print(f"{'='*60}\n")
+
+        for idx, case in enumerate(open_cases, 1):
+            print(f"STEP 1.5.1: Case: {case}")
+            title = case.get("title", "N/A")
+            print(f"\n[{idx}/{len(open_cases)}] {title[:70]}")
+
+            had_changes = process_case(case, error_items)
+            print(f"STEP 1.5.3: Had changes: {had_changes}")
+            if had_changes:
+                updated_count += 1
+            else:
+                print(f"STEP 1.5.4: Unchanged")
+                unchanged_count += 1
+
+    except Exception as e:
+        logger.exception(f"Unhandled error in main: {e}")
+        collect_error(
+            error_items,
+            f"Unhandled error in main: {e}",
+            step="run_main",
+        )
+
+    finally:
+        send_error_summary(error_items, SCRIPT_NAME)
+
+        print(f"\n{'='*60}")
+        print("STEP 1.6: ALL DONE!")
+        print(f"{'='*60}")
+        print(f"STEP 1.6.1: Total open cases checked: {len(open_cases)}")
+        print(f"STEP 1.6.2: Cases with updates: {updated_count}")
+        print(f"STEP 1.6.3: Cases unchanged: {unchanged_count}")
+        print(f"{'='*60}\n")
+        elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
+        logger.info("=" * 60)
+        logger.info("SUMMARY")
+        logger.info(
+            f"STEP 1.6.4: Total open cases checked     : {len(open_cases)}")
+        logger.info(f"STEP 1.6.5: Cases with updates           : {updated_count}")
+        logger.info(
+            f"STEP 1.6.6: Cases unchanged              : {unchanged_count}")
+        logger.info(f"STEP 1.6.7: Errors encountered           : {len(error_items)}")
+        logger.info(f"STEP 1.6.8: Total time                   : {elapsed}s")
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        _log_critical_error_and_email(
-            f"Unhandled error in main: {e}", {"step": "main"})
-        raise
+    main()

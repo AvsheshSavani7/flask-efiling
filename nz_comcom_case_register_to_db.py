@@ -10,7 +10,6 @@ import os
 import sys
 import logging
 import time
-import traceback
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional
@@ -23,7 +22,7 @@ from openai import OpenAI
 from playwright.sync_api import sync_playwright
 
 from llm_verification_service import verify_usa_relation
-from error_email_service import send_error_email
+from scraper_error_utils import collect_error, send_error_summary
 from mongodb_connection import (
     get_database,
     get_deals_collection,
@@ -92,17 +91,6 @@ if not logger.handlers:
 logger.propagate = False
 
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
-
-
-def _log_critical_error_and_email(msg: str, context: Optional[Dict[str, Any]] = None):
-    """Immediate error email — use ONLY for critical startup / fatal failures."""
-    logger.error(msg)
-    send_error_email(
-        script_name=SCRIPT_NAME,
-        error_message=msg,
-        context=context,
-        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
-    )
 
 
 # Constants
@@ -184,11 +172,8 @@ def get_open_deals_for_matching() -> List[Dict[str, Any]]:
                 d.pop("_id", None)
         return deals
     except Exception as e:
-        _log_critical_error_and_email(
-            f"Error fetching deals: {e}",
-            {"step": "get_open_deals_for_matching"},
-        )
-        return []
+        logger.exception(f"Error fetching deals: {e}")
+        raise
 
 
 def match_case_to_deal(
@@ -278,7 +263,7 @@ If no deal satisfies this rule, respond exactly: None"""
             return None
     except Exception as e:
         logger.exception(f"LLM match error: {e}")
-        return None
+        raise
 
 
 def _post_webhook(payload: Dict[str, Any]) -> bool:
@@ -641,6 +626,9 @@ def run():
     LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     run_start = time.time()
     error_items: List[Dict[str, Any]] = []
+    inserted = 0
+    skipped = 0
+    updated = 0
     env_flag = os.getenv("NZ_CASES_TEST_MODE", "").lower()
     test_mode = env_flag in ("1", "true", "yes", "y")
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"
@@ -650,165 +638,221 @@ def run():
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
 
-    logger.info("[STEP 1] Initializing MongoDB connection...")
+    try:
+        logger.info("[STEP 1] Initializing MongoDB connection...")
 
-    success, message = init_mongodb_connection(ENV_PATH)
-    if not success:
-        _log_critical_error_and_email(f"MongoDB connection failed: {message}", {
-                                      "step": "mongodb_connect"})
-        return
-    logger.info(f"[STEP 1.1] MongoDB: {message}")
+        success, message = init_mongodb_connection(ENV_PATH)
+        if not success:
+            collect_error(
+                error_items,
+                f"MongoDB connection failed: {message}",
+                step="mongodb_connect",
+            )
+            return
+        logger.info(f"[STEP 1.1] MongoDB: {message}")
 
-    collection = get_nz_cases_collection()
-    if collection is None:
-        _log_critical_error_and_email("[STEP 1.2] nz_cases collection not available", {
-                                      "step": "get_collection"})
-        return
+        collection = get_nz_cases_collection()
+        if collection is None:
+            collect_error(
+                error_items,
+                "nz_cases collection not available",
+                step="get_collection",
+            )
+            return
 
-    deals = get_open_deals_for_matching()
-    logger.info(f"[STEP 1.3] Loaded {len(deals)} deals for matching")
+        try:
+            deals = get_open_deals_for_matching()
+        except Exception as e:
+            collect_error(
+                error_items,
+                f"Error fetching deals: {e}",
+                step="get_open_deals_for_matching",
+            )
+            deals = []
 
-    open_date = get_open_date_one_week_ago()
-    list_url = LIST_URL_TEMPLATE.format(open_date=open_date)
-    logger.info(f"[STEP 1.4] List URL (open_date={open_date}): {list_url}")
+        logger.info(f"[STEP 1.3] Loaded {len(deals)} deals for matching")
 
-    inserted = 0
-    skipped = 0
-    updated = 0
+        open_date = get_open_date_one_week_ago()
+        list_url = LIST_URL_TEMPLATE.format(open_date=open_date)
+        logger.info(f"[STEP 1.4] List URL (open_date={open_date}): {list_url}")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-
-        # [STEP 2] Fetch list page and extract items
-        page.goto(list_url, wait_until="domcontentloaded")
-        page.wait_for_timeout(2000)
-        list_html = page.content()
-        items = extract_list_items_from_html(list_html)
-        logger.info(
-            f"[STEP 2] Found {len(items)} list items from ol.filter__results-list")
-
-        for i, list_item in enumerate(items, 1):
-            title = list_item.get("title", "?")
-            detail_url = list_item.get("detail_url", "")
-            if not detail_url:
-                logger.warning(
-                    f"[STEP 2.1] [{i}/{len(items)}] No detail URL, skipping: {title}")
-                continue
-
-            logger.info(f"[STEP 2.2] [{i}/{len(items)}] {title}")
-
-            if not test_mode and detail_url_exists(collection, detail_url):
-                logger.info(f"[STEP 2.3] detail_url already in nz_cases, skip")
-                skipped += 1
-                continue
-
-            detail = fetch_case_detail_page(page, detail_url)
-            if not detail:
-                logger.warning(f"[STEP 2.4] Could not fetch detail, skipping")
-                error_items.append(
-                    {"title": title, "error": "Detail fetch failed", "step": "fetch_case_detail_page"})
-                continue
-
-            doc = build_case_document(list_item, detail)
-
-            # Add/refresh timestamps
-            now_iso = utc_now_iso()
-            doc.setdefault("created_at", now_iso)
-            doc["updated_at"] = now_iso
-
-            # 2-step LLM flow (reference: nz_cases_update_monitor.py)
-            parties = (doc.get("case_details") or {}).get("Parties", "")
-            description = doc.get("description", "")
-            deal_id = match_case_to_deal(
-                title or "", parties, description or "", deals)
-
-            if deal_id:
-                doc["deal_id"] = deal_id
-                logger.info(f"[STEP 2.5] Deal match found (deal_id={deal_id})")
-                if not test_mode:
-                    send_nz_new_case_matched_email(doc, deal_id)
-            else:
-                try:
-                    nz_details = {
-                        "title": title,
-                        "parties": parties,
-                        "description": description,
-                        "case_details": doc.get("case_details"),
-                        "detail_url": detail_url,
-                        "tag": doc.get("tag", ""),
-                        "status": doc.get("status", ""),
-                    }
-                    is_usa = bool(
-                        verify_usa_relation(
-                            company_details=nz_details, case_type="NZ")
-                    )
-                except Exception as e:
-                    logger.exception(f"[STEP 2.6] USA verification error: {e}")
-                    error_items.append(
-                        {"title": title, "error": str(e), "step": "verify_usa_relation"})
-                    is_usa = False
-
-                if is_usa:
-                    logger.info("[STEP 2.7] USA-related (unmatched)")
-                    if not test_mode:
-                        send_unmatched_nz_usa_email_via_webhook(doc)
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
 
             try:
-                if test_mode:
-                    action = upsert_nz_case_by_detail_url(
-                        collection, detail_url, doc)
-                    if action == "inserted":
-                        inserted += 1
-                    else:
-                        updated += 1
-                    logger.info(
-                        f"[STEP 2.8] Upserted into nz_cases ({action})")
-                else:
-                    collection.insert_one(doc)
-                    case_number = (doc.get("case_number") or "").strip()
-                    extra = f" case_number={case_number}" if case_number else ""
-                    logger.info(
-                        f"[STEP 2.9] Inserted into nz_cases (detail_url){extra}")
-                    inserted += 1
-            except Exception as e:
-                logger.exception(f"[STEP 2.10] Insert failed: {e}")
-                error_items.append(
-                    {"title": title, "error": str(e), "step": "insert_case"})
+                page.goto(list_url, wait_until="domcontentloaded")
+                page.wait_for_timeout(2000)
+                list_html = page.content()
+                items = extract_list_items_from_html(list_html)
+                logger.info(
+                    f"[STEP 2] Found {len(items)} list items from ol.filter__results-list")
 
-        browser.close()
-        logger.info("[STEP 2.11] Browser closed")
+                for i, list_item in enumerate(items, 1):
+                    try:
+                        title = list_item.get("title", "?")
+                        detail_url = list_item.get("detail_url", "")
+                        if not detail_url:
+                            logger.warning(
+                                f"[STEP 2.1] [{i}/{len(items)}] No detail URL, skipping: {title}")
+                            continue
 
-    if error_items:
-        logger.warning(
-            f"[STEP 2.12] {len(error_items)} per-case errors collected — sending summary email")
-        send_error_email(
-            script_name=SCRIPT_NAME,
-            error_message=f"{len(error_items)} errors occurred during run",
-            context={
-                "error_count": len(error_items),
-                "errors": error_items[:20],
-            },
-            traceback_str=None,
+                        logger.info(f"[STEP 2.2] [{i}/{len(items)}] {title}")
+
+                        if not test_mode and detail_url_exists(collection, detail_url):
+                            logger.info(f"[STEP 2.3] detail_url already in nz_cases, skip")
+                            skipped += 1
+                            continue
+
+                        detail = fetch_case_detail_page(page, detail_url)
+                        if not detail:
+                            collect_error(
+                                error_items,
+                                "Detail fetch failed",
+                                step="fetch_case_detail_page",
+                                context={"title": title, "detail_url": detail_url},
+                            )
+                            continue
+
+                        doc = build_case_document(list_item, detail)
+                        case_number = (doc.get("case_number") or "").strip()
+
+                        now_iso = utc_now_iso()
+                        doc.setdefault("created_at", now_iso)
+                        doc["updated_at"] = now_iso
+
+                        parties = (doc.get("case_details") or {}).get("Parties", "")
+                        description = doc.get("description", "")
+
+                        try:
+                            deal_id = match_case_to_deal(
+                                title or "", parties, description or "", deals)
+                        except Exception as e:
+                            logger.exception(f"[STEP 2.5] Deal matching error: {e}")
+                            collect_error(
+                                error_items,
+                                str(e),
+                                step="match_case_to_deal",
+                                case_number=case_number or None,
+                                context={"title": title, "detail_url": detail_url},
+                            )
+                            deal_id = None
+
+                        if deal_id:
+                            doc["deal_id"] = deal_id
+                            logger.info(f"[STEP 2.5] Deal match found (deal_id={deal_id})")
+                            if not test_mode:
+                                if not send_nz_new_case_matched_email(doc, deal_id):
+                                    collect_error(
+                                        error_items,
+                                        "Failed to send matched-case email",
+                                        step="send_email",
+                                        case_number=case_number or None,
+                                        context={"detail_url": detail_url},
+                                    )
+                        else:
+                            is_usa = False
+                            try:
+                                nz_details = {
+                                    "title": title,
+                                    "parties": parties,
+                                    "description": description,
+                                    "case_details": doc.get("case_details"),
+                                    "detail_url": detail_url,
+                                    "tag": doc.get("tag", ""),
+                                    "status": doc.get("status", ""),
+                                }
+                                is_usa = bool(
+                                    verify_usa_relation(
+                                        company_details=nz_details, case_type="NZ")
+                                )
+                            except Exception as e:
+                                logger.exception(f"[STEP 2.6] USA verification error: {e}")
+                                collect_error(
+                                    error_items,
+                                    str(e),
+                                    step="verify_usa_relation",
+                                    case_number=case_number or None,
+                                    context={"title": title, "detail_url": detail_url},
+                                )
+                                is_usa = False
+
+                            if is_usa:
+                                logger.info("[STEP 2.7] USA-related (unmatched)")
+                                if not test_mode:
+                                    if not send_unmatched_nz_usa_email_via_webhook(doc):
+                                        collect_error(
+                                            error_items,
+                                            "Failed to send USA-related email",
+                                            step="send_email",
+                                            case_number=case_number or None,
+                                            context={"detail_url": detail_url},
+                                        )
+
+                        try:
+                            if test_mode:
+                                action = upsert_nz_case_by_detail_url(
+                                    collection, detail_url, doc)
+                                if action == "inserted":
+                                    inserted += 1
+                                else:
+                                    updated += 1
+                                logger.info(
+                                    f"[STEP 2.8] Upserted into nz_cases ({action})")
+                            else:
+                                collection.insert_one(doc)
+                                extra = f" case_number={case_number}" if case_number else ""
+                                logger.info(
+                                    f"[STEP 2.9] Inserted into nz_cases (detail_url){extra}")
+                                inserted += 1
+                        except Exception as e:
+                            logger.exception(f"[STEP 2.10] Insert failed: {e}")
+                            collect_error(
+                                error_items,
+                                str(e),
+                                step="insert_case",
+                                case_number=case_number or None,
+                                context={"title": title, "detail_url": detail_url},
+                            )
+                    except Exception as e:
+                        logger.exception(f"Error processing item #{i}: {e}")
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="process_list_item",
+                            context={
+                                "title": list_item.get("title"),
+                                "detail_url": list_item.get("detail_url"),
+                            },
+                        )
+
+            finally:
+                browser.close()
+                logger.info("[STEP 2.11] Browser closed")
+
+    except Exception as e:
+        logger.exception(f"Unhandled error in run(): {e}")
+        collect_error(
+            error_items,
+            f"Unhandled error in run(): {e}",
+            step="run_main",
         )
 
-    elapsed = round(time.time() - run_start, 1)
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("SUMMARY")
-    logger.info(f"[STEP 2.13] Inserted                     : {inserted}")
-    logger.info(f"[STEP 2.14] Updated                      : {updated}")
-    logger.info(f"[STEP 2.15] Skipped (already in DB)      : {skipped}")
-    logger.info(
-        f"[STEP 2.16] Errors encountered           : {len(error_items)}")
-    logger.info(f"[STEP 2.17] Total time                   : {elapsed}s")
-    logger.info("=" * 60)
+    finally:
+        send_error_summary(error_items, SCRIPT_NAME)
+
+        elapsed = round(time.time() - run_start, 1)
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("SUMMARY")
+        logger.info(f"[STEP 2.13] Inserted                     : {inserted}")
+        logger.info(f"[STEP 2.14] Updated                      : {updated}")
+        logger.info(f"[STEP 2.15] Skipped (already in DB)      : {skipped}")
+        logger.info(
+            f"[STEP 2.16] Errors encountered           : {len(error_items)}")
+        logger.info(f"[STEP 2.17] Total time                   : {elapsed}s")
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":
-    try:
-        run()
-    except Exception as e:
-        _log_critical_error_and_email(
-            f"Unhandled error in __main__: {e}", {"step": "__main__"})
-        raise
+    run()

@@ -21,8 +21,9 @@ from mongodb_connection import (
 )
 from html import escape as escape_html
 from llm_verification_service import verify_usa_relation
-from error_email_service import send_error_email
+from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
+from typing import Any
 
 # Configuration
 CUTOFF_DATE = (datetime.datetime.now() - datetime.timedelta(days=15)).replace(
@@ -85,17 +86,6 @@ if not logger.handlers:
 logger.propagate = False
 
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
-
-
-def _log_critical_error_and_email(msg: str, context: dict | None = None):
-    """Immediate error email — use ONLY for critical startup / fatal failures."""
-    logger.error(msg)
-    send_error_email(
-        script_name=SCRIPT_NAME,
-        error_message=msg,
-        context=context or {},
-        traceback_str=traceback.format_exc() if sys.exc_info()[0] else None,
-    )
 
 
 def _goto_with_retry(page, url, max_retries=2):
@@ -497,7 +487,7 @@ RESPONSE:
         return None
     except Exception as e:
         logger.warning(f"  LLM Error (samr_cases match): {e}")
-        return None
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -610,7 +600,7 @@ RESPONSE:
         return None, "None"
     except Exception as e:
         logger.warning(f"  LLM Error (deal match): {e}")
-        return None, "None"
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -951,7 +941,7 @@ def save_conditional_data_to_deal(deal_match, conditional_data):
 # Process a single conditional record
 # ---------------------------------------------------------------------------
 
-def process_record(record, samr_cases_list):
+def process_record(record, samr_cases_list, error_items: list[dict[str, Any]] | None = None):
     """
     For one conditional-approval record:
     1. Match against samr_cases titles via LLM
@@ -975,7 +965,21 @@ def process_record(record, samr_cases_list):
         "date": record.get("date", ""),
     }
 
-    matched_case = match_record_to_samr_cases(record, samr_cases_list)
+    try:
+        matched_case = match_record_to_samr_cases(record, samr_cases_list)
+    except Exception as e:
+        logger.exception(f"  samr_cases match failed: {e}")
+        if error_items is not None:
+            collect_error(
+                error_items,
+                str(e),
+                step="match_record_to_samr_cases",
+                context={
+                    "title": title_en[:80],
+                    "url": record.get("url", ""),
+                },
+            )
+        return
 
     if not matched_case:
         logger.info("  No samr_cases match")
@@ -1013,7 +1017,18 @@ def process_record(record, samr_cases_list):
         # Case B: no deal_id → try LLM deal matching
         logger.info("  No deal_id on samr_case, trying LLM deal match...")
         logger.info(f"  samr_case title: {title_en} {title_cn}")
-        deal_match, match_result = match_samr_case_to_deals(matched_case)
+        try:
+            deal_match, match_result = match_samr_case_to_deals(matched_case)
+        except Exception as e:
+            logger.exception(f"  Deal match failed: {e}")
+            if error_items is not None:
+                collect_error(
+                    error_items,
+                    str(e),
+                    step="match_samr_case_to_deals",
+                    context={"title": case_title[:80], "url": record.get("url", "")},
+                )
+            deal_match, match_result = None, "None"
 
         if deal_match:
             deal_id = deal_match.get("deal_id", "")
@@ -1047,6 +1062,13 @@ def process_record(record, samr_cases_list):
                     logger.info("  Not USA-related – no email")
             except Exception as e:
                 logger.exception(f"  Error verifying USA relation: {e}")
+                if error_items is not None:
+                    collect_error(
+                        error_items,
+                        str(e),
+                        step="verify_usa_relation",
+                        context={"title": case_title[:80], "url": record.get("url", "")},
+                    )
 
 
 # ---------------------------------------------------------------------------
@@ -1058,153 +1080,177 @@ def main(headless=True):
     LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     global all_extracted_records, matched_data, deals
     run_start = datetime.datetime.now()
+    error_items: list[dict[str, Any]] = []
 
     all_extracted_records = []
     matched_data = []
+    new_records: list[dict] = []
     logger.info("=" * 60)
     logger.info(" Starting SAMR Conditional Cases Register")
     logger.info(f"Log file: {LOG_FILE}")
     logger.info("=" * 60)
 
-    # Initialize MongoDB
-    ok, msg = init_mongodb_connection(ENV_PATH)
-    if ok:
-        logger.info(msg)
-    else:
-        _log_critical_error_and_email(f"MongoDB initialization failed: {msg}", {
-                                      "step": "init_mongodb_connection"})
-        return {"success": False, "error": msg}
-
-    # Load deals and samr_cases
-    logger.info("Loading deals from MongoDB...")
-    load_deals()
-
-    logger.info("Loading samr_cases from MongoDB...")
-    samr_cases_list = get_all_samr_cases()
-
-    # ------------------------------------------------------------------
-    # PHASE 1: Scrape listing pages
-    # ------------------------------------------------------------------
-    logger.info("PHASE 1: EXTRACT CONDITIONAL APPROVAL RECORDS")
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        context = browser.new_context()
-        page = context.new_page()
-        logger.info(f"Page: {page}")
-
-        try:
-            logger.info(f"Calling BASE_URL: {BASE__SCRAPER_URL}")
-            _goto_with_retry(page, BASE__SCRAPER_URL)
-            logger.info("   Loaded")
-
-            page_num = 1
-            while True:
-                page_records, should_stop = extract_page_records(
-                    page, page_num)
-                all_extracted_records.extend(page_records)
-                logger.info(f"Page records: {page_records}")
-
-                if should_stop:
-                    logger.info("Stopped: Cutoff date reached")
-                    break
-
-                try:
-                    next_btn = page.get_by_text("下一页")
-                    next_class = next_btn.get_attribute("class")
-                    if next_class and "disabled" in next_class:
-                        logger.info("Stopped: No more pages")
-                        break
-                    logger.info(f"Navigating to page {page_num + 1}...")
-                    next_btn.click()
-                    page.wait_for_timeout(2000)
-                    page_num += 1
-                except Exception as e:
-                    logger.exception(f"Pagination error: {e}")
-                    break
-        except Exception as e:
-            _log_critical_error_and_email(
-                f"Scraping error: {e}",
-                {"step": "scrape_listing", "base_url": BASE__SCRAPER_URL},
-            )
-        finally:
-            browser.close()
-
-    logger.info(f"Total records extracted: {len(all_extracted_records)}")
-
-    # ------------------------------------------------------------------
-    # PHASE 2: Filter already-processed records via samr_conditional
-    # ------------------------------------------------------------------
-    logger.info("PHASE 2: FILTER ALREADY-PROCESSED RECORDS")
-
-    new_records = []
-    skipped = 0
-    for rec in all_extracted_records:
-        if rec.get("url") and record_exists_in_samr_conditional(rec["url"]):
-            skipped += 1
+    try:
+        ok, msg = init_mongodb_connection(ENV_PATH)
+        if ok:
+            logger.info(msg)
         else:
-            new_records.append(rec)
+            collect_error(
+                error_items,
+                f"MongoDB initialization failed: {msg}",
+                step="init_mongodb_connection",
+            )
+            return {"success": False, "error": msg}
 
-    if skipped:
-        logger.info(f"Skipped {skipped} already-processed records")
-    logger.info(f"{len(new_records)} new records to process")
+        logger.info("Loading deals from MongoDB...")
+        load_deals()
 
-    # ------------------------------------------------------------------
-    # PHASE 3: Process each new record
-    # ------------------------------------------------------------------
-    logger.info("PHASE 3: MATCH RECORDS AGAINST samr_cases & DEALS")
+        logger.info("Loading samr_cases from MongoDB...")
+        samr_cases_list = get_all_samr_cases()
 
-    for idx, record in enumerate(new_records, 1):
-        title_en = record.get("title_en", "")
-        date_str = record.get("date", "")
+        logger.info("PHASE 1: EXTRACT CONDITIONAL APPROVAL RECORDS")
 
-        logger.info(f"[{idx}/{len(new_records)}] {date_str} - {title_en[:70]}")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=headless)
+            context = browser.new_context()
+            page = context.new_page()
+            logger.info(f"Page: {page}")
 
-        if title_en == "[Translation failed]":
-            logger.info("  Skipped (translation failed)")
-            save_to_samr_conditional({
-                "url": record.get("url", ""),
-                "title_cn": record.get("title_cn", ""),
-                "title_en": title_en,
-                "date": date_str,
-            })
-            continue
+            try:
+                logger.info(f"Calling BASE_URL: {BASE__SCRAPER_URL}")
+                _goto_with_retry(page, BASE__SCRAPER_URL)
+                logger.info("   Loaded")
 
-        process_record(record, samr_cases_list)
+                page_num = 1
+                while True:
+                    page_records, should_stop = extract_page_records(
+                        page, page_num)
+                    all_extracted_records.extend(page_records)
+                    logger.info(f"Page records: {page_records}")
 
-        # Always save to samr_conditional to track processed records
-        save_to_samr_conditional({
-            "url": record.get("url", ""),
-            "title_cn": record.get("title_cn", ""),
-            "title_en": title_en,
-            "date": date_str,
-        })
+                    if should_stop:
+                        logger.info("Stopped: Cutoff date reached")
+                        break
 
-    # ------------------------------------------------------------------
-    # Summary
-    # ------------------------------------------------------------------
-    logger.info("ALL DONE!")
-    logger.info(f"Total records extracted: {len(all_extracted_records)}")
-    logger.info(f"New records processed: {len(new_records)}")
-    logger.info(f"Total matches found: {len(matched_data)}")
-    elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
-    logger.info("=" * 60)
-    logger.info("SUMMARY")
-    logger.info(
-        f"  Total records extracted      : {len(all_extracted_records)}")
-    logger.info(f"  New records processed        : {len(new_records)}")
-    logger.info(f"  Total matches found          : {len(matched_data)}")
-    logger.info(f"  Total time                   : {elapsed}s")
-    logger.info("=" * 60)
+                    try:
+                        next_btn = page.get_by_text("下一页")
+                        next_class = next_btn.get_attribute("class")
+                        if next_class and "disabled" in next_class:
+                            logger.info("Stopped: No more pages")
+                            break
+                        logger.info(f"Navigating to page {page_num + 1}...")
+                        next_btn.click()
+                        page.wait_for_timeout(2000)
+                        page_num += 1
+                    except Exception as e:
+                        logger.exception(f"Pagination error: {e}")
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="pagination",
+                            context={"page": page_num},
+                        )
+                        break
+            except Exception as e:
+                logger.exception(f"Scraping error: {e}")
+                collect_error(
+                    error_items,
+                    f"Scraping error: {e}",
+                    step="scrape_listing",
+                    context={"url": BASE__SCRAPER_URL},
+                )
+            finally:
+                browser.close()
 
-    return {
-        "success": True,
-        "extraction_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "total_extracted": len(all_extracted_records),
-        "total_new": len(new_records),
-        "total_matched": len(matched_data),
-        "matched_results": convert_datetime_to_string(matched_data),
-    }
+        logger.info(f"Total records extracted: {len(all_extracted_records)}")
+
+        logger.info("PHASE 2: FILTER ALREADY-PROCESSED RECORDS")
+
+        skipped = 0
+        for rec in all_extracted_records:
+            if rec.get("url") and record_exists_in_samr_conditional(rec["url"]):
+                skipped += 1
+            else:
+                new_records.append(rec)
+
+        if skipped:
+            logger.info(f"Skipped {skipped} already-processed records")
+        logger.info(f"{len(new_records)} new records to process")
+
+        logger.info("PHASE 3: MATCH RECORDS AGAINST samr_cases & DEALS")
+
+        for idx, record in enumerate(new_records, 1):
+            try:
+                title_en = record.get("title_en", "")
+                date_str = record.get("date", "")
+
+                logger.info(f"[{idx}/{len(new_records)}] {date_str} - {title_en[:70]}")
+
+                if title_en == "[Translation failed]":
+                    logger.info("  Skipped (translation failed)")
+                    save_to_samr_conditional({
+                        "url": record.get("url", ""),
+                        "title_cn": record.get("title_cn", ""),
+                        "title_en": title_en,
+                        "date": date_str,
+                    })
+                    continue
+
+                process_record(record, samr_cases_list, error_items=error_items)
+
+                save_to_samr_conditional({
+                    "url": record.get("url", ""),
+                    "title_cn": record.get("title_cn", ""),
+                    "title_en": title_en,
+                    "date": date_str,
+                })
+            except Exception as e:
+                logger.exception(f"Error processing record #{idx}: {e}")
+                collect_error(
+                    error_items,
+                    str(e),
+                    step="process_record",
+                    context={
+                        "url": record.get("url", ""),
+                        "title": (record.get("title_en") or "")[:80],
+                    },
+                )
+
+        return {
+            "success": True,
+            "extraction_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "total_extracted": len(all_extracted_records),
+            "total_new": len(new_records),
+            "total_matched": len(matched_data),
+            "matched_results": convert_datetime_to_string(matched_data),
+        }
+
+    except Exception as e:
+        logger.exception(f"Unhandled error in main: {e}")
+        collect_error(
+            error_items,
+            f"Unhandled error in main: {e}",
+            step="run_main",
+        )
+        return {"success": False, "error": str(e)}
+
+    finally:
+        send_error_summary(error_items, SCRIPT_NAME)
+
+        logger.info("ALL DONE!")
+        logger.info(f"Total records extracted: {len(all_extracted_records)}")
+        logger.info(f"New records processed: {len(new_records)}")
+        logger.info(f"Total matches found: {len(matched_data)}")
+        elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
+        logger.info("=" * 60)
+        logger.info("SUMMARY")
+        logger.info(
+            f"  Total records extracted      : {len(all_extracted_records)}")
+        logger.info(f"  New records processed        : {len(new_records)}")
+        logger.info(f"  Total matches found          : {len(matched_data)}")
+        logger.info(f"  Errors encountered           : {len(error_items)}")
+        logger.info(f"  Total time                   : {elapsed}s")
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":
@@ -1226,9 +1272,4 @@ if __name__ == "__main__":
             sys.exit(0)
 
     logger.info("Mode: Scrape SAMR conditional approval pages")
-    try:
-        main(headless=headless_mode)
-    except Exception as e:
-        _log_critical_error_and_email(
-            f"Unhandled error in main: {e}", {"step": "main"})
-        raise
+    main(headless=headless_mode)
