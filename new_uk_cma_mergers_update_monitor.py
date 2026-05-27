@@ -531,7 +531,8 @@ If no deal satisfies this rule, respond exactly: None"""
 
 
 def find_deal_by_id(deal_id):
-    deal_by_id = {str(d.get("deal_id", ""))                  : d for d in deals if d.get("deal_id")}
+    deal_by_id = {str(d.get("deal_id", ""))
+                      : d for d in deals if d.get("deal_id")}
     return deal_by_id.get(deal_id)
 
 
@@ -566,8 +567,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
                 },
                 {"role": "user", "content": prompt},
             ],
-            temperature=0,
-            max_tokens=10,
+            max_completion_tokens=10
         )
         result = response.choices[0].message.content.strip().lower()
         if result == "true":
@@ -908,14 +908,16 @@ def process_case(db_record, error_items: List[Dict[str, Any]]):
                         error_items,
                         "Failed to send update email",
                         step="send_email",
-                        context={"title": title[:80], "detail_url": detail_url, "deal_id": deal_id},
+                        context={
+                            "title": title[:80], "detail_url": detail_url, "deal_id": deal_id},
                     )
                 print(f"STEP 1.5.14: Email sent: {subj}")
             else:
                 print(
                     f"  ⚠️ deal_id {deal_id} not found in deals list, treating as unmatched")
                 deal_id = None
-                print(f"STEP 1.5.15: No deal match for: {case_info['title'][:60]}")
+                print(
+                    f"STEP 1.5.15: No deal match for: {case_info['title'][:60]}")
         if not deal_id:
             try:
                 matched_deal_id = match_title_with_deals(case_info["title"])
@@ -925,7 +927,8 @@ def process_case(db_record, error_items: List[Dict[str, Any]]):
                     error_items,
                     str(e),
                     step="match_title_with_deals",
-                    context={"title": case_info["title"][:80], "detail_url": detail_url},
+                    context={"title": case_info["title"]
+                             [:80], "detail_url": detail_url},
                 )
                 matched_deal_id = None
 
@@ -954,21 +957,25 @@ def process_case(db_record, error_items: List[Dict[str, Any]]):
                         error_items,
                         "Failed to send update email",
                         step="send_email",
-                        context={"title": title[:80], "detail_url": detail_url, "deal_id": deal_id},
+                        context={
+                            "title": title[:80], "detail_url": detail_url, "deal_id": deal_id},
                     )
                 print(f"STEP 1.5.19: Email sent: {subj}")
             else:
                 if matched_deal_id:
-                    print(f"  ⚠️ Deal ID from LLM not found: {matched_deal_id}")
+                    print(
+                        f"  ⚠️ Deal ID from LLM not found: {matched_deal_id}")
                 print(f"  ➖ No deal match for: {case_info['title'][:60]}")
-                print(f"STEP 1.5.20: No deal match for: {case_info['title'][:60]}")
+                print(
+                    f"STEP 1.5.20: No deal match for: {case_info['title'][:60]}")
                 try:
                     is_usa = verify_usa_relation(case_info["title"])
                     print(f"STEP 1.5.21: USA relation: {is_usa}")
                     if is_usa:
                         print(f"  🇺🇸 USA-related - sending update email")
                         print(f"STEP 1.5.22: Sending update email")
-                        subj, html = generate_update_email_html(case_info, changes)
+                        subj, html = generate_update_email_html(
+                            case_info, changes)
                         if not send_email_via_webhook(subj, html, {
                             "title": case_info["title"],
                             "url": detail_url,
@@ -979,7 +986,8 @@ def process_case(db_record, error_items: List[Dict[str, Any]]):
                                 error_items,
                                 "Failed to send USA-related update email",
                                 step="send_email",
-                                context={"title": title[:80], "detail_url": detail_url},
+                                context={
+                                    "title": title[:80], "detail_url": detail_url},
                             )
                         print(f"STEP 1.5.23: Email sent: {subj}")
                     else:
@@ -991,7 +999,8 @@ def process_case(db_record, error_items: List[Dict[str, Any]]):
                         error_items,
                         str(e),
                         step="verify_usa_relation",
-                        context={"title": title[:80], "detail_url": detail_url},
+                        context={"title": title[:80],
+                                 "detail_url": detail_url},
                     )
 
         update_fields = {
@@ -1108,15 +1117,18 @@ def main():
         print(f"STEP 1.6.2: Cases with updates: {updated_count}")
         print(f"STEP 1.6.3: Cases unchanged: {unchanged_count}")
         print(f"{'='*60}\n")
-        elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
+        elapsed = round((datetime.datetime.now() -
+                        run_start).total_seconds(), 1)
         logger.info("=" * 60)
         logger.info("SUMMARY")
         logger.info(
             f"STEP 1.6.4: Total open cases checked     : {len(open_cases)}")
-        logger.info(f"STEP 1.6.5: Cases with updates           : {updated_count}")
+        logger.info(
+            f"STEP 1.6.5: Cases with updates           : {updated_count}")
         logger.info(
             f"STEP 1.6.6: Cases unchanged              : {unchanged_count}")
-        logger.info(f"STEP 1.6.7: Errors encountered           : {len(error_items)}")
+        logger.info(
+            f"STEP 1.6.7: Errors encountered           : {len(error_items)}")
         logger.info(f"STEP 1.6.8: Total time                   : {elapsed}s")
         logger.info("=" * 60)
 
