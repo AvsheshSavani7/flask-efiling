@@ -1,12 +1,14 @@
 from mongodb_connection import (
     get_database,
     get_deals_collection,
+    get_deal_by_id,
     init_mongodb_connection,
     is_connected,
 )
 from llm_verification_service import verify_usa_relation
 from log_utils import cleanup_old_logs, refresh_log_file
 from scraper_error_utils import collect_error, send_error_summary
+from email_subject_builder import build_subject
 import os
 import json
 import sys
@@ -380,11 +382,10 @@ def _post_email_payload(payload: Dict[str, Any]) -> bool:
         return False
 
 
-def send_new_case_email(case_info: Dict[str, Any], deal_id: Optional[str]) -> bool:
+def send_new_case_email(case_info: Dict[str, Any], deal_id: Optional[str], deal_match: Optional[Dict[str, Any]] = None) -> bool:
     case_number = case_info.get("case_number", "N/A")
     title = case_info.get("title", "N/A")
-    prefix = "[FRMD]" if deal_id else "[FRUD]"
-    subject = f"{prefix} ACCC Case (New) – {case_number}: {title}"
+    subject = build_subject("accc", "new", deal_match)
     url = case_info.get("url", "")
     notification_date = case_info.get("effective_notification_date", "")
     acquisition_status = case_info.get("acquisition_status", "")
@@ -438,7 +439,7 @@ def send_new_case_email(case_info: Dict[str, Any], deal_id: Optional[str]) -> bo
 def send_unmatched_usa_related_email(case_info: Dict[str, Any]) -> bool:
     case_number = case_info.get("case_number", "N/A")
     title = case_info.get("title", "N/A")
-    subject = f"[FRUD] ACCC Case (USA-Related) – {case_number}"
+    subject = build_subject("accc", "new")
     url = case_info.get("url", "")
     notification_date = case_info.get("effective_notification_date", "")
     acquisition_status = case_info.get("acquisition_status", "")
@@ -1042,7 +1043,8 @@ def run_accc_cases_register(test_mode: bool = False):
                             logger.info(
                                 f"  Deal match found (deal_id={matched_deal_id}); sending email"
                             )
-                            if not send_new_case_email(case_info, matched_deal_id):
+                            deal_match = get_deal_by_id(matched_deal_id)
+                            if not send_new_case_email(case_info, matched_deal_id, deal_match):
                                 collect_error(
                                     error_items,
                                     "Failed to send new-case email",

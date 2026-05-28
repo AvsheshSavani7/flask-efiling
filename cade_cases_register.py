@@ -22,11 +22,13 @@ from scraper_error_utils import collect_error, send_error_summary
 from mongodb_connection import (
     get_database,
     get_deals_collection,
+    get_deal_by_id,
     init_mongodb_connection,
     is_connected,
 )
 from html import escape as escape_html
 from log_utils import cleanup_old_logs, refresh_log_file
+from email_subject_builder import build_subject
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -1067,7 +1069,7 @@ def _post_email_payload(payload: Dict[str, Any]) -> bool:
         return False
 
 
-def send_matched_email(case_data: Dict[str, Any], deal_id: str) -> bool:
+def send_matched_email(case_data: Dict[str, Any], deal_id: str, deal_match: Optional[Dict[str, Any]] = None) -> bool:
     process = case_data.get("process", "N/A")
     interessados = case_data.get(
         "interessados_en") or case_data.get("interessados", "N/A")
@@ -1076,7 +1078,7 @@ def send_matched_email(case_data: Dict[str, Any], deal_id: str) -> bool:
     detail_url = case_data.get("detail_url", "")
     table_records = case_data.get("table_records", [])
 
-    subject = f"[FRMD] CADE Brazil (New) – {process}"
+    subject = build_subject("cade", "new", deal_match)
 
     table_html = ""
     if table_records:
@@ -1128,7 +1130,7 @@ def send_usa_related_email(case_data: Dict[str, Any]) -> bool:
     reg_date = case_data.get("registration_date", "N/A")
     detail_url = case_data.get("detail_url", "")
 
-    subject = f"[FRUD] CADE Brazil (USA-Related) – {process}"
+    subject = build_subject("cade", "new")
 
     html = f"""
 <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;max-width:900px;margin:0 auto;">
@@ -1386,7 +1388,8 @@ def run_cade_cases_register(
                             case_doc["deal_id"] = matched_deal_id
 
                             if not test_mode:
-                                if not send_matched_email(case_doc, matched_deal_id):
+                                deal_match = get_deal_by_id(matched_deal_id)
+                                if not send_matched_email(case_doc, matched_deal_id, deal_match):
                                     collect_error(
                                         error_items,
                                         "Failed to send matched-case email",

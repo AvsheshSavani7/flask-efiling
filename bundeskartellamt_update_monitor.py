@@ -43,6 +43,7 @@ from llm_verification_service import verify_country_relation
 from bundeskartellamt_initial_proxy import match_deal_with_llm
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
+from email_subject_builder import build_subject
 
 load_dotenv(".env")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -452,7 +453,7 @@ def generate_update_email(stored: Dict, changes: List[Tuple[str, str, str]],
         acquirer = deal.get("acquirer") or deal.get("acquire_name", "N/A")
         deal_id = deal.get("deal_id", "N/A")
         prefix = "[FRMD]"
-        subject = f"{prefix} German Bundeskartellamt-{fn} (Updated) – {target} / {acquirer}"
+        subject = build_subject("bundeskartellamt", "update", deal)
         banner = f"""
 <div style="background:#dbeafe;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #2563eb;">
   <div style="font-weight:800;color:#1e40af;margin-bottom:4px;">Matched Deal</div>
@@ -462,7 +463,7 @@ def generate_update_email(stored: Dict, changes: List[Tuple[str, str, str]],
     else:
         prefix = "[FRUD]"
         pursue_en = stored.get("pursue_en", "N/A")
-        subject = f"{prefix} German Bundeskartellamt-{fn} (Updated, USA-Related) – {pursue_en[:60]}"
+        subject = build_subject("bundeskartellamt", "update")
         banner = """
 <div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
   <div style="font-weight:800;color:#92400e;">USA-Related (Unmatched)</div>

@@ -38,6 +38,7 @@ from openai import OpenAI
 
 
 from log_utils import cleanup_old_logs, refresh_log_file
+from email_subject_builder import build_subject
 
 load_dotenv(".env")
 
@@ -380,12 +381,10 @@ def send_update_email(
         parties = old_case.get("parties", "N/A")
 
         if deal:
-            target = deal.get("target") or deal.get("target_name", "N/A")
-            acquirer = deal.get("acquirer") or deal.get("acquire_name", "N/A")
-            subject = f"[FRMD] Canada Competition Bureau (Updated) – {target} / {acquirer}"
+            subject = build_subject("canada", "update", deal)
             deal_id = str(deal.get("_id")) if deal.get("_id") else None
         else:
-            subject = f"[FRUD] Canada Competition Bureau (USA-Related Update)"
+            subject = build_subject("canada", "update")
             deal_id = None
 
         payload = {

@@ -57,6 +57,7 @@ import traceback
 
 from ec_html_scraper import parse_case_html
 from log_utils import cleanup_old_logs, refresh_log_file
+from email_subject_builder import build_subject
 
 load_dotenv(".env")
 
@@ -753,7 +754,7 @@ def generate_matched_email(case: Dict[str, Any], deal: Dict[str, Any]) -> Tuple[
     case_num = case.get("case_number", "N/A")
     case_url = case.get("case_url", "")
 
-    subject = f"[FRMD] EC Merger Case (New) \u2013 {target} / {acquirer}"
+    subject = build_subject("ec_merger", "new", deal)
 
     deal_banner = (
         '<div style="background:#dbeafe;border-radius:6px;padding:16px 22px;'
@@ -791,7 +792,7 @@ def generate_usa_email(case: Dict[str, Any]) -> Tuple[str, str]:
     companies = case.get("companies") or []
     companies_str = " / ".join(companies) if companies else "N/A"
 
-    subject = f"[FRUD] EC Merger Case (USA-Related) \u2013 {case_num}: {companies_str}"
+    subject = build_subject("ec_merger", "new")
 
     usa_banner = (
         '<div style="background:#fef3c7;border-radius:6px;padding:16px 22px;'

@@ -15,6 +15,7 @@ from playwright.sync_api import sync_playwright
 from mongodb_connection import (
     get_database,
     get_deals_collection,
+    get_deal_by_id,
     init_mongodb_connection,
     is_connected,
 )
@@ -22,6 +23,7 @@ from llm_verification_service import verify_usa_relation
 from accc_cases_register import match_case_to_deal
 from log_utils import cleanup_old_logs, refresh_log_file
 from scraper_error_utils import collect_error, send_error_summary
+from email_subject_builder import build_subject
 
 
 load_dotenv(".env")
@@ -945,8 +947,7 @@ def send_update_email(
         title = old_case.get("title", "N/A")
         deal_id = str(deal.get("_id")) if deal and deal.get("_id") else None
 
-        prefix = "[FRMD]" if deal else "[FRUD]"
-        subject = f"{prefix} ACCC Case (Updated) – {case_number}: {title}"
+        subject = build_subject("accc", "update", deal)
 
         payload = {
             "subject": subject,

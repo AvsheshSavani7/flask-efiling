@@ -12,6 +12,7 @@ from openai import OpenAI
 from bson import ObjectId
 from mongodb_connection import get_deals_collection, get_mongo_client, is_connected, init_mongodb_connection
 from html import escape
+from email_subject_builder import build_subject
 
 
 def escape_html(s: Any) -> str:
@@ -333,7 +334,7 @@ def generate_fs_case_email_html(case_data: Dict[str, Any], deal_match: Dict[str,
     case_attachments = case_data.get("caseAttachments", [])
     decisions = case_data.get("decisions", [])
 
-    subject = f"[FRMD] EC Foreign Subsidies Case (New) – {target} / {acquirer}"
+    subject = build_subject("ec_fs", "new", deal_match)
 
     company_list = get_companies_from_case_title(case_data)
 

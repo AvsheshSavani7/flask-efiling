@@ -18,6 +18,7 @@ from pymongo import MongoClient
 from typing import Any, Dict, List, Optional, Tuple
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
+from email_subject_builder import build_subject
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -722,7 +723,7 @@ def generate_matched_email_html(case_info, deal_match):
     deal_id = deal_match.get("deal_id", "N/A")
     title = case_info.get("title", "N/A")
 
-    subject = f"[FRMD] UK CMA Merger Case (New) – {target} / {acquirer}"
+    subject = build_subject("uk_cma", "new", deal_match)
     title_text = (
         f"🆕 NEW UK CMA Merger Case – {target} / {acquirer}"
         if target != "N/A" and acquirer != "N/A"
@@ -769,7 +770,7 @@ def generate_matched_email_html(case_info, deal_match):
 def generate_unmatched_email_html(case_info):
     title = case_info.get("title", "N/A")
 
-    subject = f"[FRUD] UK CMA Merger Case (USA-Related) – {title[:50]}"
+    subject = build_subject("uk_cma", "new")
 
     common_rows = _build_common_case_rows(case_info)
     history_section = _build_history_section(case_info)

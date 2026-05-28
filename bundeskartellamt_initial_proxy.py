@@ -35,6 +35,7 @@ from html import escape as escape_html
 from llm_verification_service import verify_country_relation
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
+from email_subject_builder import build_subject
 
 load_dotenv(".env")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -548,7 +549,7 @@ def generate_matched_email(record: Dict, deal: Dict) -> Tuple[str, str]:
     deal_id = deal.get("deal_id", "N/A")
     file_number = record.get("file_number", "N/A")
 
-    subject = f"[FRMD] German Bundeskartellamt- {file_number} (New) – {target} / {acquirer}"
+    subject = build_subject("bundeskartellamt", "new", deal)
 
     deal_banner = f"""
 <div style="background:#dbeafe;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #2563eb;">
@@ -579,7 +580,7 @@ def generate_usa_related_email(record: Dict) -> Tuple[str, str]:
     pursue_en = record.get("pursue_en", "N/A")
     file_number = record.get("file_number", "N/A")
 
-    subject = f"[FRUD] German Bundeskartellamt- {file_number} (USA-Related) – {fn}: {pursue_en[:60]}"
+    subject = build_subject("bundeskartellamt", "new")
 
     usa_banner = """
 <div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">

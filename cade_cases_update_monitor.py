@@ -29,6 +29,7 @@ from mongodb_connection import (
 from cade_cases_register import match_case_to_deal
 from html import escape as escape_html
 from log_utils import cleanup_old_logs, refresh_log_file
+from email_subject_builder import build_subject
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -888,7 +889,7 @@ def generate_update_email_html(
   <div style="font-weight:800;color:#92400e;">USA-Related (Unmatched)</div>
 </div>"""
 
-    subject = f"{prefix} CADE Brazil (Updated) – {process}"
+    subject = build_subject("cade", "update", deal)
 
     # New document records table
     doc_table_html = ""

@@ -20,6 +20,7 @@ Flow:
 from mongodb_connection import (
     get_database,
     get_deals_collection,
+    get_deal_by_id,
     init_mongodb_connection,
     is_connected,
 )
@@ -41,6 +42,7 @@ import sys
 
 
 from log_utils import cleanup_old_logs, refresh_log_file
+from email_subject_builder import build_subject
 
 load_dotenv(".env")
 
@@ -676,10 +678,7 @@ def run_canada_cases_register(headless: bool = True):
                             )
 
                     if deal:
-                        target = deal.get("target") or deal.get("target_name", "N/A")
-                        acquirer = deal.get("acquirer") or deal.get(
-                            "acquire_name", "N/A")
-                        subject = f"[FRMD] Canada Competition Bureau (New) – {target} / {acquirer}"
+                        subject = build_subject("canada", "new", deal)
                         html_email = generate_matched_case_email_html(case_info, deal)
                         if not send_email_via_webhook(
                             subject, html_email, case_info, deal_id=matched_deal_id
@@ -716,7 +715,7 @@ def run_canada_cases_register(headless: bool = True):
 
                     if is_usa:
                         logger.info(f"[STEP 1.16] Case is USA-related")
-                        subject = f"[FRUD] Canada Competition Bureau (USA-Related)"
+                        subject = build_subject("canada", "new")
                         html_email = generate_usa_related_email_html(case_info)
                         if not send_email_via_webhook(
                             subject, html_email, case_info, usa_related=True

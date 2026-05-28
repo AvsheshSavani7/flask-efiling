@@ -57,6 +57,7 @@ import traceback
 
 from fs_html_scraper import parse_case_html
 from log_utils import cleanup_old_logs, refresh_log_file
+from email_subject_builder import build_subject
 
 load_dotenv(".env")
 
@@ -762,7 +763,7 @@ def generate_matched_email(case: Dict[str, Any], deal: Dict[str, Any], companies
     case_num = case.get("case_number", "N/A")
     case_url = case.get("case_url", "")
 
-    subject = f"[FRMD] EC Foreign Subsidies Case (New) \u2013 {target} / {acquirer}"
+    subject = build_subject("ec_fs", "new", deal)
 
     deal_banner = (
         '<div style="background:#dbeafe;border-radius:6px;padding:16px 22px;'
@@ -799,7 +800,7 @@ def generate_usa_email(case: Dict[str, Any], companies: List[str]) -> Tuple[str,
     case_num = case.get("case_number", "N/A")
     companies_str = " / ".join(companies) if companies else "N/A"
 
-    subject = f"[FRUD] EC Foreign Subsidies Case (USA-Related) \u2013 {case_num}: {companies_str}"
+    subject = build_subject("ec_fs", "new")
 
     usa_banner = (
         '<div style="background:#fef3c7;border-radius:6px;padding:16px 22px;'

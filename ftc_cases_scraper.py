@@ -27,12 +27,14 @@ from openai import OpenAI
 from mongodb_connection import (
     get_database,
     get_deals_collection,
+    get_deal_by_id,
     init_mongodb_connection,
     is_connected,
 )
 from llm_verification_service import verify_usa_relation
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
+from email_subject_builder import build_subject
 
 load_dotenv(".env")
 
@@ -431,12 +433,11 @@ def _post_email_payload(payload: Dict[str, Any], webhook_url: str = N8N_WEBHOOK_
         return False
 
 
-def send_new_case_email(case_info: Dict[str, Any], deal_id: Optional[str]) -> bool:
+def send_new_case_email(case_info: Dict[str, Any], deal_id: Optional[str], deal_match: Optional[Dict[str, Any]] = None) -> bool:
     case_id = case_info.get("case_id", "N/A")
     title = case_info.get("title", "N/A")
     title_clean = title_without_case_id_prefix(case_id, title)
-    prefix = "[FRMD]" if deal_id else "[FRUD]"
-    subject = f"{prefix} FTC Early Termination (New) – {case_id}: {title_clean}"
+    subject = build_subject("ftc", "new", deal_match)
     detail_url = case_info.get("detail_url", "")
     date_str = format_notice_date_for_display(case_info.get("date"))
     acquiring = case_info.get("acquiring_party", "")
@@ -495,12 +496,7 @@ def send_unmatched_usa_related_email(case_info: Dict[str, Any]) -> bool:
     case_id = case_info.get("case_id", "N/A")
     title = case_info.get("title", "N/A")
     title_clean = title_without_case_id_prefix(case_id, title)
-    if title_clean and title_clean != "N/A":
-        subject = (
-            f"[FRUD] FTC Early Termination (USA-Related) – {case_id}: {title_clean}"
-        )
-    else:
-        subject = f"[FRUD] FTC Early Termination (USA-Related) – {case_id}"
+    subject = build_subject("ftc", "new")
     detail_url = case_info.get("detail_url", "")
     date_str = format_notice_date_for_display(case_info.get("date"))
     acquiring = case_info.get("acquiring_party", "")
@@ -611,7 +607,8 @@ def _process_ftc_case(
             case_info["deal_id"] = matched_deal_id
             logger.info(
                 f"  Deal match found (deal_id={matched_deal_id}); sending email")
-            if not send_new_case_email(case_info, matched_deal_id):
+            deal_match = get_deal_by_id(matched_deal_id)
+            if not send_new_case_email(case_info, matched_deal_id, deal_match):
                 collect_error(
                     error_items,
                     "Failed to send new-case email",

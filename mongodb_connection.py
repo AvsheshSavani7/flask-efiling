@@ -124,3 +124,25 @@ def is_connected() -> bool:
         return True
     except:
         return False
+
+
+def get_deal_by_id(deal_id: str) -> Optional[dict]:
+    """
+    Fetch a single deal document from MongoDB by its string ID.
+
+    Returns the deal dict with 'deal_id' key set (and '_id' removed),
+    or None if not found or on any error.
+    """
+    try:
+        from bson import ObjectId
+        collection = get_deals_collection()
+        if collection is None:
+            return None
+        deal = collection.find_one({"_id": ObjectId(deal_id)})
+        if not deal:
+            return None
+        deal["deal_id"] = str(deal["_id"])
+        deal.pop("_id", None)
+        return deal
+    except Exception:
+        return None

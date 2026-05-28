@@ -61,6 +61,7 @@ import traceback
 from ec_html_scraper import parse_case_html
 from new_ec_cases_html import match_case_to_deal
 from log_utils import cleanup_old_logs, refresh_log_file
+from email_subject_builder import build_subject
 
 load_dotenv(".env")
 
@@ -997,14 +998,10 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
 
                     if deal:
                         banner = _build_deal_banner(deal, case_number)
-                        target = deal.get("target") or deal.get(
-                            "target_name", "N/A")
-                        acquirer = deal.get("acquirer") or deal.get(
-                            "acquire_name", "N/A")
-                        subject = f"[FRMD] EC Merger Case (Updated) \u2013 {target} / {acquirer}"
+                        subject = build_subject("ec_merger", "update", deal)
                     else:
                         banner = ""
-                        subject = f"[FRMD] EC Merger Case (Updated) \u2013 {case_number}: {case_title}"
+                        subject = build_subject("ec_merger", "update")
 
                     email_html = email_html.replace(
                         "{BANNER_PLACEHOLDER}", banner)
@@ -1085,7 +1082,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                             "target_name", "N/A")
                         acquirer = deal.get("acquirer") or deal.get(
                             "acquire_name", "N/A")
-                        subject = f"[FRMD] EC Merger Case (Updated) \u2013 {target} / {acquirer}"
+                        subject = build_subject("ec_merger", "update", deal)
                         if not send_email_via_webhook(subject, email_html, case_number, case_title,
                                                       deal_id=matched_deal_id, changed_fields=changed_names):
                             collect_error(
@@ -1124,7 +1121,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
 
                             companies_str = " / ".join(
                                 companies) if companies else "N/A"
-                            subject = f"[FRUD] EC Merger Case (USA-Related Update) \u2013 {case_number}: {companies_str}"
+                            subject = build_subject("ec_merger", "update")
                             if not send_email_via_webhook(
                                 subject, email_html, case_number, case_title, changed_fields=changed_names):
                                 collect_error(

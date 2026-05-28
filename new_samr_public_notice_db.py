@@ -22,6 +22,7 @@ from html import escape as escape_html
 from llm_verification_service import verify_usa_relation
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
+from email_subject_builder import build_subject
 from typing import Any
 
 # Configuration
@@ -564,7 +565,7 @@ def generate_samr_email_html(samr_data, deal_match):
         if target != "N/A" and acquirer != "N/A"
         else f"SAMR China Match – {title_en[:50]}"
     )
-    subject = f"[FRMD] SAMR China Regulatory (New) – {target} / {acquirer}"
+    subject = build_subject("samr_public", "new", deal_match)
 
     html_email = f"""
 <!DOCTYPE html>
@@ -682,7 +683,7 @@ def generate_unmatched_samr_email_html(record: dict) -> tuple:
     date_str = record.get("date", "N/A")
     url = record.get("url", "")
 
-    subject = f"[FRUD] SAMR China Public Notice (USA-Related) – {title_en[:60]}"
+    subject = build_subject("samr_public", "new")
 
     html_email = f"""
 <!DOCTYPE html>

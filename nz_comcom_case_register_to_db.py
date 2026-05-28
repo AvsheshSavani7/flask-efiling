@@ -26,11 +26,13 @@ from scraper_error_utils import collect_error, send_error_summary
 from mongodb_connection import (
     get_database,
     get_deals_collection,
+    get_deal_by_id,
     init_mongodb_connection,
     is_connected,
 )
 
 from log_utils import cleanup_old_logs, refresh_log_file
+from email_subject_builder import build_subject
 
 load_dotenv(".env")
 
@@ -283,7 +285,7 @@ def _post_webhook(payload: Dict[str, Any]) -> bool:
         return False
 
 
-def send_nz_new_case_matched_email(case_info: Dict[str, Any], deal_id: str) -> bool:
+def send_nz_new_case_matched_email(case_info: Dict[str, Any], deal_id: str, deal_match: Optional[Dict[str, Any]] = None) -> bool:
     """Send matched NZ case email via webhook (new case)."""
     details = case_info.get("case_details") or {}
     case_number = details.get("Case number", "N/A")
@@ -291,8 +293,7 @@ def send_nz_new_case_matched_email(case_info: Dict[str, Any], deal_id: str) -> b
     parties = details.get("Parties", "")
     detail_url = case_info.get("detail_url", "")
 
-    prefix = "[FRMD]" if deal_id else "[FRUD]"
-    subject = f"{prefix} NZ Case (New) – {case_number}: {title}"
+    subject = build_subject("nz_comcom", "new", deal_match)
     html = f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -332,7 +333,7 @@ def send_unmatched_nz_usa_email_via_webhook(case_info: Dict[str, Any]) -> bool:
     title = case_info.get("title", "N/A")
     detail_url = case_info.get("detail_url", "")
 
-    subject = f"[FRUD] NZ Case (USA-Related) – {case_number}"
+    subject = build_subject("nz_comcom", "new")
     html = f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -742,7 +743,8 @@ def run():
                             doc["deal_id"] = deal_id
                             logger.info(f"[STEP 2.5] Deal match found (deal_id={deal_id})")
                             if not test_mode:
-                                if not send_nz_new_case_matched_email(doc, deal_id):
+                                deal_match = get_deal_by_id(deal_id)
+                                if not send_nz_new_case_matched_email(doc, deal_id, deal_match):
                                     collect_error(
                                         error_items,
                                         "Failed to send matched-case email",

@@ -30,11 +30,13 @@ from scraper_error_utils import collect_error, send_error_summary
 from mongodb_connection import (
     get_database,
     get_deals_collection,
+    get_deal_by_id,
     init_mongodb_connection,
     is_connected,
 )
 
 from log_utils import cleanup_old_logs, refresh_log_file
+from email_subject_builder import build_subject
 
 load_dotenv(".env")
 
@@ -683,7 +685,7 @@ def generate_unmatched_nz_usa_email_html(case_info: Dict[str, Any], changes: Lis
     changes_html = "".join(
         f'<li style="margin:0 0 6px 0;">{item}</li>' for item in change_summary
     ) or '<li style="margin:0;">No structured changes listed.</li>'
-    subject = f"[FRUD] NZ Case (USA-Related) – {case_number}"
+    subject = build_subject("nz_comcom", "update")
     html = f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -722,8 +724,7 @@ def send_nz_update_email_via_webhook(
         deal_id = dm.get("deal_id", "N/A")
         case_number = (case_info.get("case_details")
                        or {}).get("Case number", "N/A")
-        prefix = "[FRMD]" if deal_match else "[FRUD]"
-        subject = f"{prefix} NZ Case (Updated) – {case_number}: {target} / {acquirer}"
+        subject = build_subject("nz_comcom", "update", deal_match if deal_match else None)
         webhook_url = N8N_WEBHOOK_URL
         payload = {
             "subject": subject,
@@ -806,21 +807,6 @@ def update_nz_case_document(collection, doc_id: Any, updated_doc: Dict[str, Any]
         return False
 
 
-def get_deal_by_id(deal_id: str) -> Optional[Dict[str, Any]]:
-    """Fetch deal by deal_id (string). Returns deal dict with deal_id key."""
-    try:
-        from bson import ObjectId
-        collection = get_deals_collection()
-        if collection is None:
-            return None
-        deal = collection.find_one({"_id": ObjectId(deal_id)})
-        if not deal:
-            return None
-        deal["deal_id"] = str(deal["_id"])
-        deal.pop("_id", None)
-        return deal
-    except Exception:
-        return None
 
 
 # ---------- Main ----------

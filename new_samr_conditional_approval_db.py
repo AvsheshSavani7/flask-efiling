@@ -23,6 +23,7 @@ from html import escape as escape_html
 from llm_verification_service import verify_usa_relation
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
+from email_subject_builder import build_subject
 from typing import Any
 
 # Configuration
@@ -642,7 +643,7 @@ def generate_conditional_email_html(samr_case, deal_match, conditional_data):
         if target != "N/A" and acquirer != "N/A"
         else f"SAMR China Conditional Approval – {cond_title_en[:50]}"
     )
-    subject = f"[FRMD] SAMR China Conditional Approval (New) – {target} / {acquirer}"
+    subject = build_subject("samr_conditional", "new", deal_match)
 
     html_email = f"""
 <!DOCTYPE html>
@@ -773,7 +774,7 @@ def generate_unmatched_conditional_email_html(samr_case, conditional_data):
     cond_url = conditional_data.get("url", "")
     cond_date = conditional_data.get("date", "N/A")
 
-    subject = f"[FRUD] SAMR China Conditional Approval (USA-Related) – {title_en[:60]}"
+    subject = build_subject("samr_conditional", "new")
 
     html_email = f"""
 <!DOCTYPE html>

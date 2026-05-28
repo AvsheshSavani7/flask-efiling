@@ -1,5 +1,6 @@
 from mongodb_connection import (
     get_database,
+    get_deal_by_id,
     init_mongodb_connection,
     is_connected,
 )
@@ -7,6 +8,7 @@ from llm_verification_service import verify_usa_relation
 from accc_cases_register import match_case_to_deal
 from log_utils import cleanup_old_logs, refresh_log_file
 from scraper_error_utils import collect_error, send_error_summary
+from email_subject_builder import build_subject
 import os
 import json
 import sys
@@ -307,11 +309,10 @@ def _post_email_payload(
         return False
 
 
-def send_new_case_email(case_info: Dict[str, Any], deal_id: Optional[str]) -> bool:
+def send_new_case_email(case_info: Dict[str, Any], deal_id: Optional[str], deal_match: Optional[Dict[str, Any]] = None) -> bool:
     case_number = case_info.get("case_number", "N/A")
     title = case_info.get("title", "N/A")
-    prefix = "[FRMD]" if deal_id else "[FRUD]"
-    subject = f"{prefix} ACCC Waiver (New) – {case_number}: {title}"
+    subject = build_subject("accc_waiver", "new", deal_match)
     url = case_info.get("url", "")
     notification_date = case_info.get("effective_notification_date", "")
     acquisition_status = case_info.get("acquisition_status", "")
@@ -365,7 +366,7 @@ def send_new_case_email(case_info: Dict[str, Any], deal_id: Optional[str]) -> bo
 def send_unmatched_usa_related_email(case_info: Dict[str, Any]) -> bool:
     case_number = case_info.get("case_number", "N/A")
     title = case_info.get("title", "N/A")
-    subject = f"[FRUD] ACCC Waiver (USA-Related) – {case_number}"
+    subject = build_subject("accc_waiver", "new")
     url = case_info.get("url", "")
     notification_date = case_info.get("effective_notification_date", "")
     acquisition_status = case_info.get("acquisition_status", "")
@@ -421,7 +422,7 @@ def send_under_assessment_waiver_email(case_info: Dict[str, Any]) -> bool:
     """
     case_number = case_info.get("case_number", "N/A")
     title = case_info.get("title", "N/A")
-    subject = f"[ACCC Waiver] Under Assessment – {case_number}: {title}"
+    subject = build_subject("accc_waiver", "under_assessment")
     url = case_info.get("url", "")
     notification_date = case_info.get("effective_notification_date", "")
     acquisition_status = case_info.get("acquisition_status", "")
@@ -778,7 +779,8 @@ def _process_waiver_case(
             case_info["deal_id"] = matched_deal_id
             logger.info(
                 f"  Deal match found (deal_id={matched_deal_id}); sending email")
-            if not send_new_case_email(case_info, matched_deal_id):
+            deal_match = get_deal_by_id(matched_deal_id)
+            if not send_new_case_email(case_info, matched_deal_id, deal_match):
                 collect_error(
                     error_items,
                     "Failed to send new-case email",
@@ -897,7 +899,8 @@ def run_accc_waiver_register(test_mode: bool = False):
             while True:
                 list_url = page_url(page_num)
                 logger.info(f"  Fetching page {page_num}: {list_url}")
-                html = fetch_list_page(list_url, attempt_label=f"[page={page_num}]")
+                html = fetch_list_page(
+                    list_url, attempt_label=f"[page={page_num}]")
                 if not html:
                     collect_error(
                         error_items,
@@ -969,7 +972,8 @@ def run_accc_waiver_register(test_mode: bool = False):
                         f"[{idx}/{len(all_items)}] Case {case_number}: {title}")
 
                     if not case_number or not url:
-                        logger.warning("  Missing case_number or url; skipping")
+                        logger.warning(
+                            "  Missing case_number or url; skipping")
                         continue
 
                     list_status = item.get("acquisition_status", "")
