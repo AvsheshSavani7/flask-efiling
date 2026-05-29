@@ -80,7 +80,7 @@ atexit.register(close_mongodb_connection)
 
 # Configure CORS to allow requests from http://localhost:8080
 CORS(app, origins=["http://localhost:8080",
-     "https://rag-summary-fe.onrender.com"])
+     "https://rag-summary-fe.onrender.com", "https://superadmin.arbintel.cloud"])
 
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
 
@@ -113,14 +113,17 @@ def submit_unique_task(task_name, func, script_file=None):
                 label += f" (script={script_file})"
             return False, label
         if script_file:
-            logger.info("Worker pool submit | task=%s | script=%s", task_name, script_file)
+            logger.info("Worker pool submit | task=%s | script=%s",
+                        task_name, script_file)
 
         def job():
             if script_file:
-                logger.info("Worker started | task=%s | script=%s", task_name, script_file)
+                logger.info("Worker started | task=%s | script=%s",
+                            task_name, script_file)
             func()
             if script_file:
-                logger.info("Worker finished | task=%s | script=%s", task_name, script_file)
+                logger.info("Worker finished | task=%s | script=%s",
+                            task_name, script_file)
 
         future = scraper_pool.submit(_run_and_cleanup, task_name, job)
         _running_tasks[task_name] = future
@@ -137,7 +140,8 @@ def submit_scraper_task(task_name, script_file, run_fn):
 
 def _cci_query_headless_dry_run():
     """Parse headless and dry_run query params for CCI scraper endpoints."""
-    headless = request.args.get("headless", "true").lower() in ("true", "1", "yes")
+    headless = request.args.get(
+        "headless", "true").lower() in ("true", "1", "yes")
     dry_run = request.args.get("dry_run", "").lower() in ("true", "1", "yes")
     return headless, dry_run
 
@@ -1503,7 +1507,8 @@ def cci_under_review_scraper_endpoint():
         def run_scraper():
             run_under_review_scraper(headed=not headless, dry_run=dry_run)
 
-        submitted, msg = submit_scraper_task(task_name, script_file, run_scraper)
+        submitted, msg = submit_scraper_task(
+            task_name, script_file, run_scraper)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running", "script": script_file}), 409
 
@@ -1533,9 +1538,11 @@ def cci_orders_section31_scraper_endpoint():
         task_name = "cci-orders-section31-scraper"
 
         def run_scraper():
-            run_cci_datatable_scraper(CCI_SECTION31_CONFIG, headed=not headless, dry_run=dry_run)
+            run_cci_datatable_scraper(
+                CCI_SECTION31_CONFIG, headed=not headless, dry_run=dry_run)
 
-        submitted, msg = submit_scraper_task(task_name, script_file, run_scraper)
+        submitted, msg = submit_scraper_task(
+            task_name, script_file, run_scraper)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running", "script": script_file}), 409
 
@@ -1565,9 +1572,11 @@ def cci_orders_section43a_44_scraper_endpoint():
         task_name = "cci-orders-section43a-44-scraper"
 
         def run_scraper():
-            run_cci_datatable_scraper(CCI_SECTION43A_44_CONFIG, headed=not headless, dry_run=dry_run)
+            run_cci_datatable_scraper(
+                CCI_SECTION43A_44_CONFIG, headed=not headless, dry_run=dry_run)
 
-        submitted, msg = submit_scraper_task(task_name, script_file, run_scraper)
+        submitted, msg = submit_scraper_task(
+            task_name, script_file, run_scraper)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running", "script": script_file}), 409
 
@@ -1595,7 +1604,8 @@ def cci_approved_with_modification_scraper_endpoint():
     """
     try:
         headless, dry_run = _cci_query_headless_dry_run()
-        all_pages = request.args.get("all_pages", "").lower() in ("true", "1", "yes")
+        all_pages = request.args.get(
+            "all_pages", "").lower() in ("true", "1", "yes")
         script_file = "orders_approved_with_modification_scraper.py"
         task_name = "cci-approved-with-modification-scraper"
         config = CCI_APPROVED_MOD_CONFIG
@@ -1603,9 +1613,11 @@ def cci_approved_with_modification_scraper_endpoint():
             config = replace(config, single_page=False)
 
         def run_scraper():
-            run_cci_datatable_scraper(config, headed=not headless, dry_run=dry_run)
+            run_cci_datatable_scraper(
+                config, headed=not headless, dry_run=dry_run)
 
-        submitted, msg = submit_scraper_task(task_name, script_file, run_scraper)
+        submitted, msg = submit_scraper_task(
+            task_name, script_file, run_scraper)
         if not submitted:
             return jsonify({"success": False, "error": msg, "status": "already_running", "script": script_file}), 409
 
@@ -1620,7 +1632,8 @@ def cci_approved_with_modification_scraper_endpoint():
             "all_pages": all_pages,
         }), 200
     except Exception as e:
-        logger.error("Error starting CCI approved-with-modification scraper: %s", e)
+        logger.error(
+            "Error starting CCI approved-with-modification scraper: %s", e)
         return jsonify({"success": False, "error": str(e)}), 500
 
 
