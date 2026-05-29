@@ -396,6 +396,52 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
             # Default to False on error to avoid false positives
             return False
 
+    elif case_type.upper() == "CCI":
+        context_info = "Competition Commission of India (CCI) combination case"
+
+        prompt = f"""
+            You are a business analyst specializing in M&A and competition law cases.
+
+            Given the following companies from a {context_info}, determine if this deal or these companies are related to {country}.
+
+            Company Details:
+            {company_details}
+
+            Consider the following when determining if this is related to {country}:
+            - Are any of these companies headquartered in {country}?
+            - Do any of these companies have significant operations, subsidiaries, or business presence in {country}?
+            - Is this deal likely to have material impact on {country} markets?
+            - Are any of these companies publicly traded in {country}?
+
+            Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanation).
+            """
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-5.2",
+                messages=[
+                    {"role": "system",
+                        "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0
+            )
+
+            result = response.choices[0].message.content.strip().lower()
+
+            if result == "true":
+                return True
+            elif result == "false":
+                return False
+            else:
+                print(
+                    f"⚠️ LLM returned unexpected result: '{result}', defaulting to False")
+                return False
+
+        except Exception as e:
+            print(f"⚠️ LLM Verification Error: {e}")
+            return False
+
     elif case_type.upper() == "NZ":
         context_info = "New Zealand Commerce Commission (ComCom) case register"
 

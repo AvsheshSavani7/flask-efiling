@@ -32,7 +32,13 @@ from nz_cases_update_monitor import run as nz_cases_update_monitor_run
 from mt_psc_scraper import scrape_mt_psc
 from ne_psc_scraper import scrape_ne_psc
 from sd_puc_scraper import scrape_sd_puc
+from under_review_scraper import run_under_review_scraper
+from cci_scraper_runtime import run_cci_datatable_scraper
+from orders_section31_scraper import CONFIG as CCI_SECTION31_CONFIG
+from orders_section43a_44_scraper import CONFIG as CCI_SECTION43A_44_CONFIG
+from orders_approved_with_modification_scraper import CONFIG as CCI_APPROVED_MOD_CONFIG
 from mongodb_connection import init_mongodb_connection, close_mongodb_connection, is_connected
+from dataclasses import replace
 import logging
 import os
 import asyncio
@@ -95,17 +101,45 @@ def _run_and_cleanup(task_name, func):
             _running_tasks.pop(task_name, None)
 
 
-def submit_unique_task(task_name, func):
+def submit_unique_task(task_name, func, script_file=None):
     """Submit *func* only if *task_name* is not already running.
     Returns (submitted: bool, message: str).
     """
     with _running_lock:
         future = _running_tasks.get(task_name)
         if future and not future.done():
-            return False, f"{task_name} is already running"
-        future = scraper_pool.submit(_run_and_cleanup, task_name, func)
+            label = f"{task_name} is already running"
+            if script_file:
+                label += f" (script={script_file})"
+            return False, label
+        if script_file:
+            logger.info("Worker pool submit | task=%s | script=%s", task_name, script_file)
+
+        def job():
+            if script_file:
+                logger.info("Worker started | task=%s | script=%s", task_name, script_file)
+            func()
+            if script_file:
+                logger.info("Worker finished | task=%s | script=%s", task_name, script_file)
+
+        future = scraper_pool.submit(_run_and_cleanup, task_name, job)
         _running_tasks[task_name] = future
-        return True, f"{task_name} started in background"
+        msg = f"{task_name} started in background"
+        if script_file:
+            msg += f" (script={script_file})"
+        return True, msg
+
+
+def submit_scraper_task(task_name, script_file, run_fn):
+    """Submit a scraper background job with script file name in logs and response."""
+    return submit_unique_task(task_name, run_fn, script_file=script_file)
+
+
+def _cci_query_headless_dry_run():
+    """Parse headless and dry_run query params for CCI scraper endpoints."""
+    headless = request.args.get("headless", "true").lower() in ("true", "1", "yes")
+    dry_run = request.args.get("dry_run", "").lower() in ("true", "1", "yes")
+    return headless, dry_run
 
 
 @app.route('/')
@@ -139,6 +173,10 @@ def home():
             "/new-cade-cases-update-monitor": "GET - Monitor brazil_cases for updates and send email notifications (query param: headless)",
             "/new-accc-cases-update-monitor": "GET - Monitor ACCC acquisition cases for updates and send email notifications",
             "/ftc-early-termination-scraper": "GET - FTC early termination list scrape → ftc_cases collection, deal match, emails (logs: /logs?script=ftc_cases)",
+            "/cci-under-review-scraper": "GET - CCI notice under review → cci_cases (query: headless, dry_run; logs: /logs?script=cci_under_review)",
+            "/cci-orders-section31-scraper": "GET - CCI orders Section 31 → cci_cases (query: headless, dry_run; logs: /logs?script=cci_section31)",
+            "/cci-orders-section43a-44-scraper": "GET - CCI orders Section 43A/44 → cci_cases (query: headless, dry_run; logs: /logs?script=cci_section43a_44)",
+            "/cci-approved-with-modification-scraper": "GET - CCI approved with modification → cci_cases (query: headless, dry_run, all_pages; logs: /logs?script=cci_approved_with_modification)",
             "/nz-comcom-case-register-to-db": "GET - Scrape NZ ComCom case register and save new records to nz_cases collection",
             "/nz-cases-update-monitor": "GET - Monitor nz_cases collection for updates, match to deals, and send emails",
             "/new-canada-cases-register": "GET - Register new Canada Competition Bureau cases into canada_cases collection",
@@ -1450,6 +1488,142 @@ def ftc_early_termination_scraper():
         }), 500
 
 
+@app.route('/cci-under-review-scraper', methods=['GET'])
+def cci_under_review_scraper_endpoint():
+    """
+    Scrape CCI notice-under-review list → cci_cases. Background worker.
+    Script: under_review_scraper.py. Logs: /logs?script=cci_under_review
+    Query: headless (default true), dry_run
+    """
+    try:
+        headless, dry_run = _cci_query_headless_dry_run()
+        script_file = "under_review_scraper.py"
+        task_name = "cci-under-review-scraper"
+
+        def run_scraper():
+            run_under_review_scraper(headed=not headless, dry_run=dry_run)
+
+        submitted, msg = submit_scraper_task(task_name, script_file, run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running", "script": script_file}), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running",
+            "script": script_file,
+            "task": task_name,
+            "headless": headless,
+            "dry_run": dry_run,
+        }), 200
+    except Exception as e:
+        logger.error("Error starting CCI under review scraper: %s", e)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/cci-orders-section31-scraper', methods=['GET'])
+def cci_orders_section31_scraper_endpoint():
+    """
+    Scrape CCI orders Section 31 → cci_cases. Background worker.
+    Script: orders_section31_scraper.py. Logs: /logs?script=cci_section31
+    """
+    try:
+        headless, dry_run = _cci_query_headless_dry_run()
+        script_file = "orders_section31_scraper.py"
+        task_name = "cci-orders-section31-scraper"
+
+        def run_scraper():
+            run_cci_datatable_scraper(CCI_SECTION31_CONFIG, headed=not headless, dry_run=dry_run)
+
+        submitted, msg = submit_scraper_task(task_name, script_file, run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running", "script": script_file}), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running",
+            "script": script_file,
+            "task": task_name,
+            "headless": headless,
+            "dry_run": dry_run,
+        }), 200
+    except Exception as e:
+        logger.error("Error starting CCI Section 31 scraper: %s", e)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/cci-orders-section43a-44-scraper', methods=['GET'])
+def cci_orders_section43a_44_scraper_endpoint():
+    """
+    Scrape CCI orders Section 43A/44 → cci_cases. Background worker.
+    Script: orders_section43a_44_scraper.py. Logs: /logs?script=cci_section43a_44
+    """
+    try:
+        headless, dry_run = _cci_query_headless_dry_run()
+        script_file = "orders_section43a_44_scraper.py"
+        task_name = "cci-orders-section43a-44-scraper"
+
+        def run_scraper():
+            run_cci_datatable_scraper(CCI_SECTION43A_44_CONFIG, headed=not headless, dry_run=dry_run)
+
+        submitted, msg = submit_scraper_task(task_name, script_file, run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running", "script": script_file}), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running",
+            "script": script_file,
+            "task": task_name,
+            "headless": headless,
+            "dry_run": dry_run,
+        }), 200
+    except Exception as e:
+        logger.error("Error starting CCI Section 43A/44 scraper: %s", e)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/cci-approved-with-modification-scraper', methods=['GET'])
+def cci_approved_with_modification_scraper_endpoint():
+    """
+    Scrape CCI cases approved with modification → cci_cases. Background worker.
+    Script: orders_approved_with_modification_scraper.py.
+    Logs: /logs?script=cci_approved_with_modification
+    Query: all_pages=true for full backfill (default: first page only)
+    """
+    try:
+        headless, dry_run = _cci_query_headless_dry_run()
+        all_pages = request.args.get("all_pages", "").lower() in ("true", "1", "yes")
+        script_file = "orders_approved_with_modification_scraper.py"
+        task_name = "cci-approved-with-modification-scraper"
+        config = CCI_APPROVED_MOD_CONFIG
+        if all_pages:
+            config = replace(config, single_page=False)
+
+        def run_scraper():
+            run_cci_datatable_scraper(config, headed=not headless, dry_run=dry_run)
+
+        submitted, msg = submit_scraper_task(task_name, script_file, run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running", "script": script_file}), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running",
+            "script": script_file,
+            "task": task_name,
+            "headless": headless,
+            "dry_run": dry_run,
+            "all_pages": all_pages,
+        }), 200
+    except Exception as e:
+        logger.error("Error starting CCI approved-with-modification scraper: %s", e)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route('/new-canada-cases-register', methods=['GET'])
 def canada_cases_register():
     """
@@ -2066,7 +2240,11 @@ KNOWN_LOG_SCRIPTS = {
     "samr-cases-public",
     "samr-cases-conditional",
     "samr-cases-unconditional",
-    "ftc_cases"
+    "ftc_cases",
+    "cci_under_review",
+    "cci_section31",
+    "cci_section43a_44",
+    "cci_approved_with_modification",
 }
 
 
