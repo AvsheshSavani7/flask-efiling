@@ -39,6 +39,7 @@ from orders_section43a_44_scraper import CONFIG as CCI_SECTION43A_44_CONFIG
 from orders_approved_with_modification_scraper import CONFIG as CCI_APPROVED_MOD_CONFIG
 from mongodb_connection import init_mongodb_connection, close_mongodb_connection, is_connected
 from dataclasses import replace
+from log_utils import today_ist_date_str
 import logging
 import os
 import asyncio
@@ -2298,7 +2299,7 @@ def get_log_content():
         Returns the text content of that specific file.
         Optional: tail=N to return only the last N lines.
 
-    Omit date to default to today (UTC).
+    Omit date to default to today (IST — same as scraper log file names).
     """
     script = request.args.get("script", "").strip()
     if script not in KNOWN_LOG_SCRIPTS:
@@ -2309,8 +2310,7 @@ def get_log_content():
 
     date_str = request.args.get("date", "").strip()
     if not date_str:
-        date_str = datetime.datetime.now(
-            datetime.timezone.utc).strftime("%Y-%m-%d")
+        date_str = today_ist_date_str()
 
     script_log_dir = os.path.join(_LOG_BASE, script)
     base_name = f"{date_str}.log"

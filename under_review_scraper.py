@@ -16,10 +16,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import sys
 import time
-from datetime import datetime, timezone, timedelta
-from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
@@ -40,7 +37,7 @@ from cci_common import (
     under_review_cutoff_date,
     utc_now_iso,
 )
-from log_utils import cleanup_old_logs, refresh_log_file
+from log_utils import ensure_script_logger, refresh_script_log
 from mongodb_connection import init_mongodb_connection, is_connected
 from scraper_error_utils import collect_error, send_error_summary
 
@@ -48,62 +45,17 @@ load_dotenv(".env")
 
 LIST_URL = "https://www.cci.gov.in/combination/notice-under-review"
 
-PERSISTENT_LOG_DIR = "/var/data/logs"
 SCRIPT_NAME = "cci_under_review"
-IST = timezone(timedelta(hours=5, minutes=30))
-
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
-LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
-LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
-
-def _get_log_file() -> str:
-    base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
-    log_dir = os.path.join(base, SCRIPT_NAME)
-    os.makedirs(log_dir, exist_ok=True)
-    today = datetime.now(IST).strftime("%Y-%m-%d")
-    return os.path.join(log_dir, f"{today}.log")
-
-
-LOG_FILE = _get_log_file()
-logger = logging.getLogger("cci_under_review")
-logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
-
-
-class _ISTFormatter(logging.Formatter):
-    def converter(self, timestamp):
-        return datetime.fromtimestamp(timestamp, tz=IST)
-
-    def formatTime(self, record, datefmt=None):
-        ct = self.converter(record.created)
-        if datefmt:
-            return ct.strftime(datefmt)
-        return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
-
-
-if not logger.handlers:
-    formatter = _ISTFormatter("%(asctime)s | %(levelname)s | %(message)s")
-    fh = RotatingFileHandler(
-        LOG_FILE,
-        maxBytes=LOG_MAX_BYTES,
-        backupCount=LOG_BACKUP_COUNT,
-        encoding="utf-8",
-    )
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setFormatter(formatter)
-    logger.addHandler(sh)
-logger.propagate = False
-
-cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
+logger, _get_log_file = ensure_script_logger(SCRIPT_NAME, log_level=LOG_LEVEL)
+LOG_FILE = refresh_script_log(logger, _get_log_file)
 attach_cci_common_logging(logger)
 
 
 def run_under_review_scraper(headed: bool = False, dry_run: bool = False) -> None:
     global LOG_FILE
-    LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
+    LOG_FILE = refresh_script_log(logger, _get_log_file, LOG_FILE)
     run_start = time.time()
     error_items: List[Dict[str, Any]] = []
     stats = {
@@ -177,6 +129,8 @@ def run_under_review_scraper(headed: bool = False, dry_run: bool = False) -> Non
             logger.info("Rows within cutoff: %s", len(rows))
 
             for idx, row in enumerate(rows, 1):
+                LOG_FILE = refresh_script_log(logger, _get_log_file, LOG_FILE)
+
                 reg_no = row.get("combination_registration_no", "").strip()
                 detail_url = row.get("detail_url", "")
                 logger.info(

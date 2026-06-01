@@ -6,11 +6,9 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timezone, timedelta
-from logging.handlers import RotatingFileHandler
+from datetime import date
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
@@ -26,61 +24,20 @@ from cci_common import (
     source_already_processed,
     utc_now_iso,
 )
-from log_utils import cleanup_old_logs, refresh_log_file
+from log_utils import ensure_script_logger, refresh_script_log
 from mongodb_connection import init_mongodb_connection, is_connected
 from scraper_error_utils import collect_error, send_error_summary
 
 load_dotenv(".env")
 
-PERSISTENT_LOG_DIR = "/var/data/logs"
-IST = timezone(timedelta(hours=5, minutes=30))
-
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
-LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
-LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
 
-def setup_cci_logger(script_name: str) -> Tuple[logging.Logger, str, Callable[[], str]]:
-    def get_log_file() -> str:
-        base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
-        log_dir = os.path.join(base, script_name)
-        os.makedirs(log_dir, exist_ok=True)
-        today = datetime.now(IST).strftime("%Y-%m-%d")
-        return os.path.join(log_dir, f"{today}.log")
-
-    log_file = get_log_file()
-    log = logging.getLogger(script_name)
-    log.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
-
-    class _ISTFormatter(logging.Formatter):
-        def converter(self, timestamp):
-            return datetime.fromtimestamp(timestamp, tz=IST)
-
-        def formatTime(self, record, datefmt=None):
-            ct = self.converter(record.created)
-            if datefmt:
-                return ct.strftime(datefmt)
-            return ct.strftime("%Y-%m-%d %I:%M:%S %p IST")
-
-    if not log.handlers:
-        formatter = _ISTFormatter("%(asctime)s | %(levelname)s | %(message)s")
-        fh = RotatingFileHandler(
-            log_file,
-            maxBytes=LOG_MAX_BYTES,
-            backupCount=LOG_BACKUP_COUNT,
-            encoding="utf-8",
-        )
-        fh.setFormatter(formatter)
-        log.addHandler(fh)
-        sh = logging.StreamHandler(sys.stdout)
-        sh.setFormatter(formatter)
-        log.addHandler(sh)
-    log.propagate = False
-
-    cleanup_old_logs(os.path.dirname(log_file), LOG_RETENTION_DAYS)
+def setup_cci_logger(script_name: str) -> Tuple[logging.Logger, Callable[[], str]]:
+    """IST-dated logger (same as ACCC/FTC). Call refresh_script_log at each run."""
+    log, get_log_file = ensure_script_logger(script_name, log_level=LOG_LEVEL)
     attach_cci_common_logging(log)
-    return log, log_file, get_log_file
+    return log, get_log_file
 
 
 @dataclass
@@ -106,15 +63,8 @@ def run_cci_datatable_scraper(
     headed: bool = False,
     dry_run: bool = False,
 ) -> None:
-    logger, log_file, get_log_file = setup_cci_logger(config.script_name)
-    global_ref = {"log_file": log_file}
-
-    def refresh_log():
-        global_ref["log_file"] = refresh_log_file(
-            logger, global_ref["log_file"], get_log_file
-        )
-
-    refresh_log()
+    logger, get_log_file = setup_cci_logger(config.script_name)
+    log_file = refresh_script_log(logger, get_log_file)
     run_start = time.time()
     error_items: List[Dict[str, Any]] = []
     stats = {
@@ -134,7 +84,7 @@ def run_cci_datatable_scraper(
         logger.info("Cutoff (%s): >= %s", config.cutoff_field, config.cutoff.isoformat())
     else:
         logger.info("Cutoff: none (single page scrape)")
-    logger.info("Log file: %s", global_ref["log_file"])
+    logger.info("Log file: %s", log_file)
     logger.info("=" * 60)
 
     collection = None
@@ -194,6 +144,8 @@ def run_cci_datatable_scraper(
             logger.info("Rows to process: %s", len(rows))
 
             for idx, row in enumerate(rows, 1):
+                log_file = refresh_script_log(logger, get_log_file, log_file)
+
                 reg_no = (row.get("combination_registration_no") or "").strip()
                 detail_url = row.get("detail_url", "")
                 logger.info(
