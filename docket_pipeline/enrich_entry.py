@@ -483,9 +483,9 @@ def enrich_docket_entry(
             }
 
         api_key = os.environ.get(
-            "OPENAI_API_KEY_DOCKET")
+            "CLAUDE_API_KEY")
         if not api_key:
-            return {"success": False, "error": "OPENAI_API_KEY_DOCKET not found"}
+            return {"success": False, "error": "CLAUDE_API_KEY not found"}
 
         client = anthropic.Anthropic(api_key=api_key, timeout=120.0)
         enriched = enrich(client, entry, record_id=record_id)

@@ -403,7 +403,6 @@ def analyze_docket_entry(
     doc_number: str,
     full_text: str,
     metadata: Optional[Dict[str, str]] = None,
-    deal_id: Optional[str] = None,
     test_mode: bool = False
 ) -> Dict[str, Any]:
     """
@@ -439,8 +438,9 @@ def analyze_docket_entry(
     date = metadata.get("date", "N/A")
     on_behalf_of = metadata.get("on_behalf_of", "N/A")
 
-    # Initialize target_company_name (will be populated from mergers collection if found)
+    # Populated from mergers collection when docket_type + docket_number match
     target_company_name = ""
+    deal_id = None
 
     try:
         mongo_client = MongoClient(mongodb_uri)
@@ -462,11 +462,15 @@ def analyze_docket_entry(
                 if merger:
                     target_company_name = merger.get(
                         "target_company_name", "")
+                    raw_deal_id = merger.get("deal_id")
+                    if raw_deal_id is not None and raw_deal_id != "":
+                        deal_id = str(raw_deal_id)
                     logger.info(
-                        "Found target company: %s for docket %s/%s",
-                        target_company_name,
+                        "Found merger for docket %s/%s — target=%s deal_id=%s",
                         docket_type,
                         docket_number,
+                        target_company_name,
+                        deal_id,
                     )
             except Exception as e:
                 logger.warning(
