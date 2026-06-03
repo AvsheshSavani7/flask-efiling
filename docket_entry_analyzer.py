@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from logging.handlers import RotatingFileHandler
 from typing import Dict, Any, Optional
@@ -107,6 +108,60 @@ if not logger.handlers:
 logger.propagate = False
 
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
+
+# Docket types that run post-insert enrichment (docket_pipeline)
+DOCKET_TYPES_WITH_ENRICHMENT = frozenset({
+    "stb-environmentalComment",
+    "stb-document",
+})
+
+
+def _should_schedule_enrichment(docket_type: str) -> bool:
+    return docket_type in DOCKET_TYPES_WITH_ENRICHMENT
+
+
+def _schedule_docket_enrichment(record_id: str) -> None:
+    """Run enrichment in a background thread (does not block API response)."""
+    def _run():
+        try:
+            from docket_pipeline.enrich_entry import enrich_docket_entry
+            result = enrich_docket_entry(record_id=record_id, test_mode=False)
+            if result.get("success"):
+                logger.info(
+                    "Background enrichment completed for _id=%s", record_id)
+            else:
+                logger.warning(
+                    "Background enrichment failed for _id=%s: %s",
+                    record_id,
+                    result.get("error"),
+                )
+        except Exception as e:
+            logger.exception(
+                "Background enrichment error for _id=%s: %s", record_id, e)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _schedule_docket_enrichment_test(entry: Dict[str, Any]) -> None:
+    """Test mode: write enrichment JSON only, no MongoDB update."""
+    def _run():
+        try:
+            from docket_pipeline.enrich_entry import enrich_docket_entry
+            result = enrich_docket_entry(entry=entry, test_mode=True)
+            if result.get("success"):
+                logger.info(
+                    "Test-mode enrichment wrote JSON: %s",
+                    result.get("output_path"),
+                )
+            else:
+                logger.warning(
+                    "Test-mode enrichment failed: %s",
+                    result.get("error"),
+                )
+        except Exception as e:
+            logger.exception("Test-mode enrichment error: %s", e)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def convert_date_to_datetime(date_str: str) -> Optional[datetime]:
@@ -348,6 +403,7 @@ def analyze_docket_entry(
     doc_number: str,
     full_text: str,
     metadata: Optional[Dict[str, str]] = None,
+    deal_id: Optional[str] = None,
     test_mode: bool = False
 ) -> Dict[str, Any]:
     """
@@ -946,6 +1002,8 @@ Be factual and concise. Focus on substantive content, not procedural details."""
 
     new_entry = {
         "hash_id": next_hash_id,
+        "content": content_for_tier2,
+        "deal_id": deal_id,
         "metadata": entry_metadata,
         "summary": tier1_summary,
         "original_content_length": len(full_text),
@@ -981,13 +1039,28 @@ Be factual and concise. Focus on substantive content, not procedural details."""
     if comprehensive_summary_data:
         new_entry["comprehensive_summary"] = comprehensive_summary_data["summary"] if comprehensive_summary_data else full_text
 
+    inserted_id = None
+    enrichment_scheduled = False
     if not test_mode:
         try:
-            collection.insert_one(new_entry)
-            logger.info("✓ Saved entry to MongoDB")
+            insert_result = collection.insert_one(new_entry)
+            inserted_id = insert_result.inserted_id
+            logger.info("✓ Saved entry to MongoDB _id=%s", inserted_id)
+            if _should_schedule_enrichment(docket_type):
+                _schedule_docket_enrichment(str(inserted_id))
+                enrichment_scheduled = True
+            else:
+                logger.info(
+                    "Skipping enrichment for docket_type=%s (not in %s)",
+                    docket_type,
+                    sorted(DOCKET_TYPES_WITH_ENRICHMENT),
+                )
         except Exception as e:
             logger.warning(
                 "Failed to save to MongoDB: %s", str(e))
+    elif _should_schedule_enrichment(docket_type):
+        _schedule_docket_enrichment_test(new_entry)
+        enrichment_scheduled = True
 
     result = {
         "doc_number": doc_number,
@@ -1020,7 +1093,10 @@ Be factual and concise. Focus on substantive content, not procedural details."""
         "total_cost": total_cost,
         "comprehensive_summary": comprehensive_summary_data["summary"] if comprehensive_summary_data else full_text,
         "timestamp": datetime.now().isoformat(),
-        "database_updated": True
+        "database_updated": inserted_id is not None,
+        # MongoDB native _id (string) for client reference only — not stored as a separate field
+        "record_id": str(inserted_id) if inserted_id else None,
+        "enrichment_scheduled": enrichment_scheduled,
     }
 
     # Add comprehensive summary to result if generated
