@@ -517,7 +517,7 @@ def analyze_docket_entry(
             "doc_number": doc_number
         }
 
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    openai_api_key = os.environ.get("OPENAI_API_KEY_DOCKET")
     if not openai_api_key:
         return {
             "error": "OpenAI API key not found",

@@ -783,7 +783,7 @@ def _extract_pdf_text_pymupdf(file_path: str) -> str:
 
 
 def _extract_pdf_text_openai_ocr(file_path: str) -> str:
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("OPENAI_API_KEY_DOCKET")
     if not api_key:
         return ""
     try:
@@ -850,7 +850,8 @@ def _extract_text_from_pdf(file_path: str) -> str:
     text = _extract_pdf_text_openai_ocr(file_path)
     if (text or "").strip():
         logger.info(
-            "  PDF text via OpenAI OCR fallback: %s (%s chars)", short, len(text)
+            "  PDF text via OpenAI OCR fallback: %s (%s chars)", short, len(
+                text)
         )
         return text
     return ""

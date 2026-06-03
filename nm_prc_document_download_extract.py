@@ -236,7 +236,7 @@ def extract_text_with_llm_from_pdf(pdf_bytes: bytes, document_name: str = "docum
     if len(pdf_bytes) > LLM_OCR_MAX_PDF_BYTES:
         return ""
 
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("OPENAI_API_KEY_DOCKET")
     if not api_key:
         return ""
 
@@ -342,8 +342,8 @@ def download_and_extract(param: dict[str, Any], session: requests.Session | None
                 text = llm_text
                 extraction_method = "llm_fallback"
             else:
-                if "OPENAI_API_KEY" not in os.environ:
-                    result["extracted_text_error"] = "No selectable PDF text and OPENAI_API_KEY missing for LLM fallback"
+                if "OPENAI_API_KEY_DOCKET" not in os.environ:
+                    result["extracted_text_error"] = "No selectable PDF text and OPENAI_API_KEY_DOCKET missing for LLM fallback"
                 elif len(pdf_bytes) > LLM_OCR_MAX_PDF_BYTES:
                     result["extracted_text_error"] = (
                         f"No selectable PDF text and PDF too large for LLM fallback "
