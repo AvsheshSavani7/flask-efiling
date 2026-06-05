@@ -316,8 +316,8 @@ def translate_with_claude(text):
 
 def extract_records_from_html(html_content):
     """
-    Extract all records from a listing page HTML.
-    Returns list of dicts: title_cn, title_en, url, date
+    Extract all records from a listing page HTML (parse only — no translation).
+    Returns list of dicts: title_cn, url, date
     """
     records = []
     soup = BeautifulSoup(html_content, "html.parser")
@@ -340,17 +340,13 @@ def extract_records_from_html(html_content):
             date_div = item.find("div", class_="contentRight01time")
             date_str = date_div.get_text(strip=True) if date_div else ""
 
-            title_en = translate_with_claude(title_cn)
-            logger.info(f"Title EN: {title_en}")
-
             record = {
                 "title_cn": title_cn,
-                "title_en": title_en,
                 "url": href,
                 "date": date_str,
             }
             records.append(record)
-            logger.info(f"Extracted: {date_str} - {title_en}")
+            logger.info(f"Parsed: {date_str} - {title_cn}")
 
         except Exception as e:
             logger.warning(f"Error extracting record: {e}")
@@ -802,6 +798,8 @@ def main(headless=True):
     all_extracted_records = []
     matched_data = []
     new_records: list[dict] = []
+    skipped = 0
+    translated = 0
     logger.info("=" * 60)
     logger.info("[STEP 1] Starting SAMR Public Notice Register")
     logger.info(f"Log file: {LOG_FILE}")
@@ -822,7 +820,7 @@ def main(headless=True):
         logger.info("[STEP 1.1] Loading deals from MongoDB...")
         load_deals()
 
-        logger.info("[STEP 1.2] PHASE 1: EXTRACT ALL RECORDS")
+        logger.info("[STEP 1.2] PHASE 1: EXTRACT ALL RECORDS (parse only)")
         logger.info("[STEP 1.3] Mode: Scraping SAMR website")
 
         with sync_playwright() as p:
@@ -886,18 +884,34 @@ def main(headless=True):
         logger.info(
             f"Total records extracted from listing pages: {len(all_extracted_records)}")
 
-        logger.info("PHASE 2: FILTER ALREADY-PROCESSED RECORDS")
+        logger.info(
+            "PHASE 2: FILTER ALREADY-PROCESSED RECORDS AND TRANSLATE NEW ONES")
         logger.info("Checking which records are already in samr_cases...")
-        skipped_count = 0
+
         for record in all_extracted_records:
             detail_url = record.get("url")
-            if detail_url and record_exists_in_samr_cases(detail_url):
-                skipped_count += 1
-            else:
-                new_records.append(record)
+            date_str = record.get("date", "")
+            title_cn = record.get("title_cn", "")
 
-        if skipped_count > 0:
-            logger.info(f"Skipped {skipped_count} already-processed records")
+            if detail_url and record_exists_in_samr_cases(detail_url):
+                skipped += 1
+                continue
+
+            if not detail_url:
+                logger.warning(
+                    f"Skipping record with no URL: {title_cn[:80]}")
+                continue
+
+            title_en = translate_with_claude(title_cn)
+            translated += 1
+            record["title_en"] = title_en
+            new_records.append(record)
+            logger.info(f"Title EN: {title_en}")
+            logger.info(f"Extracted: {date_str} - {title_en}")
+
+        if skipped > 0:
+            logger.info(f"Skipped {skipped} already-processed records")
+        logger.info(f"Translated {translated} new records")
         logger.info(f"{len(new_records)} new records to process")
 
         logger.info("PHASE 3: MATCH RECORDS WITH DEALS")
@@ -1055,6 +1069,8 @@ def main(headless=True):
         logger.info("SUMMARY")
         logger.info(
             f"  Total records extracted      : {len(all_extracted_records)}")
+        logger.info(f"  Skipped (already in DB)      : {skipped}")
+        logger.info(f"  Translated (new)             : {translated}")
         logger.info(f"  New records processed        : {len(new_records)}")
         logger.info(f"  Total matches found          : {len(matched_data)}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
