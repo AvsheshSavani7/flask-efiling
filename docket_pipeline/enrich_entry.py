@@ -2,10 +2,13 @@
 """
 Docket Entry Enrichment
 =======================
-Enriches a docket entry with structured fields via Claude Haiku.
+Enriches a docket entry with structured fields via Claude Haiku, then updates
+docket_dashboard (step 2) when ``dashboard_docket_type`` is set.
 
 MongoDB (production) — lookup/update by native _id only (no extra id field written):
     python enrich_entry.py --record-id 6a1f43795f9fb97307e04d8d
+    python enrich_entry.py --record-id 6a1f43795f9fb97307e04d8d --docket-type stb
+    python enrich_entry.py --record-id 6a1f43795f9fb97307e04d8d --skip-dashboard
     python enrich_entry.py --record-id 6a1f43795f9fb97307e04d8d --test-mode --output /tmp/out.json
 
 Local JSON file (dev):
@@ -440,6 +443,49 @@ Return JSON with these exact fields:
     return None
 
 
+def _run_dashboard_update(
+    record_id: str,
+    dashboard_docket_type: str,
+    *,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """Step 2: upsert enriched filing into docket_dashboard collection."""
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    from docket_pipeline.process_docket_dashboard import process_docket_dashboard
+
+    logger.info(
+        "Running dashboard update for _id=%s docket_type=%s",
+        record_id,
+        dashboard_docket_type,
+    )
+    result = process_docket_dashboard(
+        record_id=record_id,
+        dashboard_docket_type=dashboard_docket_type,
+        force=force,
+    )
+    if result.get("success"):
+        logger.info(
+            "Dashboard %s for _id=%s (total entries=%s)",
+            result.get("entry_action"),
+            record_id,
+            result.get("entry_count"),
+        )
+    elif result.get("skipped"):
+        logger.warning(
+            "Dashboard entry skipped for _id=%s: %s",
+            record_id,
+            result.get("error"),
+        )
+    else:
+        logger.error(
+            "Dashboard update failed for _id=%s: %s",
+            record_id,
+            result.get("error"),
+        )
+    return result
+
+
 def enrich_docket_entry(
     *,
     record_id: Optional[str] = None,
@@ -448,12 +494,15 @@ def enrich_docket_entry(
     force: bool = False,
     test_output_path: Optional[Path] = None,
     local_db_path: Optional[Path] = None,
+    dashboard_docket_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Enrich a docket entry by MongoDB _id (ObjectId string) or in-memory entry dict.
 
     Only writes the ``enriched`` subdocument to MongoDB — never a separate id field.
     test_mode=True: write JSON only, do not update MongoDB.
+    When ``dashboard_docket_type`` is set and not test_mode, runs step 2 via
+    process_docket_dashboard after enrichment (or when enrichment is skipped).
     """
     if anthropic is None:
         return {"success": False, "error": "anthropic package not installed"}
@@ -474,13 +523,20 @@ def enrich_docket_entry(
         rid = _record_id_str(entry, record_id)
 
         if entry.get("enriched") and not force:
-            return {
+            result: Dict[str, Any] = {
                 "success": True,
                 "skipped": True,
                 "message": "Entry already enriched",
                 "record_id": rid,
                 "enriched": entry.get("enriched"),
             }
+            if dashboard_docket_type and record_id and not test_mode:
+                result["dashboard"] = _run_dashboard_update(
+                    record_id,
+                    dashboard_docket_type,
+                    force=force,
+                )
+            return result
 
         api_key = os.environ.get(
             "CLAUDE_API_KEY")
@@ -525,12 +581,19 @@ def enrich_docket_entry(
             return {"success": False, "error": f"No document matched _id={record_id}"}
 
         logger.info("Enrichment saved to MongoDB _id=%s", record_id)
-        return {
+        result = {
             "success": True,
             "record_id": record_id,
             "enriched": enriched,
             "modified": update_result.modified_count > 0,
         }
+        if dashboard_docket_type:
+            result["dashboard"] = _run_dashboard_update(
+                record_id,
+                dashboard_docket_type,
+                force=force,
+            )
+        return result
 
     except Exception as e:
         logger.exception("enrich_docket_entry failed: %s", e)
@@ -561,6 +624,17 @@ def main():
         "--force",
         action="store_true",
         help="Overwrite existing enriched key without prompting",
+    )
+    parser.add_argument(
+        "--docket-type",
+        type=str,
+        default="stb",
+        help='Dashboard docket_metadata.docket_type for step 2 (default: stb)',
+    )
+    parser.add_argument(
+        "--skip-dashboard",
+        action="store_true",
+        help="Skip docket_dashboard update after enrichment",
     )
     parser.add_argument(
         "--db",
@@ -617,14 +691,19 @@ def main():
         force=args.force,
         test_output_path=Path(args.output) if args.output else None,
         local_db_path=Path(args.db) if args.db else None,
+        dashboard_docket_type=None if args.skip_dashboard else args.docket_type,
     )
 
     if not result.get("success"):
         print(f"\n[FAILED] {result.get('error', 'unknown error')}")
         sys.exit(1)
 
+    dashboard = result.get("dashboard")
+
     if result.get("skipped"):
         print(f"\n[SKIP] {result.get('message')}")
+        if dashboard:
+            _print_dashboard_result(dashboard)
         sys.exit(0)
 
     enriched = result["enriched"]
@@ -637,6 +716,20 @@ def main():
         print(f"\n[OK] Test mode — wrote JSON to {result.get('output_path')}")
     else:
         print(f"\n[OK] Updated MongoDB entry _id={args.record_id}")
+        if dashboard:
+            _print_dashboard_result(dashboard)
+
+
+def _print_dashboard_result(dashboard: Dict[str, Any]) -> None:
+    if dashboard.get("success"):
+        print(
+            f"  Dashboard      : {dashboard.get('entry_action')} "
+            f"({dashboard.get('entry_count')} entries)"
+        )
+    elif dashboard.get("skipped"):
+        print(f"  Dashboard      : skipped — {dashboard.get('error')}")
+    else:
+        print(f"  Dashboard      : FAILED — {dashboard.get('error')}")
 
 
 if __name__ == "__main__":
