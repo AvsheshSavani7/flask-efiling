@@ -335,8 +335,8 @@ Rules:
 
 def extract_records_from_html(html_content):
     """
-    Extract listing records from listing-page HTML.
-    Returns list of dicts: title_cn, title_en, url, date
+    Extract listing records from listing-page HTML (parse only — no translation).
+    Returns list of dicts: title_cn, url, date
     """
     records = []
     soup = BeautifulSoup(html_content, "html.parser")
@@ -364,16 +364,13 @@ def extract_records_from_html(html_content):
                 base_domain = "https://www.samr.gov.cn"
                 href = requests.compat.urljoin(base_domain, href)
 
-            title_en = translate_with_openai(title_cn)
-
             record = {
                 "title_cn": title_cn,
-                "title_en": title_en,
                 "url": href,
                 "date": date_text,
             }
             records.append(record)
-            logger.info(f"Extracted: {date_text} - {title_en}")
+            logger.info(f"Parsed: {date_text} - {title_cn}")
 
         except Exception as e:
             logger.warning(f"Error extracting record: {e}")
@@ -1177,6 +1174,8 @@ def main(headless=True):
     all_extracted_records = []
     matched_data = []
     new_records: list[dict] = []
+    skipped = 0
+    translated = 0
     logger.info("=" * 60)
     logger.info("Starting SAMR Unconditional Cases Register")
     logger.info(f"Log file: {LOG_FILE}")
@@ -1200,7 +1199,8 @@ def main(headless=True):
         logger.info("Loading samr_cases from MongoDB...")
         samr_cases_list = get_all_samr_cases()
 
-        logger.info("PHASE 1: EXTRACT UNCONDITIONAL APPROVAL LISTING RECORDS")
+        logger.info(
+            "PHASE 1: EXTRACT UNCONDITIONAL APPROVAL LISTING RECORDS (parse only)")
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=headless)
@@ -1258,17 +1258,32 @@ def main(headless=True):
         logger.info(
             f"Total listing records extracted: {len(all_extracted_records)}")
 
-        logger.info("PHASE 2: FILTER ALREADY-PROCESSED LISTINGS")
+        logger.info(
+            "PHASE 2: FILTER ALREADY-PROCESSED LISTINGS AND TRANSLATE NEW ONES")
 
-        skipped = 0
         for rec in all_extracted_records:
-            if rec.get("url") and record_exists_in_samr_unconditional(rec["url"]):
+            url = rec.get("url")
+            date_str = rec.get("date", "")
+            title_cn = rec.get("title_cn", "")
+
+            if url and record_exists_in_samr_unconditional(url):
                 skipped += 1
-            else:
-                new_records.append(rec)
+                continue
+
+            if not url:
+                logger.warning(
+                    f"Skipping listing with no URL: {title_cn[:80]}")
+                continue
+
+            title_en = translate_with_openai(title_cn)
+            translated += 1
+            rec["title_en"] = title_en
+            new_records.append(rec)
+            logger.info(f"Extracted: {date_str} - {title_en}")
 
         if skipped:
             logger.info(f"Skipped {skipped} already-processed listings")
+        logger.info(f"Translated {translated} new listings")
         logger.info(f"{len(new_records)} new listings to process")
 
         logger.info("PHASE 3: PROCESS DETAIL PAGES & TABLE ROWS")
@@ -1290,6 +1305,16 @@ def main(headless=True):
 
                     if not detail_url:
                         logger.info("  Skipped (no URL)")
+                        continue
+
+                    if title_en == "[Translation failed]":
+                        logger.info("  Skipped detail page (translation failed)")
+                        save_to_samr_unconditional({
+                            "url": detail_url,
+                            "title_cn": listing_record.get("title_cn", ""),
+                            "title_en": title_en,
+                            "date": date_str,
+                        })
                         continue
 
                     table_rows = extract_table_rows_from_detail(
@@ -1352,6 +1377,8 @@ def main(headless=True):
         logger.info("SUMMARY")
         logger.info(
             f"  Total listings extracted     : {len(all_extracted_records)}")
+        logger.info(f"  Skipped (already in DB)      : {skipped}")
+        logger.info(f"  Translated (new)             : {translated}")
         logger.info(f"  New listings processed       : {len(new_records)}")
         logger.info(f"  Total matches found          : {len(matched_data)}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
