@@ -20,6 +20,7 @@ from datetime import datetime, timezone, timedelta
 import anthropic
 from openai import OpenAI
 from pymongo import MongoClient
+from pymongo.errors import OperationFailure
 
 from log_utils import cleanup_old_logs, refresh_log_file
 
@@ -115,6 +116,70 @@ DOCKET_TYPES_WITH_ENRICHMENT = frozenset({
     "stb-document",
 })
 
+DOCKET_HISTORY_PROJECTION = {
+    "_id": 0,
+    "hash_id": 1,
+    "metadata": 1,
+    "summary": 1,
+}
+
+_docket_indexes_ensured = False
+_docket_index_lock = threading.Lock()
+
+
+def _ensure_docket_indexes(collection) -> None:
+    """Create indexes so docket history queries sort without exceeding memory."""
+    global _docket_indexes_ensured
+    with _docket_index_lock:
+        if _docket_indexes_ensured:
+            return
+        collection.create_index(
+            [
+                ("metadata.docket_type", 1),
+                ("metadata.docket_number", 1),
+                ("metadata.date", 1),
+            ],
+            name="docket_type_number_date",
+            background=True,
+        )
+        collection.create_index(
+            [("metadata.document_id", 1)],
+            name="metadata_document_id",
+            background=True,
+        )
+        _docket_indexes_ensured = True
+
+
+def _fetch_sorted_docket_entries(collection, query_filter: Dict[str, Any]) -> list:
+    """Load prior docket entries in date order for history context and hash_id."""
+    cursor = (
+        collection.find(query_filter, DOCKET_HISTORY_PROJECTION)
+        .sort("metadata.date", 1)
+    )
+    try:
+        return list(cursor)
+    except OperationFailure as e:
+        if e.code != 292:
+            raise
+        logger.warning(
+            "Sort exceeded memory limit; retrying with aggregation allowDiskUse"
+        )
+        pipeline = [
+            {"$match": query_filter},
+            {"$sort": {"metadata.date": 1}},
+            {"$project": DOCKET_HISTORY_PROJECTION},
+        ]
+        return list(collection.aggregate(pipeline, allowDiskUse=True))
+
+
+def _next_hash_id(entries: list) -> int:
+    max_hash_id = 0
+    for entry in entries:
+        hash_id = entry.get("hash_id")
+        if isinstance(hash_id, int):
+            max_hash_id = max(max_hash_id, hash_id)
+    return max_hash_id + 1 if entries else 1
+
 
 def _should_schedule_enrichment(docket_type: str) -> bool:
     return docket_type in DOCKET_TYPES_WITH_ENRICHMENT
@@ -125,7 +190,8 @@ def _schedule_docket_enrichment(record_id: str) -> None:
     def _run():
         try:
             from docket_pipeline.enrich_entry import enrich_docket_entry
-            result = enrich_docket_entry(record_id=record_id, test_mode=False)
+            result = enrich_docket_entry(
+                record_id=record_id, test_mode=False, dashboard_docket_type="stb")
             if result.get("success"):
                 logger.info(
                     "Background enrichment completed for _id=%s", record_id)
@@ -446,6 +512,7 @@ def analyze_docket_entry(
         mongo_client = MongoClient(mongodb_uri)
         db = mongo_client.get_database()
         collection = db["docket"]
+        _ensure_docket_indexes(collection)
 
         # Query mergers collection to find target_company_name
         if docket_type and docket_type != "N/A" and docket_number and docket_number != "N/A":
@@ -538,34 +605,24 @@ def analyze_docket_entry(
             else:
                 query_filter["metadata.docket_number"] = docket_number
 
-        # Sort by metadata.date for chronological order within docket_type (older to newer)
-        all_entries = list(collection.find(
-            query_filter).sort("metadata.date", 1))
-        for entry in all_entries:
-            entry.pop("_id", None)
+        if not query_filter:
+            mongo_client.close()
+            return {
+                "error": (
+                    "metadata.docket_type and metadata.docket_number are "
+                    "required to load docket history"
+                ),
+                "doc_number": doc_number,
+            }
+
+        all_entries = _fetch_sorted_docket_entries(collection, query_filter)
+        next_hash_id = _next_hash_id(all_entries)
 
         logger.info("All entries: length %s", len(all_entries))
 
-        # Calculate next hash_id: filter by docket_type only, sort by date
-        # Use the same query_filter as all_entries (filters by docket_type)
-        hash_id_entries = list(collection.find(
-            query_filter).sort("metadata.date", 1))
-
-        # Calculate next hash_id
-        if hash_id_entries:
-            # Get the maximum hash_id from existing entries
-            max_hash_id = 0
-            for entry in hash_id_entries:
-                if "hash_id" in entry and isinstance(entry["hash_id"], int):
-                    max_hash_id = max(max_hash_id, entry["hash_id"])
-            next_hash_id = max_hash_id + 1
-        else:
-            # No existing entries, start from 1
-            next_hash_id = 1
-
     except Exception as e:
         return {
-            "error": f"MongoDB connection error: {str(e)}",
+            "error": f"MongoDB error: {str(e)}",
             "doc_number": doc_number
         }
 
