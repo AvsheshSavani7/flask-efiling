@@ -44,6 +44,7 @@ from bundeskartellamt_initial_proxy import match_deal_with_llm
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
 from email_subject_builder import build_subject
+from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -66,13 +67,6 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
-
-BASE_URL = os.getenv("BASE_URL")
-N8N_WEBHOOK_URL = os.getenv(
-    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
-    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
-)
-
 
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
@@ -499,7 +493,6 @@ def generate_update_email(stored: Dict, changes: List[Tuple[str, str, str]],
 def send_email_via_webhook(subject: str, html: str, file_number: str = "",
                            deal_id: str = None, changed_fields: List[str] = None) -> bool:
     try:
-        webhook_url = N8N_WEBHOOK_URL
         payload = {
             "subject": subject,
             "html": html,
@@ -511,11 +504,7 @@ def send_email_via_webhook(subject: str, html: str, file_number: str = "",
             payload["deal_id"] = deal_id
         if changed_fields:
             payload["changed_fields"] = changed_fields
-        resp = requests.post(webhook_url, json=payload,
-                             headers={"Content-Type": "application/json"}, timeout=30)
-        resp.raise_for_status()
-        logger.info(f"   Email sent ({resp.status_code})")
-        return True
+        return post_email_payload(payload, subject=subject)
     except Exception as e:
         logger.warning(f"   Email failed: {e}")
         return False

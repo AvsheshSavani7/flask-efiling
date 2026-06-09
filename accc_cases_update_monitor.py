@@ -24,6 +24,7 @@ from accc_cases_register import match_case_to_deal
 from log_utils import cleanup_old_logs, refresh_log_file
 from scraper_error_utils import collect_error, send_error_summary
 from email_subject_builder import build_subject
+from n8n_email_service import post_email_payload, resolve_webhook_url
 
 
 load_dotenv(".env")
@@ -102,13 +103,6 @@ PROXY_HOST = "108.59.242.138"
 PROXY_PORT = 46885
 PROXY_USERNAME = "GSenAgrfKhuNWkd"
 PROXY_PASSWORD = "8lmVa5yl0pKp9MI"
-
-BASE_URL = os.getenv("BASE_URL")
-N8N_WEBHOOK_URL = os.getenv(
-    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
-    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
-)
-
 
 def get_accc_cases_collection():
     db = get_database()
@@ -960,18 +954,9 @@ def send_update_email(
             "is_usa": is_usa,
         }
 
-        import requests
-
-        logger.info(f"    Sending email via n8n webhook: {N8N_WEBHOOK_URL}")
-        resp = requests.post(
-            N8N_WEBHOOK_URL,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        logger.info(f"    Email sent successfully! Status: {resp.status_code}")
-        return True
+        webhook_url = resolve_webhook_url(subject)
+        logger.info(f"    Sending email via n8n webhook: {webhook_url}")
+        return post_email_payload(payload, subject=subject)
     except Exception as e:
         logger.warning(f"    Error sending email: {e}")
         return False

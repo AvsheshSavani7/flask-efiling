@@ -22,6 +22,7 @@ from bson import ObjectId
 from mongodb_connection import get_deals_collection, is_connected, init_mongodb_connection
 from html import escape as escape_html
 from scraper_error_utils import collect_error, send_error_summary
+from n8n_email_service import post_email_payload, resolve_webhook_url
 
 load_dotenv(".env")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -36,12 +37,6 @@ PRESS_RELEASE_URL = f"{PRESS_RELEASE_BASE}?{PRESS_RELEASE_PARAMS}#resultsperpage
 EXTRACTED_RECORDS_JSON = "bundeskartellamt_press_release_extracted.json"
 
 SOURCE_PRESS_RELEASE = "press_release"
-
-BASE_URL = os.getenv("BASE_URL")
-N8N_WEBHOOK_URL = os.getenv(
-    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
-    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
-)
 
 # CUTOFF_DATE: Only process records with date >= this date.
 CUTOFF_DATE = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -352,8 +347,7 @@ def send_press_release_email_via_webhook(record_data, deal_match, updated_fields
             record_data, deal_match, updated_fields)
         print(f"📝 Generated email subject: {subject}")
 
-        webhook_url = N8N_WEBHOOK_URL
-
+        webhook_url = resolve_webhook_url(subject)
         print(f"📤 Sending email via n8n webhook: {webhook_url}")
         target = deal_match.get("target") or deal_match.get(
             "target_name", "N/A")
@@ -375,12 +369,10 @@ def send_press_release_email_via_webhook(record_data, deal_match, updated_fields
             "updated_fields": updated_fields if updated_fields else [],
             "view_url": record_data.get("url", ""),
         }
-        response = requests.post(webhook_url, json=payload, headers={
-                                 "Content-Type": "application/json"}, timeout=30)
-        response.raise_for_status()
-        print(
-            f"✅ Email sent successfully via n8n webhook! Status: {response.status_code}")
-        return True
+        if post_email_payload(payload, subject=subject):
+            print("✅ Email sent successfully via n8n webhook!")
+            return True
+        return False
     except requests.exceptions.RequestException as e:
         print(f"⚠️ Error sending email via webhook: {e}")
         return False

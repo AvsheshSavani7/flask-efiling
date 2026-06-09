@@ -29,6 +29,7 @@ from mongodb_connection import (
 from html import escape as escape_html
 from log_utils import cleanup_old_logs, refresh_log_file
 from email_subject_builder import build_subject
+from n8n_email_service import post_email_payload
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -58,12 +59,6 @@ PROCESS_TYPES = {
     "Finalístico: Apuração de Ato de Concentração": "100000511",
     "Finalístico: Medida Cautelar": "100000566",
 }
-BASE_URL = os.getenv("BASE_URL")
-N8N_WEBHOOK_URL = os.getenv(
-    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
-    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
-)
-
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ---------------------------------------------------------------------------
@@ -1054,19 +1049,7 @@ RESPONSE FORMAT:
 
 def _post_email_payload(payload: Dict[str, Any]) -> bool:
     logger.info(f"  Sending email: {payload.get('subject', 'N/A')}")
-    try:
-        resp = requests.post(
-            N8N_WEBHOOK_URL,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        logger.info(f"  Email sent successfully (status={resp.status_code})")
-        return True
-    except Exception as e:
-        logger.exception(f"Error sending email via webhook: {e}")
-        return False
+    return post_email_payload(payload)
 
 
 def send_matched_email(case_data: Dict[str, Any], deal_id: str, deal_match: Optional[Dict[str, Any]] = None) -> bool:

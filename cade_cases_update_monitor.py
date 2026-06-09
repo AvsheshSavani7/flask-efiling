@@ -30,6 +30,7 @@ from cade_cases_register import match_case_to_deal
 from html import escape as escape_html
 from log_utils import cleanup_old_logs, refresh_log_file
 from email_subject_builder import build_subject
+from n8n_email_service import post_email_payload
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -43,12 +44,6 @@ RECAPTCHA_SITE_KEY = "6Le2a7gqAAAAAAVxMYQ-mn7GyO8lcWAQq4Hxm-2G"
 CAPTCHA_SOLVER_URL = "http://2captcha.com/in.php"
 CAPTCHA_RESULT_URL = "http://2captcha.com/res.php"
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")
-
-BASE_URL = os.getenv("BASE_URL")
-N8N_WEBHOOK_URL = os.getenv(
-    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
-    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
-)
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -808,19 +803,7 @@ def update_case_in_db(
 
 def _post_email_payload(payload: Dict[str, Any]) -> bool:
     logger.info(f"    Sending email: {payload.get('subject', 'N/A')}")
-    try:
-        resp = requests.post(
-            N8N_WEBHOOK_URL,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        logger.info(f"    Email sent successfully (status={resp.status_code})")
-        return True
-    except Exception as e:
-        logger.exception(f"Error sending email via webhook: {e}")
-        return False
+    return post_email_payload(payload)
 
 
 def generate_update_email_html(

@@ -13,6 +13,7 @@ from bson import ObjectId
 from mongodb_connection import get_deals_collection, get_mongo_client, is_connected, init_mongodb_connection
 from html import escape
 from email_subject_builder import build_subject
+from n8n_email_service import post_email_payload, resolve_webhook_url
 
 
 def escape_html(s: Any) -> str:
@@ -28,12 +29,6 @@ OUTPUT_PATH = "fs_filtered_cases.json"
 MATCHED_DEALS_OUTPUT = "fs_matched_deals.json"
 ENV_PATH = ".env"
 CASE_BASE_URL = "https://competition-cases.ec.europa.eu/cases"
-BASE_URL = os.getenv("BASE_URL")
-N8N_WEBHOOK_URL = os.getenv(
-    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
-    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
-)
-
 # Load OpenAI API Key
 load_dotenv(ENV_PATH)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -450,7 +445,7 @@ def send_fs_case_email_via_webhook(case_data: Dict[str, Any], deal_match: Dict[s
             case_data, deal_match)
         print(f"📝 Generated email subject: {subject}")
 
-        webhook_url = N8N_WEBHOOK_URL
+        webhook_url = resolve_webhook_url(subject)
         print(f"📤 Sending email via n8n webhook: {webhook_url}")
 
         metadata = case_data.get("metadata", {})
@@ -468,12 +463,10 @@ def send_fs_case_email_via_webhook(case_data: Dict[str, Any], deal_match: Dict[s
             'case_instrument': 'FS',
         }
 
-        response = requests.post(webhook_url, json=payload, headers={
-                                 'Content-Type': 'application/json'}, timeout=30)
-        response.raise_for_status()
-        print(
-            f"✅ Email sent successfully via n8n webhook! Status: {response.status_code}")
-        return True
+        if post_email_payload(payload, subject=subject):
+            print("✅ Email sent successfully via n8n webhook!")
+            return True
+        return False
     except Exception as e:
         print(f"⚠️ Error sending email via webhook: {e}")
         import traceback

@@ -62,6 +62,7 @@ from ec_html_scraper import parse_case_html
 from new_ec_cases_html import match_case_to_deal
 from log_utils import cleanup_old_logs, refresh_log_file
 from email_subject_builder import build_subject
+from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
 
@@ -130,12 +131,6 @@ cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 ENV_PATH = ".env"
-BASE_URL = os.getenv("BASE_URL")
-N8N_WEBHOOK_URL = os.getenv(
-    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
-    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
-)
-
 # Fields to exclude from comparison:
 # - _id, is_open, created_at, updated_at: DB-only metadata
 # - deal_id: set by our register/monitor script, never in scraped data
@@ -521,16 +516,7 @@ def send_email_via_webhook(
             "changed_fields": changed_fields or [],
             "source": "ec_competition_cases_update",
         }
-        resp = requests.post(
-            N8N_WEBHOOK_URL,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        logger.info(
-            f"    [{case_number}] Email sent successfully (status={resp.status_code})")
-        return True
+        return post_email_payload(payload, subject=subject)
     except Exception as e:
         logger.exception(
             f"Error sending notification email for {case_number}: {e}")

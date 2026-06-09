@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
 from email_subject_builder import build_subject
+from n8n_email_service import post_email_payload
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -33,11 +34,6 @@ LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
 BASE_URL = os.getenv("BASE_URL")
-N8N_WEBHOOK_URL = os.getenv(
-    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
-    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
-)
-
 
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
@@ -797,21 +793,15 @@ def generate_update_email_html(case_info, changes, deal_match=None):
 
 def send_email_via_webhook(subject, html_email, extra_payload=None):
     try:
-        webhook_url = N8N_WEBHOOK_URL
         payload = {"subject": subject, "html": html_email}
         if extra_payload:
             payload.update(extra_payload)
 
         print(f"  📤 Sending email: {subject[:80]}")
-        resp = requests.post(
-            webhook_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        print(f"  ✅ Email sent! Status: {resp.status_code}")
-        return True
+        if post_email_payload(payload, subject=subject):
+            print("  ✅ Email sent!")
+            return True
+        return False
     except Exception as e:
         print(f"  ⚠️ Error sending email: {e}")
         return False

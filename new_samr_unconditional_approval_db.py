@@ -24,6 +24,7 @@ from llm_verification_service import verify_usa_relation
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
 from email_subject_builder import build_subject
+from n8n_email_service import post_email_payload
 from typing import Any
 
 # Configuration
@@ -40,13 +41,6 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
-
-BASE_URL = os.getenv("BASE_URL")
-N8N_WEBHOOK_URL = os.getenv(
-    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
-    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
-)
-
 
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
@@ -792,8 +786,6 @@ def send_samr_unconditional_email_via_webhook(samr_case, deal_match, uncondition
             samr_case, deal_match, unconditional_data)
         logger.info(f"Generated email subject: {subject}")
 
-        webhook_url = N8N_WEBHOOK_URL
-
         target = deal_match.get("target") or deal_match.get(
             "target_name", "N/A")
         acquirer = deal_match.get(
@@ -813,13 +805,7 @@ def send_samr_unconditional_email_via_webhook(samr_case, deal_match, uncondition
             'url': unconditional_data.get("approval_link", ""),
         }
 
-        response = requests.post(
-            webhook_url, json=payload,
-            headers={'Content-Type': 'application/json'}, timeout=60,
-        )
-        response.raise_for_status()
-        logger.info(f"Email sent successfully! Status: {response.status_code}")
-        return True
+        return post_email_payload(payload, subject=subject, timeout=60)
     except requests.exceptions.RequestException as e:
         logger.warning(f"Error sending email via webhook: {e}")
         return False
@@ -917,7 +903,6 @@ def send_unmatched_unconditional_email_via_webhook(samr_case, unconditional_data
             samr_case, unconditional_data, usa_companies)
         logger.info(f"Generated email subject: {subject}")
 
-        webhook_url = N8N_WEBHOOK_URL
         payload = {
             'subject': subject,
             'html': html_email,
@@ -932,13 +917,7 @@ def send_unmatched_unconditional_email_via_webhook(samr_case, unconditional_data
             'usa_related': True,
         }
 
-        response = requests.post(
-            webhook_url, json=payload,
-            headers={'Content-Type': 'application/json'}, timeout=60,
-        )
-        response.raise_for_status()
-        logger.info(f"Email sent successfully! Status: {response.status_code}")
-        return True
+        return post_email_payload(payload, subject=subject, timeout=60)
     except requests.exceptions.RequestException as e:
         logger.warning(f"Error sending email via webhook: {e}")
         return False

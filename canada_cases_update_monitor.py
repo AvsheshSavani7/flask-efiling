@@ -39,6 +39,7 @@ from openai import OpenAI
 
 from log_utils import cleanup_old_logs, refresh_log_file
 from email_subject_builder import build_subject
+from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
 
@@ -108,12 +109,6 @@ REPORT_URL = (
     "report-concluded-merger-reviews#wb-auto-4"
 )
 BASE_URL = os.getenv("BASE_URL")
-N8N_WEBHOOK_URL = os.getenv(
-    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
-    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
-)
-
-
 def utc_now_iso() -> str:
     """UTC timestamp in ISO-8601 with Z suffix."""
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -397,15 +392,7 @@ def send_update_email(
         }
 
         print(f"    📤 Sending email via n8n webhook")
-        resp = requests.post(
-            N8N_WEBHOOK_URL,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        print(f"    ✅ Email sent successfully! Status: {resp.status_code}")
-        return True
+        return post_email_payload(payload, subject=subject)
     except Exception as e:
         print(f"    ⚠️ Error sending email: {e}", level="warning")
         return False

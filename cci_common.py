@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from email_subject_builder import build_subject
+from n8n_email_service import post_email_payload
 from llm_verification_service import verify_usa_relation
 from mongodb_connection import get_database, get_deal_by_id, get_deals_collection
 
@@ -1076,19 +1077,7 @@ def send_cci_email(
         payload["deal_id"] = record.get("deal_id")
         payload["is_unmatched"] = True
 
-    try:
-        resp = requests.post(
-            N8N_WEBHOOK_URL,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        logger.info("  Email sent: %s", subject)
-        return True
-    except Exception as exc:
-        logger.warning("  Email failed: %s", exc)
-        return False
+    return post_email_payload(payload, subject=subject, default_url=N8N_WEBHOOK_URL)
 
 
 def process_deal_match_and_email(

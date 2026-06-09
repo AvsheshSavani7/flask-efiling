@@ -9,6 +9,7 @@ from accc_cases_register import match_case_to_deal
 from log_utils import cleanup_old_logs, refresh_log_file
 from scraper_error_utils import collect_error, send_error_summary
 from email_subject_builder import build_subject
+from n8n_email_service import post_email_payload
 import os
 import json
 import sys
@@ -106,11 +107,6 @@ PROXY_DICT = {
 }
 
 BASE_URL = os.getenv("BASE_URL")
-# Webhook for new/matched/USA-related completed waiver cases
-N8N_WEBHOOK_URL = os.getenv(
-    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
-    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
-)
 # Webhook specifically for waiver cases that are still "Under assessment"
 UNDER_ASSESSMENT_WEBHOOK_URL = (
     f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f"
@@ -293,20 +289,9 @@ Description: {desc_snippet}
 
 
 def _post_email_payload(
-    payload: Dict[str, Any], webhook_url: str = N8N_WEBHOOK_URL
+    payload: Dict[str, Any], webhook_url: Optional[str] = None
 ) -> bool:
-    try:
-        resp = requests.post(
-            webhook_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return True
-    except Exception as e:
-        logger.warning(f"Error sending email via webhook ({webhook_url}): {e}")
-        return False
+    return post_email_payload(payload, webhook_url=webhook_url)
 
 
 def send_new_case_email(case_info: Dict[str, Any], deal_id: Optional[str], deal_match: Optional[Dict[str, Any]] = None) -> bool:

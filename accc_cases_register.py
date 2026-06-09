@@ -9,6 +9,7 @@ from llm_verification_service import verify_usa_relation
 from log_utils import cleanup_old_logs, refresh_log_file
 from scraper_error_utils import collect_error, send_error_summary
 from email_subject_builder import build_subject
+from n8n_email_service import post_email_payload
 import os
 import json
 import sys
@@ -109,13 +110,6 @@ PROXY_DICT = {
     "http": f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}",
     "https": f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}",
 }
-
-BASE_URL = os.getenv("BASE_URL")
-N8N_WEBHOOK_URL = os.getenv(
-    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
-    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
-)
-
 
 def utc_now_iso() -> str:
     """UTC timestamp in ISO-8601 with Z suffix."""
@@ -368,18 +362,7 @@ RESPONSE FORMAT:
 
 
 def _post_email_payload(payload: Dict[str, Any]) -> bool:
-    try:
-        resp = requests.post(
-            N8N_WEBHOOK_URL,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return True
-    except Exception as e:
-        logger.warning(f"Error sending email via webhook: {e}")
-        return False
+    return post_email_payload(payload)
 
 
 def send_new_case_email(case_info: Dict[str, Any], deal_id: Optional[str], deal_match: Optional[Dict[str, Any]] = None) -> bool:

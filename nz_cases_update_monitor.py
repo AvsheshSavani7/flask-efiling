@@ -37,6 +37,7 @@ from mongodb_connection import (
 
 from log_utils import cleanup_old_logs, refresh_log_file
 from email_subject_builder import build_subject
+from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
 
@@ -53,11 +54,6 @@ LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
 BASE_URL = os.getenv("BASE_URL")
-N8N_WEBHOOK_URL = os.getenv(
-    "N8N_WEBHOOK_INTERNAL_WITH_JOSH",
-    f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f",
-)
-
 
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
@@ -725,7 +721,6 @@ def send_nz_update_email_via_webhook(
         case_number = (case_info.get("case_details")
                        or {}).get("Case number", "N/A")
         subject = build_subject("nz_comcom", "update", deal_match if deal_match else None)
-        webhook_url = N8N_WEBHOOK_URL
         payload = {
             "subject": subject,
             "html": html_content,
@@ -738,11 +733,7 @@ def send_nz_update_email_via_webhook(
             "case_url": case_info.get("detail_url", ""),
             "source": "nz_cases_update_monitor",
         }
-        response = requests.post(webhook_url, json=payload, headers={
-                                 "Content-Type": "application/json"}, timeout=30)
-        response.raise_for_status()
-        logger.info("Email sent via webhook (%s)", response.status_code)
-        return True
+        return post_email_payload(payload, subject=subject)
     except Exception as e:
         logger.warning("Error sending email via webhook: %s", e)
         return False
@@ -753,7 +744,6 @@ def send_unmatched_nz_usa_email_via_webhook(case_info: Dict[str, Any], changes: 
     try:
         subject, html_email = generate_unmatched_nz_usa_email_html(
             case_info, changes)
-        webhook_url = N8N_WEBHOOK_URL
         payload = {
             "subject": subject,
             "html": html_email,
@@ -767,12 +757,7 @@ def send_unmatched_nz_usa_email_via_webhook(case_info: Dict[str, Any], changes: 
             "is_unmatched": True,
             "source": "nz_cases_update_monitor",
         }
-        response = requests.post(webhook_url, json=payload, headers={
-                                 "Content-Type": "application/json"}, timeout=30)
-        response.raise_for_status()
-        logger.info("USA-related email sent via webhook (%s)",
-                    response.status_code)
-        return True
+        return post_email_payload(payload, subject=subject)
     except Exception as e:
         logger.exception(f"Error sending USA email via webhook: {e}")
         return False
