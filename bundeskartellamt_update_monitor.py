@@ -137,7 +137,29 @@ def _build_proxy_dict():
     return {"http": proxy_url, "https": proxy_url}
 
 
-def fetch_html_with_proxy(url, max_retries=3):
+def fetch_html_with_proxy(
+    url,
+    max_retries=3,
+    error_items: Optional[List[Dict[str, Any]]] = None,
+):
+    proxy_failure: Optional[Dict[str, Any]] = None
+
+    def _note_proxy_failure(msg: str, attempt: int, **extra: Any) -> None:
+        nonlocal proxy_failure
+        proxy_failure = {
+            "msg": msg,
+            "context": {"url": url, "attempt": attempt, "max_retries": max_retries, **extra},
+        }
+
+    def _emit_proxy_failure() -> None:
+        if proxy_failure and error_items is not None:
+            collect_error(
+                error_items,
+                proxy_failure["msg"],
+                step="proxy_fetch",
+                context=proxy_failure["context"],
+            )
+
     for attempt in range(1, max_retries + 1):
         for label, proxies in [("DE residential proxy", _build_proxy_dict()), ("Direct (no proxy)", None)]:
             try:
@@ -151,14 +173,28 @@ def fetch_html_with_proxy(url, max_retries=3):
                     f"   HTTP {resp.status_code}, {len(resp.text):,} chars")
                 if resp.status_code == 200 and len(resp.text) > 500:
                     logger.info(f"   Success via {label}")
+                    if label != "DE residential proxy":
+                        _emit_proxy_failure()
                     return resp.text
                 logger.warning(
                     f"   Got HTTP {resp.status_code} — trying next strategy...")
+                if label == "DE residential proxy":
+                    _note_proxy_failure(
+                        f"DE residential proxy failed: HTTP {resp.status_code}, {len(resp.text):,} chars",
+                        attempt,
+                        http_status=resp.status_code,
+                    )
             except Exception as e:
                 logger.error(f"   {label} failed: {e}")
+                if label == "DE residential proxy":
+                    _note_proxy_failure(
+                        f"DE residential proxy failed: {e}",
+                        attempt,
+                    )
         if attempt < max_retries:
             logger.info(f"   Retrying in 5s...")
             time.sleep(5)
+    _emit_proxy_failure()
     raise RuntimeError(
         "All fetch strategies failed — could not reach Bundeskartellamt")
 
@@ -308,7 +344,7 @@ def fetch_all_listing_rows(
         url = _page_url(page_num)
         logger.info(f"   Page {page_num}: fetching...")
         try:
-            html = fetch_html_with_proxy(url)
+            html = fetch_html_with_proxy(url, error_items=error_items)
             logger.info(f"   HTML fetched ({len(html):,} chars)")
         except RuntimeError as e:
             logger.error(f"   Failed to fetch page {page_num}: {e}")
