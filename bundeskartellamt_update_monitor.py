@@ -68,6 +68,7 @@ LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
+
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
     log_dir = os.path.join(base, SCRIPT_NAME)
@@ -115,8 +116,14 @@ cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 # Proxy config (same as register script)
 # ---------------------------------------------------------------------------
 
-PC_USERNAME = "pcmIxC35qD-res-de"
-PC_PASSWORD = "PC_145YhLBkUZV7Ottjy"
+# PC_USERNAME = "pcmIxC35qD-res-de"
+# PC_PASSWORD = "PC_145YhLBkUZV7Ottjy"
+# PC_HOST = "proxy-eu.proxy-cheap.com"
+# PC_PORT = "5959"
+
+# New proxy
+PC_USERNAME = "pc4skeYeOB-res-de"
+PC_PASSWORD = "PC_4zJleejNQeQebD04n"
 PC_HOST = "proxy-eu.proxy-cheap.com"
 PC_PORT = "5959"
 
@@ -574,7 +581,8 @@ def main():
             return {"success": False, "error": message}
 
         deals = fetch_deals()
-        deal_by_id = {str(d.get("deal_id", "")): d for d in deals if d.get("deal_id")}
+        deal_by_id = {str(d.get("deal_id", ""))
+                          : d for d in deals if d.get("deal_id")}
 
         gc_collection = get_german_cases_collection()
         if gc_collection is None:

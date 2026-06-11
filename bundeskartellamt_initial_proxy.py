@@ -58,6 +58,7 @@ LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
+
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
     log_dir = os.path.join(base, SCRIPT_NAME)
@@ -105,8 +106,14 @@ cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 # Proxy config
 # ---------------------------------------------------------------------------
 
-PC_USERNAME = "pcmIxC35qD-res-de"
-PC_PASSWORD = "PC_145YhLBkUZV7Ottjy"
+# PC_USERNAME = "pcmIxC35qD-res-de"
+# PC_PASSWORD = "PC_145YhLBkUZV7Ottjy"
+# PC_HOST = "proxy-eu.proxy-cheap.com"
+# PC_PORT = "5959"
+
+# New proxy
+PC_USERNAME = "pc4skeYeOB-res-de"
+PC_PASSWORD = "PC_4zJleejNQeQebD04n"
 PC_HOST = "proxy-eu.proxy-cheap.com"
 PC_PORT = "5959"
 
@@ -684,8 +691,7 @@ def main():
             return {"success": False, "error": message}
 
         deals = fetch_deals()
-        deal_by_id = {str(d.get("deal_id", ""))
-                          : d for d in deals if d.get("deal_id")}
+        deal_by_id = {str(d.get("deal_id", ""))                      : d for d in deals if d.get("deal_id")}
 
         gc_collection = get_german_cases_collection()
         if gc_collection is None:
@@ -782,7 +788,8 @@ def main():
                 is_usa = False
                 if deal_match:
                     record["deal_id"] = deal_match.get("deal_id")
-                    logger.info(f"  Matched: {matched_company} ({matched_role})")
+                    logger.info(
+                        f"  Matched: {matched_company} ({matched_role})")
                 else:
                     logger.info(f"  No deal match")
                     try:
@@ -804,11 +811,13 @@ def main():
                         is_usa = False
 
                     if is_usa:
-                        logger.info(f"  USA-related (notify only if new insert)")
+                        logger.info(
+                            f"  USA-related (notify only if new insert)")
                     else:
                         logger.info(f"  Not USA-related → silent save")
 
-                doc_id, inserted_new = upsert_german_case(gc_collection, record)
+                doc_id, inserted_new = upsert_german_case(
+                    gc_collection, record)
                 if doc_id:
                     stats["saved"] += 1
                     existing_file_numbers.add(fn)
@@ -817,10 +826,12 @@ def main():
                     if inserted_new:
                         stats["new"] += 1
                         if deal_match:
-                            subject, html = generate_matched_email(record, deal_match)
+                            subject, html = generate_matched_email(
+                                record, deal_match)
                             stats["matched"] += 1
                             if not send_email_via_webhook(
-                                subject, html, fn, deal_id=deal_match.get("deal_id")
+                                subject, html, fn, deal_id=deal_match.get(
+                                    "deal_id")
                             ):
                                 collect_error(
                                     error_items,
@@ -829,7 +840,8 @@ def main():
                                     context={"file_number": fn},
                                 )
                         elif is_usa:
-                            logger.info(f"  Sending [FRUD] email (first insert)")
+                            logger.info(
+                                f"  Sending [FRUD] email (first insert)")
                             subject, html = generate_usa_related_email(record)
                             stats["usa_related"] += 1
                             if not send_email_via_webhook(subject, html, fn):
@@ -853,7 +865,8 @@ def main():
                     error_items,
                     str(e),
                     step="process_record",
-                    context={"file_number": (raw.get("file_number") or "").strip()},
+                    context={"file_number": (
+                        raw.get("file_number") or "").strip()},
                 )
 
         return {
