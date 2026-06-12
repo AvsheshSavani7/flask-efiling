@@ -116,7 +116,7 @@ BACKUP_JSON = "canada_cases_register_backup.json"
 
 
 # Cutoff: 3 days ago
-CUTOFF_DATE = datetime.now() - timedelta(days=3)
+CUTOFF_DATE = datetime.now() - timedelta(days=30)
 
 
 def utc_now_iso() -> str:
@@ -597,16 +597,16 @@ def run_canada_cases_register(headless: bool = True):
                 if opened_dt is None:
                     continue
 
-                try:
-                    if isinstance(opened_dt, datetime):
-                        d = opened_dt.date()
-                    else:
-                        d = opened_dt
+                # try:
+                #     if isinstance(opened_dt, datetime):
+                #         d = opened_dt.date()
+                #     else:
+                #         d = opened_dt
 
-                    if d < cutoff_date_only:
-                        continue
-                except Exception:
-                    continue
+                #     if d < cutoff_date_only:
+                #         continue
+                # except Exception:
+                #     continue
 
                 parties = row["parties"]
                 opened_date = row["opened_date"]
@@ -619,7 +619,8 @@ def run_canada_cases_register(headless: bool = True):
                         f"[STEP 1.10] Already exists in canada_cases; skipping")
                     continue
 
-                logger.info(f"[STEP 1.11] LLM Call #1: Checking for deal match...")
+                logger.info(
+                    f"[STEP 1.11] LLM Call #1: Checking for deal match...")
                 try:
                     matched_deal_id = match_case_to_deal(parties)
                 except Exception as e:
@@ -657,17 +658,20 @@ def run_canada_cases_register(headless: bool = True):
                             deal = deals_collection.find_one(
                                 {"_id": ObjectId(matched_deal_id)})
                         except Exception as e:
-                            logger.exception(f"[STEP 1.13] Could not fetch deal: {e}")
+                            logger.exception(
+                                f"[STEP 1.13] Could not fetch deal: {e}")
                             collect_error(
                                 error_items,
                                 str(e),
                                 step="fetch_deal_for_email",
-                                context={"parties": parties[:80], "deal_id": matched_deal_id},
+                                context={
+                                    "parties": parties[:80], "deal_id": matched_deal_id},
                             )
 
                     if deal:
                         subject = build_subject("canada", "new", deal)
-                        html_email = generate_matched_case_email_html(case_info, deal)
+                        html_email = generate_matched_case_email_html(
+                            case_info, deal)
                         if not send_email_via_webhook(
                             subject, html_email, case_info, deal_id=matched_deal_id
                         ):
@@ -675,10 +679,12 @@ def run_canada_cases_register(headless: bool = True):
                                 error_items,
                                 "Failed to send matched-case email",
                                 step="send_email",
-                                context={"parties": parties[:80], "deal_id": matched_deal_id},
+                                context={
+                                    "parties": parties[:80], "deal_id": matched_deal_id},
                             )
                 else:
-                    logger.info(f"[STEP 1.14] LLM Call #2: Checking if USA-related...")
+                    logger.info(
+                        f"[STEP 1.14] LLM Call #2: Checking if USA-related...")
                     try:
                         details_for_llm = (
                             f"Parties: {parties}\n"
@@ -692,7 +698,8 @@ def run_canada_cases_register(headless: bool = True):
                             case_type="CANADA",
                         )
                     except Exception as e:
-                        logger.exception(f"[STEP 1.15] USA relation check error: {e}")
+                        logger.exception(
+                            f"[STEP 1.15] USA relation check error: {e}")
                         collect_error(
                             error_items,
                             str(e),
@@ -715,7 +722,8 @@ def run_canada_cases_register(headless: bool = True):
                                 context={"parties": parties[:80]},
                             )
                     else:
-                        logger.info(f"[STEP 1.17] Not matched and not USA-related")
+                        logger.info(
+                            f"[STEP 1.17] Not matched and not USA-related")
 
                 inserted_id = insert_case(collection, case_info)
                 if inserted_id:
