@@ -52,6 +52,12 @@ N8N_WEBHOOK_DEFAULT = os.getenv(
 N8N_WEBHOOK_SEND_TO_ALL = os.getenv("N8N_WEBHOOK_SEND_TO_ALL", "")
 NEW_N8N_EMAIL_WEBHOOK_URL = os.getenv("NEW_N8N_EMAIL_WEBHOOK_URL", "")
 
+CC_EMAILS: List[str] = [
+    "kaushal@hyperiontechnologies.ai",
+    "josh@hyperiontechnologies.ai",
+]
+_INTERNAL_ORG_ID = "6a031d87e4f1d72367bd2f92"
+
 
 # ---------------------------------------------------------------------------
 # Existing broadcast helpers (unchanged)
@@ -62,9 +68,6 @@ def resolve_webhook_url(subject: str, *, default_url: Optional[str] = None) -> s
     if "[FRMD]" in (subject or "") and N8N_WEBHOOK_SEND_TO_ALL:
         return N8N_WEBHOOK_SEND_TO_ALL
     return default_url or N8N_WEBHOOK_DEFAULT
-
-
-_TESTING_ORG_ID = "6a031d87e4f1d72367bd2f92"
 
 
 def post_email_payload(
@@ -79,20 +82,20 @@ def post_email_payload(
     subj = subject or payload.get("subject", "")
     url = webhook_url or resolve_webhook_url(subj, default_url=default_url)
 
-    # Existing broadcast send (comment out once org-aware send is fully live)
-    result = False
-    try:
-        resp = requests.post(
-            url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        logger.info("Email sent via %s: %s", url, subj)
-        result = True
-    except Exception as e:
-        logger.warning("Webhook failed (%s): %s", url, e)
+    # --- Old broadcast send (disabled — org-aware send is now live) ---
+    # result = False
+    # try:
+    #     resp = requests.post(
+    #         url,
+    #         json=payload,
+    #         headers={"Content-Type": "application/json"},
+    #         timeout=timeout,
+    #     )
+    #     resp.raise_for_status()
+    #     logger.info("Email sent via %s: %s", url, subj)
+    #     result = True
+    # except Exception as e:
+    #     logger.warning("Webhook failed (%s): %s", url, e)
 
     # Org-aware send — triggered by subject tag
     if "[FRMD]" in subj:
@@ -103,9 +106,10 @@ def post_email_payload(
         report_type = None
 
     if report_type:
-        send_report_email(report_type, payload, org_id=_TESTING_ORG_ID)
+        summary = send_report_email(report_type, payload)
+        return summary.get("orgs_sent", 0) > 0
 
-    return result
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -277,12 +281,14 @@ def send_report_email(
             continue
 
         recipient_list: List[str] = [r["email"] for r in recipients]
+        cc_list = CC_EMAILS if org_id_str != _INTERNAL_ORG_ID else []
         webhook_payload = {
             **payload,
             "report_type": report_type,
             "org_id": org_id_str,
             "org_name": org_name,
             "recipients": recipient_list,
+            "cc": cc_list,
         }
 
         logger.info(
