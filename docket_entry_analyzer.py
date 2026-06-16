@@ -30,7 +30,7 @@ COMPREHENSIVE_SUMMARY_MODEL = "gpt-5-mini-2025-08-07"
 ASSISTANTS_API_MODEL = "gpt-4o-mini"
 TIER1_MODEL = "claude-haiku-4-5-20251001"
 TIER2_MODEL = "claude-haiku-4-5-20251001"
-TIER3_MODEL = "claude-sonnet-4-20250514"
+TIER3_MODEL = "claude-sonnet-4-6"
 
 
 def _load_env_file(env_path: str) -> None:
@@ -1197,7 +1197,7 @@ def _estimate_cost(input_tokens: int, output_tokens: int, model: str) -> float:
         "claude-3-5-haiku-20241022": {"input": 0.8, "output": 4.0},
         "claude-haiku-4-5-20251001": {"input": 1.0, "output": 5.0},
         "claude-haiku-4-5": {"input": 1.0, "output": 5.0},
-        "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
+        "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
         # OpenAI pricing (per 1M tokens)
         "gpt-4o": {"input": 2.50, "output": 10.00},
         "gpt-4o-mini": {"input": 0.150, "output": 0.600},
