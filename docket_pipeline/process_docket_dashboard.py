@@ -38,6 +38,11 @@ except ImportError:
     MongoClient = None  # type: ignore
     Collection = None  # type: ignore
 
+try:
+    import anthropic as _anthropic
+except ImportError:
+    _anthropic = None  # type: ignore
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 ENV_FILE = str(PROJECT_ROOT / ".env")
@@ -45,14 +50,17 @@ ENV_FILE = str(PROJECT_ROOT / ".env")
 DOCKET_COLLECTION = "docket"
 DASHBOARD_COLLECTION = "docket_dashboard"
 
+LLM_DEDUP_MODEL = "claude-haiku-4-5-20251001"
+
 IST = timezone(timedelta(hours=5, minutes=30))
 SCRIPT_NAME = "process_docket_dashboard"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
-# ── Filer name canonicalization (from update_dashboard POC) ───────────────────
+# ── Filer name canonicalization ────────────────────────────────────────────────
 CANONICAL_NAMES = {
+    # STB — Parties (UP/NS variants)
     "union pacific": "Union Pacific",
     "union pacific corporation": "Union Pacific",
     "union pacific railroad": "Union Pacific",
@@ -68,8 +76,10 @@ CANONICAL_NAMES = {
     "union pacific and norfolk southern": "Union Pacific / Norfolk Southern (Joint)",
     "union pacific & norfolk southern": "Union Pacific / Norfolk Southern (Joint)",
     "union pacific corporation, union pacific railroad company, norfolk southern corporation, norfolk southern railway company": "Union Pacific / Norfolk Southern (Joint)",
+    # STB — Commission
     "stb": "Surface Transportation Board",
     "surface transportation board": "Surface Transportation Board",
+    # STB — Competitors
     "canadian pacific railway company dba cpkc": "CPKC",
     "canadian pacific railway company (cpkc)": "CPKC",
     "canadian pacific kansas city limited": "CPKC",
@@ -79,6 +89,22 @@ CANONICAL_NAMES = {
     "bnsf railway company": "BNSF Railway",
     "csx transportation, inc.": "CSX Transportation",
     "csx transportation, inc": "CSX Transportation",
+    # MT-PSC — Commission variants
+    "montana public service commission": "Montana Public Service Commission",
+    "montana public service commission legal and regulatory staff": "Montana Public Service Commission",
+    "commission staff": "Montana Public Service Commission",
+    "regulatory division": "Montana Public Service Commission",
+    "mpsc": "Montana Public Service Commission",
+    "montana psc": "Montana Public Service Commission",
+    # MT-PSC — Parties (NWE/Black Hills variants)
+    "northwestern energy": "NorthWestern Energy",
+    "northwestern corporation": "NorthWestern Energy",
+    "nwe group": "NorthWestern Energy",
+    "nwe group inc.": "NorthWestern Energy",
+    "nwe group, inc.": "NorthWestern Energy",
+    "black hills corporation": "Black Hills Corporation",
+    "black hills energy": "Black Hills Corporation",
+    "black hills montana gas": "Black Hills Corporation",
 }
 
 INTERVENOR_TYPE_OVERRIDES = {
@@ -93,12 +119,25 @@ _STRIP_SUFFIXES = re.compile(
     re.IGNORECASE,
 )
 
+# Strips department/division suffixes after corporate suffix stripping —
+# catches "X Commission Legal and Regulatory Staff", "X Board Office of the Secretary", etc.
+_STRIP_DEPT_SUFFIXES = re.compile(
+    r"\s+(legal and regulatory staff|regulatory staff|legal staff"
+    r"|office of the secretary|office of proceedings"
+    r"|bureau of investigation|division of enforcement"
+    r"|regulatory division|legal division"
+    r"|staff|section)\s*$",
+    re.IGNORECASE,
+)
+
 JURISDICTION_BY_DASHBOARD_TYPE = {
     "stb": "Surface Transportation Board",
+    "mt-psc": "Montana Public Service Commission",
 }
 
 CASE_NAME_BY_DASHBOARD_TYPE = {
     "stb": "Union Pacific / Norfolk Southern — Proposed Merger (FD-36873)",
+    "mt-psc": "Montana Public Service Commission - Proposed Merger (2025.10.078)",
 }
 
 
@@ -170,29 +209,139 @@ def _parse_object_id(record_id: str) -> Any:
 
 
 def _parse_date(raw: Any) -> str:
+    """Normalize any incoming date to YYYY-MM-DD for consistent string sorting.
+
+    Handles:
+      - datetime object           → strftime
+      - MongoDB {"$date": "..."}  → unwrap then parse
+      - "YYYY-MM-DD[Ttime...]"    → slice to 10 chars (already ISO)
+      - "DD/MM/YYYY"              → reformat to YYYY-MM-DD
+    """
+    if isinstance(raw, datetime):
+        return raw.strftime("%Y-%m-%d")
     if isinstance(raw, dict):
         raw = raw.get("$date", "")
     if not raw:
         return ""
-    return str(raw)[:10]
+    s = str(raw).strip()
+    # Already ISO: YYYY-MM-DD or YYYY-MM-DDThh:mm:ss...
+    if re.match(r"^\d{4}-\d{2}-\d{2}", s):
+        return s[:10]
+    # DD/MM/YYYY or DD-MM-YYYY (day first — as used in MT-PSC source data)
+    m = re.match(r"^(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})$", s)
+    if m:
+        day, month, year = m.group(1).zfill(2), m.group(2).zfill(2), m.group(3)
+        return f"{year}-{month}-{day}"
+    return s[:10]
 
 
-def _normalize_name(raw: str) -> str:
+def _normalize_name(
+    raw: str,
+    name_map: Optional[Dict[str, str]] = None,
+    known_stakeholders: Optional[List[str]] = None,
+    deal_context: str = "",
+) -> str:
+    """Return a canonical stakeholder name via a 5-step resolution chain.
+
+    Steps 1-3 are rule-based (fast, free). Steps 4-5 use the LLM name map
+    cache backed by MongoDB — only active when name_map is provided.
+    """
     if not raw:
         return raw
     key = raw.lower().strip()
+
+    # 1. Exact match in CANONICAL_NAMES
     if key in CANONICAL_NAMES:
         return CANONICAL_NAMES[key]
+
+    # 2. Strip corporate suffixes and retry
     stripped = _STRIP_SUFFIXES.sub("", key).strip().rstrip(",").strip()
     if stripped in CANONICAL_NAMES:
         return CANONICAL_NAMES[stripped]
+
+    # 3. Strip department/division suffixes and retry
+    dept_stripped = _STRIP_DEPT_SUFFIXES.sub("", stripped).strip()
+    if dept_stripped != stripped and dept_stripped in CANONICAL_NAMES:
+        return CANONICAL_NAMES[dept_stripped]
+
+    # 4. Check LLM name map cache (resolved in prior runs, stored in MongoDB)
+    if name_map is not None and key in name_map:
+        return name_map[key]
+
+    # 5. LLM fallback — compare against known stakeholders in this docket
+    if name_map is not None and known_stakeholders:
+        matched = _llm_match_name(raw, known_stakeholders, deal_context)
+        if matched:
+            name_map[key] = matched
+        else:
+            name_map[key] = raw  # Cache self-mapping so we don't re-ask
+        return name_map[key]
+
     return raw
 
 
 def _grouping_key(name: str) -> str:
     key = name.lower().strip()
     key = _STRIP_SUFFIXES.sub("", key).strip().rstrip(",").strip()
+    key = _STRIP_DEPT_SUFFIXES.sub("", key).strip()
     return re.sub(r"\s+", " ", key)
+
+
+def _llm_match_name(
+    new_name: str,
+    known_stakeholders: List[str],
+    deal_context: str,
+) -> Optional[str]:
+    """Ask Claude Haiku whether new_name matches any existing stakeholder.
+
+    Returns the matched canonical name, or None if it is a new entity.
+    Only called when rule-based normalization fails and known stakeholders exist.
+    """
+    if _anthropic is None or not known_stakeholders:
+        return None
+    api_key = os.environ.get("CLAUDE_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+
+    numbered = "\n".join(f"{i + 1}. {n}" for i, n in enumerate(known_stakeholders))
+    prompt = (
+        f"You are matching stakeholder names in a regulatory docket.\n\n"
+        f"Deal: {deal_context}\n\n"
+        f'A new filing was submitted by: "{new_name}"\n\n'
+        f"Here are the existing stakeholders already identified in this docket:\n"
+        f"{numbered}\n\n"
+        f"Is the new filer the same entity as any existing stakeholder? Consider:\n"
+        f"- Corporate suffixes (Inc., LLC, Corp.) are irrelevant\n"
+        f"- Department/division names (Legal Staff, Office of the Secretary) "
+        f"within the same org = same entity\n"
+        f"- Abbreviations (PSC = Public Service Commission, NWE = NorthWestern Energy)\n"
+        f"- Parent/subsidiary relationships filing under different corporate names\n\n"
+        f"Reply with ONLY one of:\n"
+        f'- The number of the matching stakeholder (e.g. "3")\n'
+        f'- "NEW" if this is a genuinely different entity'
+    )
+
+    try:
+        client = _anthropic.Anthropic(api_key=api_key, timeout=30.0)
+        resp = client.messages.create(
+            model=LLM_DEDUP_MODEL,
+            max_tokens=20,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        answer = resp.content[0].text.strip()
+        if answer.upper() == "NEW":
+            return None
+        num = re.search(r"\d+", answer)
+        if num:
+            idx = int(num.group()) - 1
+            if 0 <= idx < len(known_stakeholders):
+                matched = known_stakeholders[idx]
+                logger.info("LLM dedup: %r → %r", new_name, matched)
+                return matched
+        return None
+    except Exception as e:
+        logger.warning("LLM dedup error for %r: %s", new_name, e)
+        return None
 
 
 def _get_mongo_client() -> Any:
@@ -247,13 +396,19 @@ def _init_dashboard(
     }
 
 
-def convert_entry(docket_doc: dict, docket_record_id: str) -> dict:
+def convert_entry(
+    docket_doc: dict,
+    docket_record_id: str,
+    name_map: Optional[Dict[str, str]] = None,
+    known_stakeholders: Optional[List[str]] = None,
+    deal_context: str = "",
+) -> dict:
     """Map docket document (with enriched) to a dashboard docket_entries item."""
     meta = docket_doc.get("metadata") or {}
     enriched = docket_doc.get("enriched") or {}
 
     raw_filer = enriched.get("filer_name") or meta.get("on_behalf_of") or ""
-    filer = _normalize_name(raw_filer)
+    filer = _normalize_name(raw_filer, name_map, known_stakeholders, deal_context)
 
     itype = enriched.get("intervenor_type") or ""
     itype = INTERVENOR_TYPE_OVERRIDES.get(filer.lower(), itype)
@@ -271,7 +426,6 @@ def convert_entry(docket_doc: dict, docket_record_id: str) -> dict:
         "filer_role": enriched.get("filer_role", ""),
         "filer_name": filer,
         "intervenor_type": itype,
-        "intervenor_status": enriched.get("intervenor_status", ""),
         "position_on_deal": enriched.get("position_on_deal", "Neutral"),
         "opposition_type": enriched.get("opposition_type", ""),
         "relief_type": enriched.get("relief_type", "Neutral"),
@@ -280,17 +434,23 @@ def convert_entry(docket_doc: dict, docket_record_id: str) -> dict:
         "entry_summary": enriched.get("entry_summary", ""),
         "key_arguments": key_args if isinstance(key_args, list) else [],
         "key_excerpts": key_excerpts if isinstance(key_excerpts, list) else [],
+        "legal_regulatory_significance": enriched.get("legal_regulatory_significance", ""),
         "cumulative_impact": "",
         "download_link": meta.get("url") or meta.get("document_id") or "",
+        "document_type": meta.get("document_type") or "",
         "proceeding_phase": enriched.get("proceeding_phase", ""),
         "relevance_level": (enriched.get("relevance_level") or "medium").lower(),
-        "is_major_filing": enriched.get("is_major_filing", False),
-        "requires_response": enriched.get("requires_response", False),
         "deadline_date": enriched.get("deadline_date"),
+        "deadline_description": enriched.get("deadline_description", ""),
+        "presents_new_info": 0,
     }
 
 
-def aggregate_stakeholders(entries: list) -> list:
+def aggregate_stakeholders(
+    entries: list,
+    name_map: Optional[Dict[str, str]] = None,
+    deal_context: str = "",
+) -> list:
     group_data = defaultdict(
         lambda: {
             "roles": [],
@@ -303,11 +463,16 @@ def aggregate_stakeholders(entries: list) -> list:
         }
     )
 
+    # Accumulates canonical names seen so far — used by LLM dedup as context
+    known: List[str] = []
+
     for e in entries:
         raw_name = (e.get("filer_name") or "").strip()
         if not raw_name:
             continue
-        canon = _normalize_name(raw_name)
+        canon = _normalize_name(raw_name, name_map, known, deal_context)
+        if canon not in known:
+            known.append(canon)
         gk = _grouping_key(canon)
         fd = group_data[gk]
         fd["count"] += 1
@@ -585,7 +750,19 @@ def process_docket_dashboard(
 
         dashboard["deal_id"] = deal_id
 
-        new_entry = convert_entry(docket_doc, docket_record_id)
+        # Load persisted name map and build deal context for LLM dedup
+        name_map: Dict[str, str] = dict(dashboard.get("_name_map") or {})
+        dash_meta = dashboard.get("docket_metadata", {})
+        deal_context = (
+            f"{dash_meta.get('case_name', '')} ({dash_meta.get('jurisdiction', '')})"
+        )
+        known_stakeholders = [
+            s["name"] for s in dashboard.get("docket_stakeholders", []) if s.get("name")
+        ]
+
+        new_entry = convert_entry(
+            docket_doc, docket_record_id, name_map, known_stakeholders, deal_context
+        )
         action, _ = _merge_dashboard_entry(
             dashboard,
             new_entry,
@@ -608,9 +785,12 @@ def process_docket_dashboard(
 
         entries = dashboard["docket_entries"]
         _sort_and_number_entries(entries)
-        dashboard["docket_stakeholders"] = aggregate_stakeholders(entries)
+        dashboard["docket_stakeholders"] = aggregate_stakeholders(
+            entries, name_map, deal_context
+        )
         dashboard["docket_conditions"] = extract_conditions(entries)
         dashboard["updated_at"] = datetime.now(timezone.utc)
+        dashboard["_name_map"] = name_map  # Persist resolved names back to MongoDB
 
         write_doc = {k: v for k, v in dashboard.items() if k != "_id"}
         result = dashboard_coll.replace_one(

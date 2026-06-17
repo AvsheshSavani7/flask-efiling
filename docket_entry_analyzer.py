@@ -114,7 +114,15 @@ cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 DOCKET_TYPES_WITH_ENRICHMENT = frozenset({
     "stb-environmentalComment",
     "stb-document",
+    "mt-psc",
 })
+
+# Maps docket collection type → dashboard_docket_type for enrich_docket_entry
+_DOCKET_TO_DASHBOARD_TYPE: Dict[str, str] = {
+    "stb-document":             "stb",
+    "stb-environmentalComment": "stb",
+    "mt-psc":                   "mt-psc",
+}
 
 DOCKET_HISTORY_PROJECTION = {
     "_id": 0,
@@ -185,13 +193,16 @@ def _should_schedule_enrichment(docket_type: str) -> bool:
     return docket_type in DOCKET_TYPES_WITH_ENRICHMENT
 
 
-def _schedule_docket_enrichment(record_id: str) -> None:
+def _schedule_docket_enrichment(record_id: str, docket_type: str) -> None:
     """Run enrichment in a background thread (does not block API response)."""
+    dashboard_type = _DOCKET_TO_DASHBOARD_TYPE.get(docket_type, "stb")
+
     def _run():
         try:
             from docket_pipeline.enrich_entry import enrich_docket_entry
             result = enrich_docket_entry(
-                record_id=record_id, test_mode=False, dashboard_docket_type="stb")
+                record_id=record_id, test_mode=False,
+                dashboard_docket_type=dashboard_type)
             if result.get("success"):
                 logger.info(
                     "Background enrichment completed for _id=%s", record_id)
@@ -1108,7 +1119,7 @@ Be factual and concise. Focus on substantive content, not procedural details."""
             inserted_id = insert_result.inserted_id
             logger.info("✓ Saved entry to MongoDB _id=%s", inserted_id)
             if _should_schedule_enrichment(docket_type):
-                _schedule_docket_enrichment(str(inserted_id))
+                _schedule_docket_enrichment(str(inserted_id), docket_type)
                 enrichment_scheduled = True
             else:
                 logger.info(

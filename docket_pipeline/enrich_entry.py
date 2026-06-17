@@ -37,6 +37,9 @@ except ImportError:
     ObjectId = None  # type: ignore
     MongoClient = None  # type: ignore
 
+from .jurisdiction_configs import get_config
+from .jurisdiction_configs.base import JurisdictionConfig
+
 # ── Paths / env (same pattern as docket_entry_analyzer.py) ─────────────────────
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -70,91 +73,163 @@ FULL_CONTENT_LIMIT = 500_000
 
 logger = logging.getLogger("docket_enrich_entry")
 
-# ── System prompt (same taxonomy as stb_extract.py) ───────────────────────────
-SYSTEM_PROMPT = """You are an expert regulatory analyst reviewing docket filings for M&A transactions.
+# ── Jurisdiction config helpers ────────────────────────────────────────────────
+# Maps MongoDB metadata.docket_type values → jurisdiction registry keys
+_DOCKET_TYPE_TO_JURISDICTION: Dict[str, str] = {
+    "stb":                       "stb",
+    "stb-document":              "stb",
+    "stb-environmentalcomment":  "stb",
+    "mt-psc":                    "mt-psc",
+}
+
+
+def _get_config_for_docket_type(docket_type: str) -> "JurisdictionConfig":
+    """Resolve a MongoDB docket_type string to a JurisdictionConfig. Falls back to STB."""
+    key = _DOCKET_TYPE_TO_JURISDICTION.get(
+        (docket_type or "").strip().lower(), "stb"
+    )
+    return get_config(key)
+
+
+def build_system_prompt(config: "JurisdictionConfig") -> str:
+    """Assemble the full system prompt from a JurisdictionConfig."""
+    party_names_display = ", ".join(p.title() for p in config.party_names[:4])
+    return f"""You are an expert regulatory analyst reviewing docket filings for M&A transactions.
 Your analysis will be used by merger arbitrage professionals to assess deal risk and prepare client reports.
 
 CRITICAL: Your summaries must be ACTIONABLE and QUOTABLE. Clients need specific arguments, specific excerpts, and specific relief requested - not generic descriptions.
 
-BAD (meta-description): "DirecTV argues the merger will harm competition and raise prices."
-GOOD (substantive): "DirecTV argues: 'The merger will increase retransmission consent rates to MVPDs, making consumer price increases inevitable. DIRECTV's input costs will go up and revenues will go down from lower subscribership.'"
+BAD (meta-description): "The filer argues the merger will harm competition and raise prices."
+GOOD (substantive): "The filer argues: 'The merger will result in rate increases for residential customers, as the combined entity will lack competitive pressure to maintain current rate structures.'"
 
-CONTEXT: This is STB (Surface Transportation Board) Docket FD-36873: Union Pacific Corporation / Union Pacific Railroad Company seeking CONTROL of Norfolk Southern Corporation / Norfolk Southern Railway Company.
+The difference: GOOD gives the actual argument a client can quote. BAD just describes that an argument exists.
+
+CONTEXT: {config.system_context}
 
 FILER TAXONOMY:
-1. Commission - Actual STB Board orders, notices, procedural rulings, ALJ decisions
-2. Party - Merger applicants (Union Pacific, Norfolk Southern)
+1. Commission - Actual {config.name} orders, notices, procedural rulings, staff recommendations
+2. Party - Merger applicants ({party_names_display})
 3. Intervenor - Everyone else, sub-typed as:
-   - competitor (other railroads: BNSF, CSX, CN, CPKC, short lines)
-   - business_customer (shippers: chemical companies, grain elevators, manufacturers, utilities)
-   - retail_customer (individual citizens)
-   - special_interest (advocacy groups, trade associations, public interest orgs)
-   - labor (unions: SMART-TD, BLET, BRS, TCU, etc.)
-   - government (AG, municipalities, state DOTs, federal agencies)
-   - other
+{config.filer_taxonomy}
 4. Other
 
 RELIEF TYPE (be precise):
 - "Deny" = Wants outright rejection
 - "Approve" = Supports approval
 - "Approve_Conditional" = Supports approval IF conditions met
-- "Deny_With_Fallback_Conditions" = Wants denial, BUT if approved, wants specific conditions
-- "Procedural" = Only procedural request
+- "Deny_With_Fallback_Conditions" = Wants denial, BUT if approved, wants specific conditions (common for sophisticated intervenors)
+- "Procedural" = Only procedural request (extension, intervention, discovery motion, etc.)
 - "Neutral" = No specific relief requested
 
 OPPOSITION TYPE (MANDATORY when position_on_deal is "Oppose"):
-1. conditional  - Lists specific conditions that would satisfy them
-2. outright     - Wants deal denied entirely, no conditions would fix it
-3. ideological  - Opposition based on general principles, not this specific deal
-4. procedural   - Only objecting to process/timing
-5. ambiguous    - States opposition but insufficient detail to classify
+You MUST classify every opposing filer. Here's how to decide:
 
-DEFAULT RULE: If they list ANY specific conditions or remedies → "conditional"
-If they explicitly say deal must be denied with no path to approval → "outright"
+1. **conditional** (MOST COMMON - use as default for opposers) = They list specific conditions that would satisfy them
+   - Example signals: "we request the following conditions...", "approval should be contingent on...", "we would not oppose if..."
 
-INTERVENOR STATUS:
+2. **outright** = They want the deal denied entirely, no conditions would fix it
+   - Example signals: "must be rejected", "cannot be remedied", "fundamentally flawed", "no conditions can address"
+
+3. **ideological** = Opposition based on general principles, not this specific deal
+   - Example signals: "we oppose all utility consolidation", "monopoly control", broad policy objections
+
+4. **procedural** = Only objecting to process/timing, not substance
+   - Example signals: "need more time", "discovery is inadequate", "procedural defects"
+
+5. **ambiguous** = Filing states opposition but provides insufficient detail to classify
+
+DEFAULT RULE: If they list ANY specific conditions or remedies -> "conditional"
+If they explicitly say deal must be denied with no path to approval -> "outright"
+If not enough information to determine -> "ambiguous"
+
+INTERVENOR STATUS (current disposition of the filer):
 - "active_opposition" = Currently opposing, no settlement reached
-- "settled"           = Reached settlement/stipulation with applicants
-- "withdrawn"         = Withdrew intervention or opposition
-- "watching"          = Filed to monitor but not actively opposing
-- null                = For Commission/Party filings or unclear status
+- "settled" = Reached settlement/stipulation/agreement with applicants
+- "withdrawn" = Withdrew intervention or opposition
+- "watching" = Filed to monitor but not actively opposing (Neutral/procedural stance)
+- null = For Commission/Party filings or unclear status
+
+DEPTH GUIDANCE:
+- For HIGH relevance + major intervenor: Provide extensive detail (6-8 sentence summary, 3+ excerpts, full argument list)
+- For HIGH relevance + individual: Standard detail (3-4 sentences)
+- For MEDIUM/LOW relevance: Brief (2-3 sentences)
+
+FOR OPPOSITION FILINGS - CAPTURE SETTLEMENT SIGNALS:
+- Do they say "we would support if..." or list specific acceptable conditions? -> conditional
+- Do they mention willingness to negotiate or discuss? -> likely to settle
+- Do they cite irremediable harms or fundamental policy objections? -> outright/ideological, unlikely to settle
+- Are conditions specific and achievable (rate caps, service guarantees) or vague/impossible? -> specific = more settleable
 
 Respond ONLY with valid JSON:
-{
+{{
   "title": "Concise descriptive title",
+
   "filer_role": "Commission | Party | Intervenor | Other",
-  "intervenor_type": "competitor | business_customer | retail_customer | special_interest | labor | government | other | null",
-  "filer_name": "Consistent short name",
+  "intervenor_type": "competitor | business_customer | retail_customer | special_interest | labor | government | environmental | consumer_advocate | agricultural | other | null",
+  "filer_name": "CONSISTENT short name. For the regulator: '{config.name}'. Use the SAME name format for the same filer across all filings.",
   "filer_description": "Who they are and their stake in 1-2 sentences",
+
   "position_on_deal": "Support | Oppose | Neutral | Procedural",
-  "opposition_type": "conditional | outright | ideological | procedural | ambiguous | null",
+  "opposition_type": "conditional | outright | ideological | procedural | ambiguous (REQUIRED if position is Oppose)",
   "intervenor_status": "active_opposition | settled | withdrawn | watching | null",
   "relief_type": "Deny | Approve | Approve_Conditional | Deny_With_Fallback_Conditions | Procedural | Neutral",
   "relief_requested": "Specific relief requested in their own words",
-  "conditions_requested": ["Each specific condition requested"],
+  "conditions_requested": ["List each specific condition requested, if any"],
+
   "proceeding_phase": "Pre-Filing | Comment | Discovery | Hearing | Post-Decision | Compliance",
+
   "relevance_level": "High | Medium | Low",
   "relevance_explanation": "Why this relevance level",
-  "entry_summary": "Substantive summary with quotable content",
-  "key_arguments": ["Actual argument in substantive form, quotable in a client memo"],
-  "key_excerpts": ["Most important 1-2 sentences verbatim from the filing"],
-  "legal_regulatory_significance": "Does this change scope of review, evidentiary burden, create new issues?",
+
+  "entry_summary": "SUBSTANTIVE summary with QUOTABLE CONTENT - not meta-descriptions. Include: (1) Their ACTUAL arguments in their words, (2) Specific harms alleged with numbers if cited, (3) What conditions would satisfy them (if conditional opposition), (4) Any settlement signals. A client should be able to quote this summary directly.",
+
+  "key_arguments": [
+    "The ACTUAL argument in substantive form - not 'argues about rates' but 'Transaction will increase residential rates by an estimated 15% over 5 years'",
+    "Each should be quotable in a client memo"
+  ],
+
+  "key_excerpts": [
+    "CRITICAL: Pull the most important 1-2 sentences verbatim from the filing that capture their core argument",
+    "Prioritize excerpts that explain WHY they oppose or WHAT they want"
+  ],
+
+  "legal_regulatory_significance": "Does this change scope of review, evidentiary burden, create new issues? Be specific.",
+
   "requires_response": true,
   "deadline_date": "YYYY-MM-DD or null",
-  "deadline_description": "What is due",
+  "deadline_description": "What's due",
+
   "issue_flags": ["completeness_issue", "schedule_change", "issue_framing", "hearing_requested", "conditions_proposed"],
   "key_parties": ["parties mentioned"],
+
   "is_major_filing": true
-}"""
+}}
+
+IMPORTANT:
+- For Petitions to Deny, Comments from major intervenors, or briefs from significant filers: PROVIDE EXTENSIVE DETAIL
+- Pull actual quotes that a professional could use in a client memo
+- List EACH argument separately in key_arguments, not a summary of arguments
+- If they say "deny the merger BUT if you approve it, require X, Y, Z" - that's Deny_With_Fallback_Conditions
+- Be specific about conditions: not "behavioral remedies" but "require rate cap for 5 years post-merger"
+"""
 
 
-def classify_filer_role_rule_based(doc_type: str, by: str) -> str:
+def default_docket_number(docket_type: str) -> str:
+    return _get_config_for_docket_type(docket_type).docket_number
+
+
+def classify_filer_role_rule_based(
+    doc_type: str, by: str, docket_type: str = ""
+) -> str:
+    config = _get_config_for_docket_type(docket_type)
     doc_lower = (doc_type or "").lower()
     by_lower = (by or "").lower()
-    if any(x in doc_lower for x in ["decision", "order", "notice"]):
-        if "board" in by_lower or "surface transportation" in by_lower:
+    if any(x in doc_lower for x in config.commission_doc_types):
+        if any(x in by_lower for x in config.commission_names):
             return "Commission"
-    if any(x in by_lower for x in ["union pacific", "norfolk southern"]):
+    if any(x in by_lower for x in config.commission_names):
+        return "Commission"
+    if any(x in by_lower for x in config.party_names):
         return "Party"
     return "Intervenor"
 
@@ -288,6 +363,7 @@ def enrich(client: "anthropic.Anthropic", entry: dict, record_id: Optional[str] 
     """Run Claude Haiku extraction on one entry. Returns the enriched dict or None."""
     entry_ref = _record_id_str(entry, record_id)
     meta = entry.get("metadata", {})
+    docket_type = meta.get("docket_type", "")
     doc_type = meta.get("document_type", "")
     by = meta.get("on_behalf_of", "")
     date_raw = meta.get("date", "")
@@ -297,13 +373,19 @@ def enrich(client: "anthropic.Anthropic", entry: dict, record_id: Optional[str] 
         date_str = date_raw.get("$date", "")
     else:
         date_str = str(date_raw)
-    docket_no = meta.get("docket_number", "FD-36873")
+    docket_no = meta.get("docket_number") or default_docket_number(docket_type)
+    filename = meta.get("filename", "")
+    decision_summary = meta.get("decision_summary", "")
 
     content_text, content_source = select_content(entry)
-    rule_role = classify_filer_role_rule_based(doc_type, by)
+    config = _get_config_for_docket_type(docket_type)
+    rule_role = classify_filer_role_rule_based(doc_type, by, docket_type)
+    system_prompt = build_system_prompt(config)
 
     parts = [
         f"Record ID: {entry_ref}",
+        f"Jurisdiction: {config.name}",
+        f"Docket Type: {docket_type or 'unknown'}",
         f"Document Type: {doc_type}",
         f"Filed By: {by}",
         f"Date: {date_str}",
@@ -312,6 +394,10 @@ def enrich(client: "anthropic.Anthropic", entry: dict, record_id: Optional[str] 
         f"Content Source: {content_source}",
     ]
     parts = [p for p in parts if p]
+    if filename:
+        parts.append(f"Filename: {filename}")
+    if decision_summary:
+        parts.append(f"Decision Summary: {decision_summary}")
     if content_text:
         parts.append(f"\n--- FILING CONTENT ---\n{content_text}")
     else:
@@ -325,7 +411,7 @@ def enrich(client: "anthropic.Anthropic", entry: dict, record_id: Optional[str] 
                 response = client.messages.create(
                     model=LLM_MODEL,
                     max_tokens=MAX_TOKENS,
-                    system=SYSTEM_PROMPT,
+                    system=system_prompt,
                     messages=[{"role": "user", "content": user_prompt}],
                 )
             else:
@@ -338,7 +424,7 @@ Return JSON with these exact fields:
 {{
   "title": "descriptive title",
   "filer_role": "Commission|Party|Intervenor|Other",
-  "intervenor_type": "competitor|business_customer|retail_customer|special_interest|labor|government|other|null",
+  "intervenor_type": "competitor|business_customer|retail_customer|special_interest|labor|government|environmental|consumer_advocate|agricultural|other|null",
   "filer_name": "name",
   "position_on_deal": "Support|Oppose|Neutral|Procedural",
   "opposition_type": "conditional|outright|ideological|procedural|ambiguous|null",
@@ -362,7 +448,7 @@ Return JSON with these exact fields:
 }}"""
                 response = client.messages.create(
                     model=LLM_MODEL,
-                    max_tokens=MAX_TOKENS,
+                    max_tokens=3000,
                     system="You are a regulatory filing analyst. Return ONLY valid JSON. No markdown. No text before or after the JSON object.",
                     messages=[{"role": "user", "content": simple_prompt}],
                 )
