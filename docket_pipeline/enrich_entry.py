@@ -80,6 +80,7 @@ _DOCKET_TYPE_TO_JURISDICTION: Dict[str, str] = {
     "stb-document":              "stb",
     "stb-environmentalcomment":  "stb",
     "mt-psc":                    "mt-psc",
+    "sd-puc":                    "sd-puc",
 }
 
 

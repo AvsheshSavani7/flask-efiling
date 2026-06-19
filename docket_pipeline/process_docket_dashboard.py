@@ -133,11 +133,13 @@ _STRIP_DEPT_SUFFIXES = re.compile(
 JURISDICTION_BY_DASHBOARD_TYPE = {
     "stb": "Surface Transportation Board",
     "mt-psc": "Montana Public Service Commission",
+    "sd-puc": "South Dakota Public Utilities Commission",
 }
 
 CASE_NAME_BY_DASHBOARD_TYPE = {
     "stb": "Union Pacific / Norfolk Southern — Proposed Merger (FD-36873)",
     "mt-psc": "Montana Public Service Commission - Proposed Merger (2025.10.078)",
+    "sd-puc": "South Dakota PUC - NorthWestern / Black Hills Merger (GE25-001)",
 }
 
 

@@ -5,10 +5,12 @@ Maps jurisdiction_id strings to their config objects.
 
 from .stb import STB_CONFIG
 from .mt_psc import MT_PSC_CONFIG
+from .sd_puc import SD_PUC_CONFIG
 
 JURISDICTION_REGISTRY = {
     "stb": STB_CONFIG,
     "mt-psc": MT_PSC_CONFIG,
+    "sd-puc": SD_PUC_CONFIG,
 }
 
 

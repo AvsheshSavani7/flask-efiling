@@ -115,6 +115,7 @@ DOCKET_TYPES_WITH_ENRICHMENT = frozenset({
     "stb-environmentalComment",
     "stb-document",
     "mt-psc",
+    "sd-puc",
 })
 
 # Maps docket collection type → dashboard_docket_type for enrich_docket_entry
@@ -122,6 +123,7 @@ _DOCKET_TO_DASHBOARD_TYPE: Dict[str, str] = {
     "stb-document":             "stb",
     "stb-environmentalComment": "stb",
     "mt-psc":                   "mt-psc",
+    "sd-puc":                   "sd-puc",
 }
 
 DOCKET_HISTORY_PROJECTION = {
