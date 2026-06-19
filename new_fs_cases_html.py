@@ -947,7 +947,8 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                     logger.info(f"[STEP 3.7] [{case_num}] Case: {case}")
                     if not case or case.get("error"):
                         parse_error = (
-                            case.get("error") if case else "Scrape/parse failed"
+                            case.get(
+                                "error") if case else "Scrape/parse failed"
                         )
                         logger.warning(
                             f"[STEP 3.8] [{case_num}] Scrape failed; skipping")
@@ -997,7 +998,8 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                                 f"[STEP 3.14] [{case_num}] deal_id={matched_deal_id} not in cache, querying DB...")
                             try:
                                 deals_coll = get_deals_collection()
-                                if deals_coll:
+                                if deals_coll is not None:
+
                                     raw = deals_coll.find_one(
                                         {"_id": ObjectId(matched_deal_id)})
                                     if raw:
@@ -1029,7 +1031,7 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                             subject, html_email = generate_matched_email(
                                 case, deal, companies)
                             if not send_email_via_webhook(
-                                subject, html_email, case_num, case_title, deal_id=matched_deal_id):
+                                    subject, html_email, case_num, case_title, deal_id=matched_deal_id):
                                 collect_error(
                                     error_items,
                                     "Failed to send matched-case notification email",
@@ -1084,7 +1086,7 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                         subject, html_email = generate_usa_email(
                             case, companies)
                         if not send_email_via_webhook(
-                            subject, html_email, case_num, case_title, usa_related=True):
+                                subject, html_email, case_num, case_title, usa_related=True):
                             collect_error(
                                 error_items,
                                 "Failed to send USA-related notification email",

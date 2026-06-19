@@ -890,7 +890,8 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                 case_url = f"https://competition-cases.ec.europa.eu/cases/{case_number}"
                 if not new_data or new_data.get("error"):
                     parse_error = (
-                        new_data.get("error") if new_data else "Scrape/parse failed"
+                        new_data.get(
+                            "error") if new_data else "Scrape/parse failed"
                     )
                     logger.warning(
                         f"[STEP 4.4] [{case_number}] Scrape failed — skipping")
@@ -957,7 +958,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                             f"[STEP 4.9] [{case_number}] deal_id={deal_id} not in cache, querying DB...")
                         try:
                             deals_coll = get_deals_collection()
-                            if deals_coll:
+                            if deals_coll is not None:
                                 raw = deals_coll.find_one(
                                     {"_id": ObjectId(deal_id)})
                                 if raw:
@@ -1031,7 +1032,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                                 f"[STEP 4.15] [{case_number}] deal_id={matched_deal_id} not in cache, querying DB...")
                             try:
                                 deals_coll = get_deals_collection()
-                                if deals_coll:
+                                if deals_coll is not None:
                                     raw = deals_coll.find_one(
                                         {"_id": ObjectId(matched_deal_id)})
                                     if raw:
@@ -1109,7 +1110,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                                 companies) if companies else "N/A"
                             subject = build_subject("ec_merger", "update")
                             if not send_email_via_webhook(
-                                subject, email_html, case_number, case_title, changed_fields=changed_names):
+                                    subject, email_html, case_number, case_title, changed_fields=changed_names):
                                 collect_error(
                                     error_items,
                                     "Failed to send USA-related update notification email",
