@@ -7,7 +7,9 @@ change subjects globally without touching individual scraper files.
 
 Subject formats:
   Matched (FRMD): "{prefix}: {Agency} - {Event Label} - [FRMD]"
-                  prefix = target_ticker, else target_name/target, else "Unknown"
+                  prefix = target[/acquirer]
+                  target = target_ticker, else target_name/target, else "Unknown"
+                  acquirer = acquirer_ticker, else acquirer/acquire_name (omit if absent)
   Unmatched (FRUD): "{Agency} - {Event Label} - [FRUD]"
 """
 
@@ -51,14 +53,37 @@ EVENT_LABELS: dict[str, str] = {
 # Builder
 # ---------------------------------------------------------------------------
 
-def _deal_prefix_label(deal_match: dict) -> str:
-    """Prefix for matched subjects: target_ticker, else target name, else Unknown."""
+def _target_label(deal_match: dict) -> str:
+    """Target side of prefix: target_ticker, else target name, else Unknown."""
     ticker = (deal_match.get("target_ticker") or "").strip()
     if ticker:
         return ticker
     name = deal_match.get("target_name") or deal_match.get("target") or ""
     name = str(name).strip()
     return name if name else "Unknown"
+
+
+def _acquirer_label(deal_match: dict) -> str:
+    """Acquirer side of prefix: acquirer_ticker, else acquirer name."""
+    ticker = (deal_match.get("acquirer_ticker") or "").strip()
+    if ticker:
+        return ticker
+    name = (
+        deal_match.get("acquirer")
+        or deal_match.get("acquire_name")
+        or deal_match.get("acquirer_name")
+        or ""
+    )
+    return str(name).strip()
+
+
+def _deal_prefix_label(deal_match: dict) -> str:
+    """Prefix for matched subjects: target, or target/acquirer when acquirer is known."""
+    target = _target_label(deal_match)
+    acquirer = _acquirer_label(deal_match)
+    if acquirer:
+        return f"{target}/{acquirer}"
+    return target
 
 
 def build_subject(
@@ -76,7 +101,8 @@ def build_subject(
                      or None for unmatched / FRUD emails.
 
     Returns:
-        e.g. "AZEK: UK CMA - New Regulatory Case - [FRMD]"
+        e.g. "AZEK/BLDR: UK CMA - New Regulatory Case - [FRMD]"
+             "AZEK: UK CMA - New Regulatory Case - [FRMD]"
              "The AZEK Company Inc.: UK CMA - New Regulatory Case - [FRMD]"
              "Unknown: UK CMA - New Regulatory Case - [FRMD]"
              "UK CMA - Regulatory Update - [FRUD]"
