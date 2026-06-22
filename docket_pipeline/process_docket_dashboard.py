@@ -134,12 +134,14 @@ JURISDICTION_BY_DASHBOARD_TYPE = {
     "stb": "Surface Transportation Board",
     "mt-psc": "Montana Public Service Commission",
     "sd-puc": "South Dakota Public Utilities Commission",
+    "nm-prc": "New Mexico Public Regulation Commission",
 }
 
 CASE_NAME_BY_DASHBOARD_TYPE = {
     "stb": "Union Pacific / Norfolk Southern — Proposed Merger (FD-36873)",
     "mt-psc": "Montana Public Service Commission - Proposed Merger (2025.10.078)",
     "sd-puc": "South Dakota PUC - NorthWestern / Black Hills Merger (GE25-001)",
+    "nm-prc": "New Mexico Public Regulation Commission - TXNM / Blackstone Merger (25-00060-UT)",
 }
 
 
@@ -301,11 +303,13 @@ def _llm_match_name(
     """
     if _anthropic is None or not known_stakeholders:
         return None
-    api_key = os.environ.get("CLAUDE_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get(
+        "CLAUDE_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         return None
 
-    numbered = "\n".join(f"{i + 1}. {n}" for i, n in enumerate(known_stakeholders))
+    numbered = "\n".join(f"{i + 1}. {n}" for i,
+                         n in enumerate(known_stakeholders))
     prompt = (
         f"You are matching stakeholder names in a regulatory docket.\n\n"
         f"Deal: {deal_context}\n\n"
@@ -410,7 +414,8 @@ def convert_entry(
     enriched = docket_doc.get("enriched") or {}
 
     raw_filer = enriched.get("filer_name") or meta.get("on_behalf_of") or ""
-    filer = _normalize_name(raw_filer, name_map, known_stakeholders, deal_context)
+    filer = _normalize_name(raw_filer, name_map,
+                            known_stakeholders, deal_context)
 
     itype = enriched.get("intervenor_type") or ""
     itype = INTERVENOR_TYPE_OVERRIDES.get(filer.lower(), itype)
@@ -792,7 +797,8 @@ def process_docket_dashboard(
         )
         dashboard["docket_conditions"] = extract_conditions(entries)
         dashboard["updated_at"] = datetime.now(timezone.utc)
-        dashboard["_name_map"] = name_map  # Persist resolved names back to MongoDB
+        # Persist resolved names back to MongoDB
+        dashboard["_name_map"] = name_map
 
         write_doc = {k: v for k, v in dashboard.items() if k != "_id"}
         result = dashboard_coll.replace_one(

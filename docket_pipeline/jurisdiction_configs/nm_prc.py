@@ -6,7 +6,7 @@ Case No. 25-00060-UT — TXNM Energy / Blackstone Infrastructure acquisition.
 from .base import JurisdictionConfig
 
 NM_PRC_CONFIG = JurisdictionConfig(
-    jurisdiction_id="nm_prc",
+    jurisdiction_id="nm-prc",
     name="New Mexico Public Regulation Commission",
     docket_number="25-00060-UT",
     deal_description="TXNM Energy / Blackstone Infrastructure acquisition",
