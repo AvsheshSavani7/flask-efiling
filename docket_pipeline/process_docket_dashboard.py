@@ -135,6 +135,7 @@ JURISDICTION_BY_DASHBOARD_TYPE = {
     "mt-psc": "Montana Public Service Commission",
     "sd-puc": "South Dakota Public Utilities Commission",
     "nm-prc": "New Mexico Public Regulation Commission",
+    "ne-psc": "Nebraska Public Service Commission",
 }
 
 CASE_NAME_BY_DASHBOARD_TYPE = {
@@ -142,6 +143,7 @@ CASE_NAME_BY_DASHBOARD_TYPE = {
     "mt-psc": "Montana Public Service Commission - Proposed Merger (2025.10.078)",
     "sd-puc": "South Dakota PUC - NorthWestern / Black Hills Merger (GE25-001)",
     "nm-prc": "New Mexico Public Regulation Commission - TXNM / Blackstone Merger (25-00060-UT)",
+    "ne-psc": "Nebraska Public Service Commission - NorthWestern / Black Hills Merger (NG-128)",
 }
 
 

@@ -82,6 +82,7 @@ _DOCKET_TYPE_TO_JURISDICTION: Dict[str, str] = {
     "mt-psc":                    "mt-psc",
     "sd-puc":                    "sd-puc",
     "nm-prc":                    "nm-prc",
+    "ne-psc":                    "ne-psc",
 }
 
 
