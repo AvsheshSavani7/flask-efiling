@@ -83,6 +83,13 @@ def _pdf_url_to_filename(pdf_url: str) -> str:
     return name.strip() or "unknown.pdf"
 
 
+def _is_pdf_url(url: str) -> bool:
+    if not url or not url.strip():
+        return False
+    path = url.split("?", 1)[0].lower().rstrip("/")
+    return path.endswith(".pdf")
+
+
 # ---------------------------------------------------------------------------
 # Fetch HTML
 # ---------------------------------------------------------------------------
@@ -277,7 +284,7 @@ def download_pdfs_and_extract(
 
     for i, rec in enumerate(records):
         pdf_url = rec.get("url", "").strip()
-        if not pdf_url or not pdf_url.lower().endswith(".pdf"):
+        if not _is_pdf_url(pdf_url):
             logger.info(
                 f"  [{i+1}/{total}] Not a PDF URL, skipping: {pdf_url}")
             continue
@@ -430,6 +437,15 @@ def scrape_sd_puc(
     flat_records = flatten_documents(nested_docs, skip_confidential=True)
     if not flat_records:
         logger.info("No non-confidential documents found.")
+        return []
+
+    before = len(flat_records)
+    flat_records = [r for r in flat_records if _is_pdf_url(r.get("url", ""))]
+    skipped = before - len(flat_records)
+    if skipped:
+        logger.info(f"Skipped {skipped} non-PDF document links")
+    if not flat_records:
+        logger.info("No PDF documents found.")
         return []
 
     # Step 4: Filter out already-processed documents (MongoDB dedup)
