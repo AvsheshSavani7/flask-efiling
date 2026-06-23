@@ -8,7 +8,7 @@ PDFs, extracts text, and generates tier1 summaries.
 Uses requests + BeautifulSoup (static HTML, no JS rendering needed).
 
 Install:
-    pip install requests beautifulsoup4 PyPDF2 python-dotenv anthropic
+    pip install requests beautifulsoup4 PyPDF2 pymupdf openai python-dotenv anthropic
 
 Run:
     python sd_puc_scraper.py --url https://puc.sd.gov/Dockets/GasElectric/2025/GE25-001.aspx
@@ -18,6 +18,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import logging
 import os
@@ -34,6 +35,12 @@ from pymongo import MongoClient
 from tier1_summary_generator import generate_tier1_summary
 
 load_dotenv(".env")
+
+# OpenAI fallback for image-only / scanned PDFs (same idea as mt_psc_scraper).
+_PDF_OPENAI_OCR_MODEL = os.getenv("SD_PSC_PDF_OCR_MODEL", "gpt-4.1-mini")
+_PDF_OPENAI_OCR_MAX_BYTES = int(
+    os.getenv("SD_PSC_PDF_OCR_MAX_BYTES", str(15 * 1024 * 1024))
+)
 
 LOG_LEVEL = (os.getenv("LOG_LEVEL") or "INFO").upper()
 logger = logging.getLogger("sd_puc_scraper")
@@ -249,22 +256,118 @@ def flatten_documents(
 # PDF Download & Text Extraction
 # ---------------------------------------------------------------------------
 
-def _extract_text_from_pdf(file_path: str) -> str:
+def _extract_pdf_text_pypdf2(file_path: str) -> str:
     try:
         from PyPDF2 import PdfReader
         reader = PdfReader(file_path)
         parts = []
-        for pg in reader.pages:
+        for page in reader.pages:
             try:
-                text = pg.extract_text()
+                text = page.extract_text()
                 if text:
                     parts.append(text)
             except Exception:
                 continue
         return "\n".join(parts)
     except Exception as e:
-        logger.warning(f"PDF extraction failed for {file_path}: {e}")
+        logger.warning(f"PyPDF2 extraction failed for {file_path}: {e}")
         return ""
+
+
+def _extract_pdf_text_pymupdf(file_path: str) -> str:
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        return ""
+    try:
+        doc = fitz.open(file_path)
+        parts: List[str] = []
+        try:
+            for page in doc:
+                t = page.get_text()
+                if t and t.strip():
+                    parts.append(t)
+        finally:
+            doc.close()
+        return "\n".join(parts)
+    except Exception as e:
+        logger.debug("PyMuPDF extraction failed for %s: %s", file_path, e)
+        return ""
+
+
+def _extract_pdf_text_openai_ocr(file_path: str) -> str:
+    api_key = os.getenv("OPENAI_API_KEY_DOCKET")
+    if not api_key:
+        return ""
+    try:
+        with open(file_path, "rb") as f:
+            pdf_bytes = f.read()
+    except OSError as e:
+        logger.debug("Could not read PDF for OpenAI OCR %s: %s", file_path, e)
+        return ""
+    if not pdf_bytes.startswith(b"%PDF"):
+        return ""
+    if len(pdf_bytes) > _PDF_OPENAI_OCR_MAX_BYTES:
+        logger.info(
+            "  OpenAI PDF OCR skipped (file too large): %s bytes > %s",
+            len(pdf_bytes),
+            _PDF_OPENAI_OCR_MAX_BYTES,
+        )
+        return ""
+    doc_name = os.path.basename(file_path)
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key)
+        pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+        response = client.responses.create(
+            model=_PDF_OPENAI_OCR_MODEL,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "Extract all readable text from this PDF. "
+                                "Return only extracted text, preserving order as best as possible. "
+                                "Do not summarize."
+                            ),
+                        },
+                        {
+                            "type": "input_file",
+                            "filename": doc_name,
+                            "file_data": f"data:application/pdf;base64,{pdf_b64}",
+                        },
+                    ],
+                }
+            ],
+        )
+        return (response.output_text or "").strip()
+    except Exception as e:
+        logger.warning("OpenAI PDF OCR failed for %s: %s", doc_name, e)
+        return ""
+
+
+def _extract_text_from_pdf(file_path: str) -> str:
+    short = os.path.basename(file_path)
+    text = _extract_pdf_text_pypdf2(file_path)
+    if (text or "").strip():
+        return text
+    text = _extract_pdf_text_pymupdf(file_path)
+    if (text or "").strip():
+        logger.info(
+            "  PDF text via PyMuPDF fallback: %s (%s chars)", short, len(text)
+        )
+        return text
+    text = _extract_pdf_text_openai_ocr(file_path)
+    if (text or "").strip():
+        logger.info(
+            "  PDF text via OpenAI OCR fallback: %s (%s chars)", short, len(
+                text)
+        )
+        return text
+    return ""
 
 
 def download_pdfs_and_extract(
@@ -333,7 +436,8 @@ def _get_mongo_collection():
     """Connect to MongoDB and return the docket collection, or None."""
     mongodb_uri = os.environ.get("MONGODB_CONNECTION_STRING")
     if not mongodb_uri:
-        logger.warning("MONGODB_CONNECTION_STRING not set — skipping DB dedup check")
+        logger.warning(
+            "MONGODB_CONNECTION_STRING not set — skipping DB dedup check")
         return None
     try:
         client = MongoClient(mongodb_uri)
@@ -553,7 +657,8 @@ def main():
             result = generate_tier1_summary(metadata=metadata, text=text)
             status = result.get("status", "unknown")
             if result.get("error"):
-                print(f"  - {rec.get('title')[:60]}: error - {result.get('error')}")
+                print(
+                    f"  - {rec.get('title')[:60]}: error - {result.get('error')}")
             else:
                 print(
                     f"  - {rec.get('title')[:60]}: {status} "
