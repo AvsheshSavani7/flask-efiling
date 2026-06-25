@@ -1,130 +1,209 @@
 """
 Bundeskartellamt Press Release scraper.
 
-Fetches the Expertensuche press releases URL, scrapes the search result list
-(section#searchResults / .l-searchresult-list), extracts title, url, date, category.
-Applies cutoff date, matches headline to deal companies via LLM, and appends
-entries to the deal's german_scrap array with source: press_release.
-Saves to DB and sends email via n8n webhook. No USA-related verification.
+Workflow:
+1. Fetch deals from MongoDB (Open/Unknown/null/missing status)
+2. Fetch all URLs from german_press_releases collection for dedup
+3. Fetch HTML from Expertensuche press releases URL
+4. Extract items from search result list (raw German — no translation yet)
+5. Apply 30-day cutoff date filter
+6. Skip records whose URL is already in german_press_releases
+7. For each new record: translate title, run LLM deal match via deal_match_llm
+8. If matched → set deal_id; else → run USA-relation check
+9. Upsert to german_press_releases; on first insert only: send [FRMD] or [FRUD] email
 """
 
 import json
+import logging
 import os
 import re
 import time
+from datetime import datetime, date, timedelta, timezone
+from logging.handlers import RotatingFileHandler
+from typing import Any, Dict, List, Optional, Tuple
+from html import escape as escape_html
+
 import requests
 from bs4 import BeautifulSoup
-from openai import OpenAI
 from dotenv import load_dotenv
-from datetime import datetime, date
-from typing import Any, Dict, List, Optional
-from bson import ObjectId
-from mongodb_connection import get_deals_collection, is_connected, init_mongodb_connection
-from html import escape as escape_html
+from openai import OpenAI
+
+from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from email_subject_builder import build_subject
+from llm_verification_service import verify_country_relation
+from mongodb_connection import get_database, is_connected, init_mongodb_connection
+from n8n_email_service import post_email_payload
 from scraper_error_utils import collect_error, send_error_summary
-from n8n_email_service import post_email_payload, resolve_webhook_url
 
 load_dotenv(".env")
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-SCRIPT_NAME = "germany_cases_press_release"
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Press releases search URL (Pressemeldungen & Aktuelles, sorted by date desc)
+SCRIPT_NAME = "germany_press_release"
+
 PRESS_RELEASE_BASE = "https://www.bundeskartellamt.de/SiteGlobals/Forms/Suche/Expertensuche_Formular.html"
-PRESS_RELEASE_PARAMS = "cl2Categories_CategorizedFormat=pressemeldungen_aktuelles&pageLocale=de&resultsPerPage=15&sortOrder=dateOfIssue_dt+desc"
+PRESS_RELEASE_PARAMS = "cl2Categories_CategorizedFormat=pressemeldungen_aktuelles&pageLocale=de&resultsPerPage=30&sortOrder=dateOfIssue_dt+desc"
 PRESS_RELEASE_URL = f"{PRESS_RELEASE_BASE}?{PRESS_RELEASE_PARAMS}#resultsperpage-51534"
 
 EXTRACTED_RECORDS_JSON = "bundeskartellamt_press_release_extracted.json"
 
-SOURCE_PRESS_RELEASE = "press_release"
+CUTOFF_DATE = (datetime.now() - timedelta(days=30)).replace(
+    hour=0, minute=0, second=0, microsecond=0
+)
 
-# CUTOFF_DATE: Only process records with date >= this date.
-CUTOFF_DATE = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-# CUTOFF_DATE = datetime.strptime("2026-01-25", "%Y-%m-%d")
+PERSISTENT_LOG_DIR = "/var/data/logs"
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
+IST = timezone(timedelta(hours=5, minutes=30))
 
-deals = []
+
+def _get_log_file() -> str:
+    base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
+    log_dir = os.path.join(base, SCRIPT_NAME)
+    os.makedirs(log_dir, exist_ok=True)
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    return os.path.join(log_dir, f"{today}.log")
 
 
-def get_deals_from_mongodb():
-    """Fetch all deals from MongoDB, restricted to active/open statuses."""
+LOG_FILE = _get_log_file()
+
+logger = logging.getLogger("bundeskartellamt_press_release")
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+
+_file_handler = RotatingFileHandler(
+    LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
+)
+_file_handler.setFormatter(
+    logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+)
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(
+    logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+)
+logger.addHandler(_file_handler)
+logger.addHandler(_console_handler)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def utc_now_iso() -> str:
+    return (
+        datetime.now(tz=timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+# ---------------------------------------------------------------------------
+# MongoDB collection
+# ---------------------------------------------------------------------------
+
+def get_german_press_releases_collection():
+    db = get_database()
+    if db is None:
+        return None
+    return db["german_press_releases"]
+
+
+def fetch_existing_press_release_urls(collection) -> set:
+    """Return all non-empty URL strings already in german_press_releases."""
+    out: set = set()
     try:
-        collection = get_deals_collection()
-        if collection is None:
-            print("⚠️ MongoDB connection not available. Deals collection not accessible.")
-            return []
-
-        # Only fetch deals where deal_status is Open, Unknown, null, or not set
-        status_filter = {
-            "$or": [
-                {"deal_status": {"$in": ["Open", "Unknown"]}},
-                {"deal_status": None},
-                {"deal_status": {"$exists": False}},
-            ]
-        }
-
-        all_deals = list(collection.find(status_filter))
-        for deal in all_deals:
-            if "_id" in deal:
-                deal["deal_id"] = str(deal["_id"])
-                deal.pop("_id", None)
-        print(f"✅ Fetched {len(all_deals)} deals from MongoDB")
-        return all_deals
+        cursor = collection.find({}, {"url": 1, "_id": 0})
+        for doc in cursor:
+            url = doc.get("url")
+            if isinstance(url, str) and url.strip():
+                out.add(url.strip())
+        logger.info("Loaded %d existing press release URLs for dedup", len(out))
     except Exception as e:
-        print(f"⚠️ Error fetching deals from MongoDB: {e}")
-        import traceback
-        traceback.print_exc()
-        return []
+        logger.warning("Error fetching existing press release URLs: %s", e)
+    return out
 
 
-def load_deals():
-    """Load deals from MongoDB."""
-    global deals
-    deals = get_deals_from_mongodb()
-    print(f"📊 Loaded {len(deals)} deals from MongoDB")
-    return deals
+def upsert_press_release(collection, doc: Dict[str, Any]) -> Tuple[Optional[str], bool]:
+    """Upsert by url. Returns (mongo_id as str, inserted_new)."""
+    url = (doc.get("url") or "").strip()
+    if not url:
+        logger.warning("upsert_press_release: missing url, skipping")
+        return None, False
+
+    now = utc_now_iso()
+    payload = {k: v for k, v in doc.items() if k not in ("_id", "created_at")}
+    payload["url"] = url
+    payload["updated_at"] = now
+
+    try:
+        result = collection.update_one(
+            {"url": url},
+            {"$set": payload, "$setOnInsert": {"created_at": now}},
+            upsert=True,
+        )
+        inserted_new = result.upserted_id is not None
+        if inserted_new:
+            oid = result.upserted_id
+        else:
+            row = collection.find_one({"url": url}, {"_id": 1})
+            oid = row["_id"] if row else None
+        return (str(oid) if oid is not None else None), inserted_new
+    except Exception as e:
+        logger.warning("Error upserting press release: %s", e)
+        return None, False
 
 
-def normalize_company(name):
-    """Normalize company name for matching."""
-    if not name:
-        return ""
-    return name.lower().replace(",", "").replace(" inc.", "").replace(" ltd.", "").replace(" plc", "").replace(" limited", "").replace(" corporation", "").replace(" corp.", "").replace(" gmbh", "").replace(" ag", "").replace(" se", "").strip()
+# ---------------------------------------------------------------------------
+# Translation
+# ---------------------------------------------------------------------------
 
-
-def translate_to_english(text):
-    """Translate German text to English using Google Translate API. Returns full text (all segments concatenated)."""
+def translate_to_english(text: str) -> str:
+    """Translate German text to English using GPT-5.2."""
     if not text or not text.strip():
         return ""
     text = text.strip()
     try:
-        url = "https://translate.googleapis.com/translate_a/single"
-        params = {"client": "gtx", "sl": "auto",
-                  "tl": "en", "dt": "t", "q": text}
-        response = requests.get(url, params=params, timeout=15)
-        if response.status_code == 200:
-            data = response.json()
-            segments = data[0] if data and isinstance(data[0], list) else []
-            parts = []
-            for seg in segments:
-                if isinstance(seg, (list, tuple)) and seg and seg[0]:
-                    parts.append(seg[0].strip())
-            if parts:
-                return " ".join(parts).strip()
-            try:
-                return (data[0][0][0] or "").strip() if data and len(data) and data[0] and len(data[0]) and data[0][0] else ""
-            except (IndexError, TypeError, KeyError):
-                return ""
+        response = openai_client.chat.completions.create(
+            model="gpt-5.2",
+            temperature=0,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a professional German-to-English translator for merger control "
+                        "and regulatory press release titles. "
+                        "Rules:\n"
+                        "1. Return ONLY the translated English title.\n"
+                        "2. Use well-known official English company names where possible.\n"
+                        "3. Do NOT explain or add alternatives.\n"
+                        "4. Preserve regulatory meaning naturally."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Translate this German regulatory press release title to English:\n{text}",
+                },
+            ],
+        )
+        result = (response.choices[0].message.content or "").strip()
+        if result:
+            return result
     except Exception as e:
-        print(f"⚠️ Translation failed for: {text[:50]}... → {e}")
+        logger.warning("Translation failed for: %s... → %s", text[:50], e)
     return "[Translation failed]"
 
 
-def parse_press_date(date_str):
-    """Parse date from press release topline, e.g. 'January 30, 2026' or 'December 22, 2025'. Returns date or None."""
+# ---------------------------------------------------------------------------
+# HTML extraction (raw German — no translation)
+# ---------------------------------------------------------------------------
+
+def parse_press_date(date_str: str):
+    """Parse date from press release topline. Returns date object or None."""
     if not date_str or not date_str.strip():
         return None
     s = date_str.strip()
-    # English month names
     for fmt in ("%B %d, %Y", "%b %d, %Y", "%d.%m.%Y"):
         try:
             return datetime.strptime(s, fmt).date()
@@ -133,19 +212,20 @@ def parse_press_date(date_str):
     return None
 
 
-def extract_press_results(html_content):
+def extract_press_results(html_content: str) -> List[Dict]:
     """
     Extract press release items from search results HTML.
     Structure: section#searchResults or .l-searchresult-list, items .l-searchresult-list__item.
     Each item: h3.c-searchresult__headline > a (title, href), p.c-topline (category, date).
+    Returns raw German titles — no translation here.
     """
     soup = BeautifulSoup(html_content, "html.parser")
     records = []
 
     section = soup.find("section", id="searchResults") or soup.find(
-        "div", class_=re.compile(r"l-searchresult-list"))
+        "div", class_=re.compile(r"l-searchresult-list")
+    )
     if not section:
-        # Fallback: any container with list items
         items = soup.find_all("div", class_=re.compile(
             r"l-searchresult-list__item"))
     else:
@@ -161,6 +241,7 @@ def extract_press_results(html_content):
             link = headline_el.find("a", href=True)
             if not link:
                 continue
+
             title = link.get_text(separator=" ", strip=True)
             title = re.sub(r"\s+", " ", title).strip()
             url = link.get("href", "").strip()
@@ -180,30 +261,24 @@ def extract_press_results(html_content):
                 if len(spans) >= 2:
                     date_str = spans[1].get_text(strip=True)
 
-            # Title in German (as scraped from site) and English (translated)
-            title_german = title
-            title_english = translate_to_english(title) if title else ""
-
             record = {
                 "title": title,
-                "title_german": title_german,
-                "title_english": title_english,
                 "url": url,
                 "date_str": date_str,
                 "date": parse_press_date(date_str),
                 "category": category,
             }
             records.append(record)
-            print(f"📋 Extracted: {date_str} – {title[:60]}...")
+            logger.info("Extracted: %s – %s...", date_str, title[:60])
         except Exception as e:
-            print(f"⚠️ Error extracting item: {e}")
+            logger.warning("Error extracting item: %s", e)
             continue
 
     return records
 
 
-def filter_by_cutoff_date(records, cutoff_date=None):
-    """Keep only records with date >= CUTOFF_DATE."""
+def filter_by_cutoff_date(records: List[Dict], cutoff_date=None) -> List[Dict]:
+    """Keep only records with date >= cutoff. Records with no parseable date pass through."""
     if cutoff_date is None:
         cutoff_date = CUTOFF_DATE
     cutoff = cutoff_date.date() if isinstance(
@@ -211,444 +286,163 @@ def filter_by_cutoff_date(records, cutoff_date=None):
     filtered = []
     for r in records:
         d = r.get("date")
-        if d is not None and d >= cutoff:
-            filtered.append(r)
-        elif d is None:
+        if d is None or d >= cutoff:
             filtered.append(r)
     return filtered
 
 
-def match_deal_with_llm(headline_text, all_companies):
-    """Match press release headline with deal companies using LLM."""
-    if not headline_text or not headline_text.strip():
-        return None
-    prompt = f"""
-You are an M&A deal analyst. Given a Bundeskartellamt press release headline (in English), determine whether it explicitly relates to any of the companies listed below.
+# ---------------------------------------------------------------------------
+# Email helpers
+# ---------------------------------------------------------------------------
 
-- Match only if the company name or a well-known alias appears in the headline.
-- Ignore similar-sounding names or partial matches.
-- Accept suffix variations (Inc., Ltd., PLC, GmbH, AG, SE).
-
-Companies:
-{', '.join(sorted(all_companies))}
-
-Headline:
-{headline_text.strip()}
-
-If there's a match, return in this format:
-Match: COMPANY_NAME (acquirer|target)
-
-If not, return:
-None
-"""
-    try:
-        response = client.chat.completions.create(
-            model="gpt-5.2",
-            messages=[
-                {"role": "system", "content": "You are an expert in M&A deal recognition."},
-                {"role": "user", "content": prompt},
-            ]
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"⚠️ LLM Error: {e}")
-        raise
-
-
-def convert_datetime_to_string(obj):
-    """Recursively convert datetime/date to strings for JSON/MongoDB."""
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-    if isinstance(obj, date):
-        return obj.isoformat()
-    if hasattr(obj, "isoformat") and callable(getattr(obj, "isoformat")):
-        try:
-            return obj.isoformat()
-        except Exception:
-            return str(obj)
-    if isinstance(obj, dict):
-        return {k: convert_datetime_to_string(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [convert_datetime_to_string(item) for item in obj]
-    return obj
-
-
-def _safe_email_text(val):
+def _safe(val) -> str:
     if val is None or (isinstance(val, str) and not val.strip()):
         return "N/A"
     return escape_html(str(val).strip())
 
 
-def generate_press_release_email_html(record_data, deal_match, updated_fields=None):
-    """Generate HTML email for press release match."""
-    target = deal_match.get("target") or deal_match.get("target_name", "N/A")
-    acquirer = deal_match.get(
-        "acquirer") or deal_match.get("acquire_name", "N/A")
-    deal_id = deal_match.get("deal_id", "N/A")
+def _build_case_rows_html(record: Dict) -> str:
+    cell = "padding:8px; color:#333; word-wrap:break-word; white-space:normal; max-width:600px;"
+    rows = [
+        ("Date", record.get("date_str")),
+        ("Category", record.get("category")),
+        ("Title (German)", record.get("title_german") or record.get("title")),
+        ("Title (English)", record.get("title_english")),
+        ("URL", record.get("url")),
+    ]
+    html = ""
+    for i, (label, value) in enumerate(rows):
+        bg = ' style="background-color:#f9f9f9;"' if i % 2 == 1 else ""
+        if label == "URL" and value:
+            cell_content = f'<a href="{escape_html(str(value))}" target="_blank" style="color:#2563eb;">{_safe(value)}</a>'
+        else:
+            cell_content = _safe(value)
+        html += (
+            f'<tr{bg}>'
+            f'<td style="padding:8px; font-weight:bold; width:170px; color:#555;">{label}:</td>'
+            f'<td style="{cell}">{cell_content}</td>'
+            f'</tr>\n'
+        )
+    return html
 
-    title_german = record_data.get(
-        "title_german") or record_data.get("title") or "N/A"
-    title_english = record_data.get("title_english") or "N/A"
-    url = record_data.get("url") or "N/A"
-    date_str = record_data.get("date_str") or "N/A"
-    category = record_data.get("category") or "N/A"
 
-    if updated_fields:
-        title_text = f"[FRMD] German Bundeskartellamt Press Release (Updated) – {target} / {acquirer}"
-        update_note = f"<p style='color:#e74c3c; font-weight:bold; padding:10px; background-color:#ffe6e6; border-radius:4px;'>⚠️ This record was updated. Changed fields: {', '.join(updated_fields)}</p>"
-    else:
-        title_text = f"[FRMD] German Bundeskartellamt Press Release (New) – {target} / {acquirer}"
-        update_note = "<p style='color:#27ae60; font-weight:bold; padding:10px; background-color:#e6ffe6; border-radius:4px;'>✅ New press release added</p>"
+def generate_matched_email(record: Dict, deal: Dict) -> Tuple[str, str]:
+    target = deal.get("target") or deal.get("target_name", "N/A")
+    acquirer = deal.get("acquirer") or deal.get("acquire_name", "N/A")
+    deal_id = deal.get("deal_id", "N/A")
 
-    subject = title_text
-    cell_style = "padding:8px; color:#333; word-wrap:break-word; white-space:normal; max-width:600px;"
-    html_email = f"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>{escape_html(subject)}</title>
-</head>
-<body style="margin:0; padding:0; font-family:Arial,sans-serif; background-color:#f4f4f4;">
-  <div style="max-width:900px; margin:20px auto; background-color:#ffffff; padding:30px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1);">
-    <h2 style="color:#333; text-align:center; margin-top:0; padding-bottom:20px; border-bottom:3px solid #e74c3c;">
-      {escape_html(title_text)}
-    </h2>
-    <p style="color:#666; text-align:center;">Source: Press release</p>
-    {update_note}
-    <p style="margin-bottom:16px;">
-      <strong>View press release:</strong>
-      <a href="{escape_html(url)}" style="color:#e74c3c; text-decoration:underline;" target="_blank">Open in browser</a>
-    </p>
-    <table style="width:100%; border-collapse:collapse; margin-bottom:20px;">
-      <tr><td style="padding:8px; font-weight:bold; width:170px; color:#555;">Deal ID:</td><td style="{cell_style}">{_safe_email_text(deal_id)}</td></tr>
-      <tr style="background-color:#f9f9f9;"><td style="padding:8px; font-weight:bold; color:#555;">Target:</td><td style="{cell_style}">{_safe_email_text(target)}</td></tr>
-      <tr><td style="padding:8px; font-weight:bold; color:#555;">Acquirer:</td><td style="{cell_style}">{_safe_email_text(acquirer)}</td></tr>
-      <tr style="background-color:#f9f9f9;"><td style="padding:8px; font-weight:bold; color:#555;">Date:</td><td style="{cell_style}">{_safe_email_text(date_str)}</td></tr>
-      <tr><td style="padding:8px; font-weight:bold; color:#555;">Category:</td><td style="{cell_style}">{_safe_email_text(category)}</td></tr>
-      <tr style="background-color:#f9f9f9;"><td style="padding:8px; font-weight:bold; color:#555;">Title (German):</td><td style="{cell_style}">{_safe_email_text(title_german)}</td></tr>
-      <tr><td style="padding:8px; font-weight:bold; color:#555;">Title (English):</td><td style="{cell_style}">{_safe_email_text(title_english)}</td></tr>
-      <tr style="background-color:#f9f9f9;"><td style="padding:8px; font-weight:bold; color:#555;">URL:</td><td style="{cell_style}"><a href="{escape_html(url)}" target="_blank" style="color:#e74c3c;">{_safe_email_text(url)}</a></td></tr>
-    </table>
-    <div style="margin-top:30px; padding-top:20px; border-top:1px solid #e0e0e0; text-align:center; color:#999; font-size:12px;">
-      <p>Automated email from Bundeskartellamt Press Release scraper.</p>
-    </div>
+    subject = build_subject("bundeskartellamt", "press_release", deal)
+
+    deal_banner = (
+        f'<div style="background:#dbeafe;border-radius:6px;padding:14px 20px;'
+        f'margin-bottom:18px;border-left:4px solid #2563eb;">'
+        f"<strong>Matched Deal:</strong> {_safe(target)} / {_safe(acquirer)}<br>"
+        f"<strong>Deal ID:</strong> {_safe(deal_id)}"
+        f"</div>"
+    )
+
+    case_rows = _build_case_rows_html(record)
+    html = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>{escape_html(subject)}</title></head>
+<body style="margin:0;padding:0;font-family:Arial,sans-serif;background-color:#f4f4f4;">
+<div style="max-width:900px;margin:20px auto;background:#fff;padding:30px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.1);">
+  <h2 style="color:#333;text-align:center;margin-top:0;padding-bottom:20px;border-bottom:3px solid #2563eb;">{escape_html(subject)}</h2>
+  <p style="color:#666;text-align:center;">Source: Bundeskartellamt Press Release</p>
+  {deal_banner}
+  <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">{case_rows}</table>
+  <div style="margin-top:30px;padding-top:20px;border-top:1px solid #e0e0e0;text-align:center;color:#999;font-size:12px;">
+    <p>Automated email from Bundeskartellamt Press Release scraper.</p>
   </div>
-</body>
-</html>
-"""
-    return subject, html_email
+</div></body></html>"""
+    return subject, html
 
 
-def send_press_release_email_via_webhook(record_data, deal_match, updated_fields=None):
-    """Send email via n8n webhook for press release match."""
+def generate_usa_email(record: Dict) -> Tuple[str, str]:
+    subject = build_subject("bundeskartellamt", "press_release")
+
+    usa_banner = (
+        '<div style="background:#fef3c7;border-radius:6px;padding:14px 20px;'
+        'margin-bottom:18px;border-left:4px solid #f59e0b;">'
+        "<strong>🇺🇸 USA-Related Case</strong> — No deal match found, but this press release appears related to the United States."
+        "</div>"
+    )
+
+    case_rows = _build_case_rows_html(record)
+    html = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>{escape_html(subject)}</title></head>
+<body style="margin:0;padding:0;font-family:Arial,sans-serif;background-color:#f4f4f4;">
+<div style="max-width:900px;margin:20px auto;background:#fff;padding:30px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.1);">
+  <h2 style="color:#333;text-align:center;margin-top:0;padding-bottom:20px;border-bottom:3px solid #f59e0b;">{escape_html(subject)}</h2>
+  <p style="color:#666;text-align:center;">Source: Bundeskartellamt Press Release</p>
+  {usa_banner}
+  <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">{case_rows}</table>
+  <div style="margin-top:30px;padding-top:20px;border-top:1px solid #e0e0e0;text-align:center;color:#999;font-size:12px;">
+    <p>Automated email from Bundeskartellamt Press Release scraper.</p>
+  </div>
+</div></body></html>"""
+    return subject, html
+
+
+def send_email_via_webhook(
+    subject: str, html: str, url: str = "", deal_id: str = None
+) -> bool:
     try:
-        subject, html_email = generate_press_release_email_html(
-            record_data, deal_match, updated_fields)
-        print(f"📝 Generated email subject: {subject}")
-
-        webhook_url = resolve_webhook_url(subject)
-        print(f"📤 Sending email via n8n webhook: {webhook_url}")
-        target = deal_match.get("target") or deal_match.get(
-            "target_name", "N/A")
-        acquirer = deal_match.get(
-            "acquirer") or deal_match.get("acquire_name", "N/A")
         payload = {
             "subject": subject,
-            "html": html_email,
-            "deal_id": deal_match.get("deal_id", "N/A"),
-            "target": target,
-            "acquirer": acquirer,
-            "title": (record_data.get("title") or "").strip(),
-            "title_german": (record_data.get("title_german") or record_data.get("title") or "").strip(),
-            "title_english": (record_data.get("title_english") or "").strip(),
-            "url": (record_data.get("url") or "").strip(),
-            "date_str": (record_data.get("date_str") or "").strip(),
-            "category": (record_data.get("category") or "").strip(),
-            "source": SOURCE_PRESS_RELEASE,
-            "updated_fields": updated_fields if updated_fields else [],
-            "view_url": record_data.get("url", ""),
+            "html": html,
+            "view_url": url,
         }
-        if post_email_payload(payload, subject=subject):
-            print("✅ Email sent successfully via n8n webhook!")
-            return True
-        return False
-    except requests.exceptions.RequestException as e:
-        print(f"⚠️ Error sending email via webhook: {e}")
-        return False
+        if deal_id:
+            payload["deal_id"] = deal_id
+        return post_email_payload(payload, subject=subject)
     except Exception as e:
-        print(f"⚠️ Error generating/sending email: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.warning("Email send failed: %s", e)
         return False
 
 
-def _ensure_german_scrap_array(german_scrap):
-    """Ensure german_scrap is a list. If legacy object, convert to single-element list."""
-    if german_scrap is None:
-        return []
-    if isinstance(german_scrap, list):
-        return german_scrap
-    item = dict(german_scrap)
-    if "source" not in item:
-        item["source"] = "hauptpruefverfahren"
-    return [item]
-
-
-def append_or_update_press_release_to_deal(
-    deal_match,
-    record,
-    matched_company_raw,
-    matched_role,
-    error_items: Optional[List[Dict[str, Any]]] = None,
-):
-    """
-    Append or update a press_release entry in the deal's german_scrap array.
-    If an entry with same url and source==SOURCE_PRESS_RELEASE exists, update it; else append.
-    """
-    try:
-        print("💾 Saving to deal german_scrap array (press_release)...")
-        if not is_connected():
-            print("⚠️ MongoDB connection not available, skipping save")
-            return False
-
-        collection = get_deals_collection()
-        if collection is None:
-            print("⚠️ Deals collection not available")
-            return False
-
-        record_url = (record.get("url") or "").strip()
-        german_scrap_entry = {
-            "source": SOURCE_PRESS_RELEASE,
-            "title": (record.get("title") or "").strip(),
-            "title_german": (record.get("title_german") or record.get("title") or "").strip(),
-            "title_english": (record.get("title_english") or "").strip(),
-            "url": record_url,
-            "date_str": (record.get("date_str") or "").strip(),
-            "date": record.get("date").isoformat() if isinstance(record.get("date"), date) else (record.get("date") or ""),
-            "category": (record.get("category") or "").strip(),
-            "matched_company": matched_company_raw,
-            "matched_role": matched_role,
-        }
-        german_scrap_entry = convert_datetime_to_string(german_scrap_entry)
-
-        query = {}
-        if deal_match.get("deal_id"):
-            try:
-                query["_id"] = ObjectId(deal_match["deal_id"])
-            except Exception:
-                query = {}
-        if not query:
-            acquirer = deal_match.get(
-                "acquirer") or deal_match.get("acquire_name")
-            target = deal_match.get("target") or deal_match.get("target_name")
-            or_conditions = []
-            if acquirer:
-                or_conditions.append({"acquirer": acquirer})
-                or_conditions.append({"acquire_name": acquirer})
-            if target:
-                or_conditions.append({"target": target})
-                or_conditions.append({"target_name": target})
-            if or_conditions:
-                query = {"$or": or_conditions}
-        if not query:
-            print("⚠️ Cannot identify deal, skipping MongoDB save")
-            return False
-
-        deal_doc = collection.find_one(query)
-        if not deal_doc:
-            print(f"⚠️ Deal not found in MongoDB: {query}")
-            return False
-
-        current = deal_doc.get("german_scrap")
-        arr = _ensure_german_scrap_array(current)
-
-        updated_fields = None
-        found_index = None
-        for i, el in enumerate(arr):
-            if isinstance(el, dict) and (el.get("url") or "").strip() == record_url and el.get("source") == SOURCE_PRESS_RELEASE:
-                found_index = i
-                updated_fields = []
-                for key, new_value in german_scrap_entry.items():
-                    if key == "url":
-                        continue
-                    old_value = el.get(key)
-                    if new_value == "":
-                        new_value = None
-                    if old_value == "":
-                        old_value = None
-                    if new_value != old_value:
-                        updated_fields.append(key)
-                break
-
-        if found_index is not None:
-            arr[found_index] = german_scrap_entry
-        else:
-            arr.append(german_scrap_entry)
-            updated_fields = None
-
-        update_result = collection.update_one(
-            {"_id": deal_doc["_id"]},
-            {"$set": {"german_scrap": arr}},
-        )
-
-        if update_result.modified_count > 0:
-            print("✅ Updated deal german_scrap array in MongoDB")
-            should_send = updated_fields is None or (
-                updated_fields and len(updated_fields) > 0)
-            if should_send:
-                if not send_press_release_email_via_webhook(
-                    german_scrap_entry, deal_match, updated_fields
-                ):
-                    if error_items is not None:
-                        collect_error(
-                            error_items,
-                            "Failed to send press release email",
-                            step="send_email",
-                            context={
-                                "title": (record.get("title") or "")[:80],
-                                "url": record_url,
-                            },
-                        )
-            return True
-        else:
-            print("ℹ️ No changes written (data may be identical)")
-            return True
-    except Exception as e:
-        print(f"❌ Error saving to MongoDB: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-
-def match_records_with_deals(
-    records,
-    error_items: Optional[List[Dict[str, Any]]] = None,
-):
-    """Match extracted press releases with deals via LLM and append/update german_scrap array (press_release)."""
-    print(
-        f"\n{'='*60}\n🔍 Matching {len(records)} press releases with deals...\n{'='*60}\n")
-
-    global deals
-    if not deals:
-        load_deals()
-
-    all_companies = set()
-    for deal in deals:
-        if deal.get("acquirer") or deal.get("acquire_name"):
-            all_companies.add(normalize_company(
-                deal.get("acquirer") or deal.get("acquire_name", "")))
-        if deal.get("target") or deal.get("target_name"):
-            all_companies.add(normalize_company(
-                deal.get("target") or deal.get("target_name", "")))
-
-    matched_count = 0
-
-    for idx, record in enumerate(records, 1):
-        title = record.get("title", "")
-        print(f"[{idx}/{len(records)}] {title[:70]}...")
-
-        try:
-            if not title or not title.strip():
-                print("  ⏩ Skipped (no title)")
-                continue
-
-            try:
-                match_result = match_deal_with_llm(title, all_companies)
-            except Exception as e:
-                print(f"  ⚠️ LLM match error: {e}")
-                if error_items is not None:
-                    collect_error(
-                        error_items,
-                        str(e),
-                        step="match_deal_with_llm",
-                        context={"title": title[:80], "url": record.get("url", "")},
-                    )
-                continue
-
-            if match_result and match_result.lower() != "none" and "match:" in match_result.lower():
-                match_pattern = r"Match:\s*([^(]+)\s*\((\w+)\)"
-                match_obj = re.search(
-                    match_pattern, match_result, re.IGNORECASE)
-                if match_obj:
-                    matched_company_raw = match_obj.group(1).strip()
-                    matched_role = match_obj.group(2).strip().lower()
-                    matched_company_normalized = normalize_company(
-                        matched_company_raw)
-                    print(f"  🎯 Match: {matched_company_raw} ({matched_role})")
-
-                    deal_found = None
-                    for deal in deals:
-                        acquirer = deal.get("acquirer") or deal.get(
-                            "acquire_name", "")
-                        target = deal.get("target") or deal.get(
-                            "target_name", "")
-                        if normalize_company(acquirer) == matched_company_normalized or normalize_company(target) == matched_company_normalized:
-                            deal_found = deal
-                            break
-
-                    if deal_found:
-                        save_ok = append_or_update_press_release_to_deal(
-                            deal_found, record, matched_company_raw, matched_role,
-                            error_items=error_items,
-                        )
-                        if save_ok:
-                            matched_count += 1
-                        else:
-                            print("  ⚠️ Failed to save to MongoDB")
-                            if error_items is not None:
-                                collect_error(
-                                    error_items,
-                                    "Failed to save press release to deal",
-                                    step="append_or_update_press_release",
-                                    context={"title": title[:80], "url": record.get("url", "")},
-                                )
-                    else:
-                        print("  ⚠️ Deal not found in list")
-                else:
-                    print(f"  ⚠️ Could not parse match: {match_result}")
-            else:
-                print("  ➖ No match")
-        except Exception as e:
-            print(f"  ⚠️ Error processing record: {e}")
-            if error_items is not None:
-                collect_error(
-                    error_items,
-                    str(e),
-                    step="process_record",
-                    context={"title": title[:80], "url": record.get("url", "")},
-                )
-
-    print(f"\n{'='*60}\n✅ Matching complete: {matched_count} new/updated in german_scrap\n{'='*60}\n")
-    return matched_count
-
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
 
 def main():
     """
-    Fetch press release search URL, extract list, filter by cutoff date,
-    match with deals via LLM, append/update german_scrap array (press_release).
+    Fetch press release listing, filter by 30-day cutoff, skip known URLs,
+    translate + LLM-match new records, run USA check on misses,
+    upsert to german_press_releases, email on first insert.
     """
-    global deals
     error_items: List[Dict[str, Any]] = []
-    records: List[Dict[str, Any]] = []
-    total_matched = 0
+    all_after_cutoff: List[Dict[str, Any]] = []
+    new_records: List[Dict[str, Any]] = []
+    stats = {"saved": 0, "matched": 0, "usa_related": 0, "silent": 0}
 
-    print(f"\n{'='*60}\n🚀 BUNDESKARTELLAMT PRESS RELEASE SCRAPER\n{'='*60}\n")
+    logger.info("=" * 60)
+    logger.info("BUNDESKARTELLAMT PRESS RELEASE SCRAPER")
+    logger.info("=" * 60)
 
     try:
+        # --- Step 1: Init MongoDB ---
         success, message = init_mongodb_connection(".env")
         if not success:
-            print(f"❌ {message}")
+            logger.error("MongoDB init failed: %s", message)
             collect_error(
-                error_items,
-                f"MongoDB init failed: {message}",
-                step="init_mongodb_connection",
-            )
+                error_items, f"MongoDB init failed: {message}", step="init_mongodb_connection")
             return {"success": False, "error": message}
 
-        load_deals()
+        collection = get_german_press_releases_collection()
+        if collection is None:
+            msg = "german_press_releases collection not available"
+            logger.error(msg)
+            collect_error(error_items, msg,
+                          step="get_german_press_releases_collection")
+            return {"success": False, "error": msg}
 
-        print(f"📍 Fetching HTML from {PRESS_RELEASE_URL}")
+        # --- Step 2: Load deals ---
+        deals = fetch_open_deals()
+        deal_by_id = {d["deal_id"]: d for d in deals if d.get("deal_id")}
+        logger.info("Loaded %d open/unknown deals", len(deals))
+
+        # --- Step 3: Fetch HTML ---
+        logger.info("Fetching HTML from %s", PRESS_RELEASE_URL)
         html_content = None
         max_retries = 3
         wait_seconds = 5
@@ -657,15 +451,16 @@ def main():
                 response = requests.get(PRESS_RELEASE_URL, timeout=30)
                 response.raise_for_status()
                 html_content = response.text
-                print(f"   ✅ HTML fetched ({len(html_content)} bytes)\n")
+                logger.info("HTML fetched (%d bytes)", len(html_content))
                 break
             except Exception as e:
-                print(f"   ❌ Attempt {attempt}/{max_retries} failed: {e}")
+                logger.warning("Attempt %d/%d failed: %s",
+                               attempt, max_retries, e)
                 if attempt < max_retries:
-                    print(f"   ⏳ Waiting {wait_seconds} sec before retry...")
+                    logger.info("Waiting %ds before retry...", wait_seconds)
                     time.sleep(wait_seconds)
                 else:
-                    print(f"   ❌ All {max_retries} attempts failed.")
+                    logger.error("All %d attempts failed.", max_retries)
                     collect_error(
                         error_items,
                         f"Failed to fetch press release page: {e}",
@@ -674,62 +469,222 @@ def main():
                     )
                     return {"success": False, "error": str(e)}
 
-        print("📍 Extracting press release list...")
+        # --- Step 4: Extract (raw German, no translation) ---
+        logger.info("Extracting press release list...")
         records = extract_press_results(html_content)
-        print(f"   ✅ Extracted {len(records)} items\n")
+        logger.info("Extracted %d items", len(records))
 
-        print(f"📍 Applying cutoff date (>= {CUTOFF_DATE.date()})...")
-        records = filter_by_cutoff_date(records)
-        print(f"   ✅ After cutoff: {len(records)} records\n")
+        # --- Step 5: Cutoff filter ---
+        logger.info("Applying cutoff date (>= %s)...", CUTOFF_DATE.date())
+        all_after_cutoff = filter_by_cutoff_date(records, CUTOFF_DATE)
+        logger.info("After cutoff: %d records", len(all_after_cutoff))
 
+        # --- Save debug JSON (raw, before URL dedup) ---
         records_serializable = []
-        for r in records:
+        for r in all_after_cutoff:
             rec = dict(r)
             if isinstance(rec.get("date"), date):
                 rec["date"] = rec["date"].isoformat()
             records_serializable.append(rec)
-
-        print(f"📍 Saving extracted records to {EXTRACTED_RECORDS_JSON}")
         try:
             with open(EXTRACTED_RECORDS_JSON, "w", encoding="utf-8") as f:
-                json.dump(records_serializable, f, ensure_ascii=False, indent=2)
-            print("   ✅ Saved\n")
+                json.dump(records_serializable, f,
+                          ensure_ascii=False, indent=2)
+            logger.info("Saved extracted records to %s",
+                        EXTRACTED_RECORDS_JSON)
         except Exception as e:
-            print(f"   ⚠️ Could not save JSON: {e}\n")
+            logger.warning("Could not save JSON: %s", e)
             collect_error(
-                error_items,
-                f"Could not save JSON: {e}",
-                step="write_extracted_json",
-            )
+                error_items, f"Could not save JSON: {e}", step="write_extracted_json")
 
-        print("📍 Matching records with deals and updating german_scrap array...")
-        total_matched = match_records_with_deals(records, error_items)
+        # --- Step 6: URL dedup ---
+        existing_urls = fetch_existing_press_release_urls(collection)
+        new_records = [
+            r for r in all_after_cutoff
+            if r.get("url", "").strip() not in existing_urls
+        ]
+        skipped_existing = len(all_after_cutoff) - len(new_records)
+        logger.info(
+            "URL dedup: %d skipped (already in DB), %d new to process",
+            skipped_existing,
+            len(new_records),
+        )
+
+        # --- Step 7: Per-record loop ---
+        logger.info("=" * 60)
+        logger.info("Processing %d new records...", len(new_records))
+        logger.info("=" * 60)
+
+        for idx, record in enumerate(new_records, 1):
+            title = record.get("title", "")
+            url = record.get("url", "").strip()
+            logger.info("[%d/%d] %s...", idx, len(new_records), title[:70])
+
+            try:
+                if not title or not title.strip():
+                    logger.info("  Skipped (no title)")
+                    continue
+                if not url:
+                    logger.info("  Skipped (no url)")
+                    continue
+
+                # --- 7a: Translate title (only for new records) ---
+                title_en = translate_to_english(title)
+                logger.info("  title_en=%s...", title_en[:60])
+
+                # --- 7b: Build document ---
+                doc: Dict[str, Any] = {
+                    "url": url,
+                    "title": title,
+                    "title_german": title,
+                    "title_english": title_en,
+                    "date_str": record.get("date_str", ""),
+                    "date": record["date"].isoformat() if isinstance(record.get("date"), date) else (record.get("date") or ""),
+                    "category": record.get("category", ""),
+                    "deal_id": None,
+                }
+
+                # --- 7c: Deal match ---
+                deal_match = None
+                if title_en and title_en != "[Translation failed]":
+                    try:
+                        deal_id_result = llm_match_deal_id(
+                            regulator_name="German Bundeskartellamt (Press Release)",
+                            case_sections={
+                                "PRESS RELEASE TITLE (German)": doc["title_german"],
+                                "PRESS RELEASE TITLE (English)": doc["title_english"],
+                            },
+                            source_label="the press release title",
+                            deals=deals,
+                        )
+                        deal_match = deal_by_id.get(
+                            deal_id_result) if deal_id_result else None
+                    except Exception as e:
+                        logger.exception("LLM match failed: %s", e)
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="llm_match_deal_id",
+                            context={"title": title[:80], "url": url},
+                        )
+
+                # --- 7d: Branch ---
+                is_usa = False
+                if deal_match:
+                    doc["deal_id"] = deal_match.get("deal_id")
+                    logger.info("  Matched: deal_id=%s",
+                                deal_match.get("deal_id"))
+                else:
+                    logger.info("  No deal match — running USA check")
+                    try:
+                        is_usa = verify_country_relation(
+                            company_details={
+                                "today_date": datetime.now().strftime("%Y-%m-%d"),
+                                "record": doc,
+                            },
+                            country="USA",
+                            case_type="GERMANY",
+                        )
+                    except Exception as e:
+                        logger.exception("USA check failed: %s", e)
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="verify_country_relation",
+                            context={"url": url},
+                        )
+                        is_usa = False
+
+                    if is_usa:
+                        logger.info("  USA-related")
+                    else:
+                        logger.info("  Not USA-related → silent save")
+
+                # --- 7e: Save ---
+                doc_id, inserted_new = upsert_press_release(collection, doc)
+                if doc_id:
+                    stats["saved"] += 1
+                    existing_urls.add(url)
+                    logger.info("  Saved (id=%s, new=%s)",
+                                doc_id, inserted_new)
+
+                    # --- 7f: Email only on first insert - --
+                    if inserted_new:
+                        if deal_match:
+                            subject, html_body = generate_matched_email(
+                                doc, deal_match)
+                            stats["matched"] += 1
+                            if not send_email_via_webhook(
+                                subject, html_body, url, deal_id=deal_match.get(
+                                    "deal_id")
+                            ):
+                                collect_error(
+                                    error_items,
+                                    "Failed to send matched email",
+                                    step="send_matched_email",
+                                    context={"url": url},
+                                )
+                        elif is_usa:
+                            subject, html_body = generate_usa_email(doc)
+                            stats["usa_related"] += 1
+                            if not send_email_via_webhook(subject, html_body, url):
+                                collect_error(
+                                    error_items,
+                                    "Failed to send USA email",
+                                    step="send_usa_email",
+                                    context={"url": url},
+                                )
+                        else:
+                            stats["silent"] += 1
+                else:
+                    logger.error("  Failed to save to german_press_releases")
+                    collect_error(
+                        error_items,
+                        "Failed to save press release",
+                        step="upsert_press_release",
+                        context={"url": url},
+                    )
+
+            except Exception as e:
+                logger.exception("Error processing record: %s", e)
+                collect_error(
+                    error_items,
+                    str(e),
+                    step="process_record",
+                    context={"title": title[:80], "url": url},
+                )
 
         return {
             "success": True,
-            "extraction_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "total_extracted": len(records),
-            "total_matched": total_matched,
-            "cutoff_date": CUTOFF_DATE.strftime("%Y-%m-%d"),
+            "total_extracted": len(all_after_cutoff),
+            "skipped_existing_url": skipped_existing,
+            "processed_new": len(new_records),
+            "saved": stats["saved"],
+            "matched_frmd": stats["matched"],
+            "usa_frud": stats["usa_related"],
+            "silent": stats["silent"],
+            "cutoff_date": CUTOFF_DATE.date().isoformat(),
         }
 
     except Exception as e:
-        print(f"❌ Unhandled error in main: {e}")
+        logger.exception("Unhandled error in main: %s", e)
         collect_error(
-            error_items,
-            f"Unhandled error in main: {e}",
-            step="run_main",
-        )
+            error_items, f"Unhandled error in main: {e}", step="run_main")
         return {"success": False, "error": str(e)}
 
     finally:
         send_error_summary(error_items, SCRIPT_NAME)
 
-        print(f"\n{'='*60}\n✅ DONE\n{'='*60}")
-        print(f"📊 Records (after cutoff): {len(records)}")
-        print(f"🎯 Matches/updates in german_scrap: {total_matched}")
-        print(f"⚠️ Errors encountered: {len(error_items)}")
-        print(f"📁 JSON: {EXTRACTED_RECORDS_JSON}\n")
+        logger.info("=" * 60)
+        logger.info("DONE")
+        logger.info("  Records after cutoff  : %d", len(all_after_cutoff))
+        logger.info("  New processed         : %d", len(new_records))
+        logger.info("  Saved                 : %d", stats["saved"])
+        logger.info("  Deal matches [FRMD]   : %d", stats["matched"])
+        logger.info("  USA-related  [FRUD]   : %d", stats["usa_related"])
+        logger.info("  Silent saves          : %d", stats["silent"])
+        logger.info("  Errors                : %d", len(error_items))
+        logger.info("=" * 60)
 
 
 if __name__ == "__main__":
