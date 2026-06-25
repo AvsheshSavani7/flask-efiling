@@ -26,6 +26,7 @@ from mongodb_connection import (
     init_mongodb_connection,
     is_connected,
 )
+from deal_match_llm import llm_match_deal_id, fetch_open_deals
 from html import escape as escape_html
 from log_utils import cleanup_old_logs, refresh_log_file
 from email_subject_builder import build_subject
@@ -935,112 +936,30 @@ def extract_detail_page(
 # LLM deal matching (ACCC pattern)
 # ---------------------------------------------------------------------------
 
-def match_case_to_deal(interessados_text: str, translated_text: str) -> Optional[str]:
+def match_case_to_deal(
+    interessados_text: str,
+    translated_text: str,
+    deals: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[str]:
     """
-    Use LLM to match interessados text against deals.
-    Returns deal_id or None.
+    Use LLM to match CADE interessados text against deals.
+
+    Args:
+        interessados_text: Original Portuguese text.
+        translated_text:   English translation of the interessados text.
+        deals:             Pre-loaded deal list. Fetched from MongoDB if None.
+
+    Returns deal_id string or None.
     """
-    try:
-        deals_collection = get_deals_collection()
-        if deals_collection is None:
-            return None
-
-        status_filter = {
-            "$or": [
-                {"deal_status": {"$in": ["Open", "Unknown"]}},
-                {"deal_status": None},
-                {"deal_status": {"$exists": False}},
-            ]
-        }
-        deals = list(deals_collection.find(status_filter))
-        if not deals:
-            return None
-
-        lines = []
-        for d in deals:
-            deal_id = str(d.get("_id"))
-            target = d.get("target") or d.get("target_name", "N/A")
-            acquirer = d.get("acquirer") or d.get("acquire_name", "N/A")
-            line = f"Deal ID: {deal_id} | Target: {target} | Acquirer: {acquirer}"
-            target_aliases = d.get("target_aliases") or []
-            parent_aliases = d.get("parent_aliases") or []
-            if target_aliases:
-                line += f" | Target aliases: {', '.join(str(a) for a in target_aliases)}"
-            if parent_aliases:
-                line += f" | Parent aliases: {', '.join(str(a) for a in parent_aliases)}"
-            lines.append(line)
-
-        deals_text = "\n".join(lines)
-
-        prompt = f"""You are an expert M&A deal matcher. Determine whether this CADE Brazil case directly refers to a specific deal in our deals database.
-
-DEALS DATABASE:
-{deals_text}
-
-INTERESSADOS TEXT (translated to English):
-{translated_text}
-
-ORIGINAL TEXT (Portuguese):
-{interessados_text}
-
-MATCHING INSTRUCTIONS:
-1. Extract only the company names that are explicitly and directly mentioned from the interessados text.
-2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, service providers, or any company not actually written in the interessados text.
-3. For each deal in the deals database, check whether:
-   - the Acquirer (or its known alias), AND
-   - the Target (or its known alias)
-   are both directly mentioned in the interessados text.
-4. A deal is a valid match only if BOTH sides of the same deal are confidently matched from the interessados text:
-   - one match for the Acquirer side
-   - one match for the Target side
-5. Do not return a match if only one side is present, even if that single company is an exact match.
-6. Allow only normal name variations when they clearly refer to the same company, such as:
-   - punctuation differences
-   - “Inc.” vs “Incorporated”
-   - “Corp.” vs “Corporation”
-   - “Ltd” vs “Limited”
-   - obvious spacing/casing differences
-7. Do not match based only on sector, business type, article topic, indirect association, or partial deal overlap.
-8. If the interessados text does not directly name both companies for the same deal, return None.
-
-
-RESPONSE FORMAT:
--If BOTH the Acquirer and Target for one deal are directly matched, respond EXACTLY: Match: DEAL_ID
--If no deal satisfies this rule, respond exactly: None
-"""
-
-        res = client.chat.completions.create(
-            model="gpt-5.2",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an expert M&A deal identifier for Brazilian regulatory notices.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-        )
-
-        content = (res.choices[0].message.content or "").strip()
-        tokens_used = getattr(res.usage, "total_tokens",
-                              "N/A") if res.usage else "N/A"
-        logger.info(
-            f"  LLM match raw response: {content} (tokens={tokens_used})")
-
-        if not content.lower().startswith("match"):
-            logger.info(f"  LLM match result: None (no match prefix)")
-            return None
-
-        try:
-            _prefix, deal_id_raw = content.split(":", 1)
-            deal_id = deal_id_raw.strip()
-            logger.info(f"  LLM match result: deal_id={deal_id}")
-            return deal_id or None
-        except Exception:
-            logger.warning(f"  LLM match result: malformed response")
-            return None
-    except Exception as e:
-        logger.exception(f"LLM deal match error: {e}")
-        raise
+    return llm_match_deal_id(
+        regulator_name="CADE Brazil",
+        case_sections={
+            "INTERESSADOS TEXT (translated to English)": translated_text,
+            "ORIGINAL TEXT (Portuguese)": interessados_text,
+        },
+        source_label="the interessados text",
+        deals=deals,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1203,6 +1122,8 @@ def run_cade_cases_register(
 
         logger.info("[STEP 1.4] brazil_cases collection ready")
 
+        open_deals = fetch_open_deals()
+
         if end_date is None:
             end_date = datetime.datetime.now()
         if start_date is None:
@@ -1351,7 +1272,7 @@ def run_cade_cases_register(
                         if interessados_text:
                             try:
                                 matched_deal_id = match_case_to_deal(
-                                    interessados_text, translated)
+                                    interessados_text, translated, deals=open_deals)
                             except Exception as e:
                                 logger.exception(
                                     f"[STEP 2.10] Error during deal matching: {e}")

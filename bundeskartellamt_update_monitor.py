@@ -41,6 +41,7 @@ from mongodb_connection import (
 from html import escape as escape_html
 from llm_verification_service import verify_country_relation
 from bundeskartellamt_initial_proxy import match_deal_with_llm
+from deal_match_llm import fetch_open_deals
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
 from email_subject_builder import build_subject
@@ -204,26 +205,8 @@ def fetch_open_german_cases(collection) -> List[Dict[str, Any]]:
 
 
 def fetch_deals() -> List[Dict[str, Any]]:
-    try:
-        deals_collection = get_deals_collection()
-        if deals_collection is None:
-            return []
-        status_filter = {
-            "$or": [
-                {"deal_status": {"$in": ["Open", "Unknown"]}},
-                {"deal_status": None},
-                {"deal_status": {"$exists": False}},
-            ]
-        }
-        deals = list(deals_collection.find(status_filter))
-        for d in deals:
-            if "_id" in d:
-                d["deal_id"] = str(d["_id"])
-        logger.info(f"Fetched {len(deals)} open/unknown deals from MongoDB")
-        return deals
-    except Exception as e:
-        logger.warning(f"Error fetching deals: {e}")
-        return []
+    """Fetch open/unknown deals. Delegates to the shared engine."""
+    return fetch_open_deals()
 
 
 def update_german_case(collection, doc_id, update_fields: Dict) -> bool:
@@ -382,21 +365,12 @@ def detect_changes(stored: Dict, live: Dict) -> List[Tuple[str, str, str]]:
 
 
 def parse_llm_match(result: str, deal_by_id: Dict) -> Tuple[Optional[Dict], str, str]:
+    """Look up deal dict by deal_id. Returns (deal_match, '', '') or (None, '', '')."""
     if not result or result.strip().lower() == "none":
         return None, "", ""
-    stripped = result.strip()
-    if not stripped.lower().startswith("match:"):
-        return None, "", ""
-    parts = stripped[6:].strip().split("|")
-    if len(parts) < 3:
-        return None, "", ""
-    llm_deal_id = parts[0].strip()
-    company = parts[1].strip()
-    role = parts[2].strip().lower().replace("(", "").replace(")", "")
-    if role not in ("target", "acquirer"):
-        role = "acquirer"
-    deal = deal_by_id.get(llm_deal_id)
-    return deal, company, role
+    deal_id = result.strip()
+    deal = deal_by_id.get(deal_id)
+    return deal, "", ""
 
 
 # ---------------------------------------------------------------------------
@@ -682,14 +656,13 @@ def main():
                         )
                         match_result = None
 
-                    deal_match, matched_company, matched_role = parse_llm_match(
-                        match_result or "", deal_by_id)
+                    deal_match, _, _ = parse_llm_match(match_result or "", deal_by_id)
 
                     if deal_match:
                         deal = deal_match
                         update_fields["deal_id"] = deal_match.get("deal_id")
                         logger.info(
-                            f"  New match: {matched_company} → sending [FRMD] update email")
+                            f"  New match: deal_id={deal_match.get('deal_id')} → sending [FRMD] update email")
                         subject, html = generate_update_email(
                             merged, changes, deal)
                         stats["email_sent"] += 1

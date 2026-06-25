@@ -10,6 +10,7 @@ import sys
 import traceback
 from logging.handlers import RotatingFileHandler
 from openai import OpenAI
+from deal_match_llm import llm_match_deal_id, fetch_open_deals
 from bs4 import BeautifulSoup
 import re
 from bson import ObjectId
@@ -264,7 +265,7 @@ def get_deals_from_mongodb():
 
 def load_deals():
     global deals
-    deals = get_deals_from_mongodb()
+    deals = fetch_open_deals()
     logger.info(f"Loaded {len(deals)} deals from MongoDB")
     return deals
 
@@ -492,112 +493,37 @@ def normalize_company(name):
 
 def match_samr_case_to_deals(samr_case):
     """
-    Ask LLM whether a samr_cases record title matches any deal.
-    Returns (deal_match_dict, match_result_str) or (None, "None").
+    Use LLM to match SAMR case title against deals.
+    Returns deal_match dict or None.
     """
     global deals
     if not deals:
         load_deals()
-
-    deals_list = []
-    for deal in deals:
-        deal_info = {"deal_id": deal.get("deal_id", "")}
-        target = deal.get("target") or deal.get("target_name", "")
-        acquirer = deal.get("acquirer") or deal.get("acquire_name", "")
-        if target:
-            deal_info["target"] = target
-        if acquirer:
-            deal_info["acquirer"] = acquirer
-        t_aliases = deal.get("target_aliases") or []
-        p_aliases = deal.get("parent_aliases") or []
-        if isinstance(t_aliases, list) and t_aliases:
-            deal_info["target_aliases"] = t_aliases
-        if isinstance(p_aliases, list) and p_aliases:
-            deal_info["parent_aliases"] = p_aliases
-        if target or acquirer:
-            deals_list.append(deal_info)
-
-    if not deals_list:
-        return None, "None"
-
-    lines = []
-    for d in deals_list:
-        line = f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {d.get('target', 'N/A')} | Acquirer: {d.get('acquirer', 'N/A')}"
-        ta = d.get("target_aliases", []) or []
-        pa = d.get("parent_aliases", []) or []
-        if ta:
-            line += f" | Target aliases: {', '.join(str(a) for a in ta)}"
-        if pa:
-            line += f" | Parent aliases: {', '.join(str(a) for a in pa)}"
-        lines.append(line)
-    deals_text = "\n".join(lines)
+    if not deals:
+        return None
 
     title_en = samr_case.get("title_en", "")
     title_cn = samr_case.get("title_cn", "")
     logger.info(f"samr_case title: {title_en} {title_cn}")
 
-    prompt = f"""
-You are an M&A deal analyst. Given the title of a SAMR China public notice, determine whether it matches any deal below.
+    deal_id = llm_match_deal_id(
+        regulator_name="SAMR China",
+        case_sections={
+            "TITLE (English)": title_en,
+            "TITLE (Chinese)": title_cn,
+        },
+        source_label="the public notice title",
+        deals=deals,
+    )
+    if not deal_id:
+        return None
 
-DEALS TO MATCH:
-{deals_text}
+    for deal in deals:
+        if deal.get("deal_id") == deal_id:
+            return deal
 
-TITLE (English): {title_en}
-TITLE (Chinese): {title_cn}
-
-INSTRUCTIONS:
-1. A deal matches only if BOTH the Acquirer (or alias) AND Target (or alias) are directly mentioned in the title.
-2. Do not match on single-company overlap, sector similarity, or indirect association.
-3. Allow normal name variations (Inc./Incorporated, Ltd/Limited, casing).
-
-RESPONSE:
-- Match: DEAL_ID|COMPANY_NAME|(target|acquirer)
-- None
-"""
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-5.2",
-            messages=[
-                {"role": "system", "content": "You are an expert in M&A deal recognition. Return the match or None."},
-                {"role": "user", "content": prompt},
-            ],
-        )
-        result = response.choices[0].message.content.strip()
-        logger.info(f"  Deal match LLM: {result}")
-
-        if result.lower() != "none" and result.lower().startswith("match"):
-            parts_str = result.replace(
-                "Match:", "").replace("match:", "").strip()
-            parts = parts_str.split("|")
-            if len(parts) >= 3:
-                deal_id = parts[0].strip()
-                company_name = parts[1].strip()
-                match_type = parts[2].strip().lower().replace(
-                    "(", "").replace(")", "")
-
-                for deal in deals:
-                    if deal.get("deal_id") == deal_id:
-                        return deal, result
-
-                for deal in deals:
-                    target = deal.get("target") or deal.get("target_name", "")
-                    acquirer = deal.get("acquirer") or deal.get(
-                        "acquire_name", "")
-                    if match_type == "target" and target and normalize_company(target) == normalize_company(company_name):
-                        return deal, result
-                    elif match_type == "acquirer" and acquirer and normalize_company(acquirer) == normalize_company(company_name):
-                        return deal, result
-
-        return None, "None"
-    except Exception as e:
-        logger.warning(f"  LLM Error (deal match): {e}")
-        raise
-
-
-# ---------------------------------------------------------------------------
-# Utility
-# ---------------------------------------------------------------------------
+    logger.warning(f"  LLM returned deal_id '{deal_id}' but not found in loaded deals")
+    return None
 
 def convert_datetime_to_string(obj):
     if isinstance(obj, datetime.datetime):
@@ -994,7 +920,7 @@ def process_record(record, samr_cases_list, error_items: list[dict[str, Any]] | 
         logger.info("  No deal_id on samr_case, trying LLM deal match...")
         logger.info(f"  samr_case title: {title_en} {title_cn}")
         try:
-            deal_match, match_result = match_samr_case_to_deals(matched_case)
+            deal_match = match_samr_case_to_deals(matched_case)
         except Exception as e:
             logger.exception(f"  Deal match failed: {e}")
             if error_items is not None:
@@ -1004,7 +930,7 @@ def process_record(record, samr_cases_list, error_items: list[dict[str, Any]] | 
                     step="match_samr_case_to_deals",
                     context={"title": case_title[:80], "url": record.get("url", "")},
                 )
-            deal_match, match_result = None, "None"
+            deal_match = None
 
         if deal_match:
             deal_id = deal_match.get("deal_id", "")

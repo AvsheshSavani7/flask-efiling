@@ -22,6 +22,7 @@ from mongodb_connection import (
 )
 from llm_verification_service import verify_usa_relation
 from canada_cases_register import match_case_to_deal
+from deal_match_llm import fetch_open_deals
 from scraper_error_utils import collect_error, send_error_summary
 import os
 import sys
@@ -468,6 +469,7 @@ def process_canada_cases_updates():
             return
 
         deals_collection = get_deals_collection()
+        open_deals = fetch_open_deals()
 
         cursor = cases_collection.find({"is_open": True})
         cases = list(cursor)
@@ -559,7 +561,7 @@ def process_canada_cases_updates():
                     logger.info(
                         f"[STEP 1.17] No deal_id found; attempting LLM deal match...")
                     try:
-                        matched_deal_id = match_case_to_deal(parties)
+                        matched_deal_id = match_case_to_deal(parties, deals=open_deals)
                     except Exception as e:
                         logger.exception(f"[STEP 1.17] Deal matching error: {e}")
                         collect_error(

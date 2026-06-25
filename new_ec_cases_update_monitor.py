@@ -1023,9 +1023,9 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
 
                     deal = None
                     if match_result:
-                        matched_deal_id, matched_company, matched_role = match_result
+                        matched_deal_id = match_result
                         logger.info(
-                            f"[STEP 4.14] [{case_number}] LLM returned match: deal_id={matched_deal_id}, company={matched_company}, role={matched_role}")
+                            f"[STEP 4.14] [{case_number}] LLM returned match: deal_id={matched_deal_id}")
                         deal = deal_by_id.get(matched_deal_id)
                         if not deal:
                             logger.info(

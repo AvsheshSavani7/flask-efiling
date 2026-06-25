@@ -24,6 +24,7 @@ from logging.handlers import RotatingFileHandler
 import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
+from deal_match_llm import llm_match_deal_id, fetch_open_deals
 from dotenv import load_dotenv
 from datetime import datetime, date, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple, Set
@@ -426,100 +427,31 @@ def fetch_all_records_with_pagination(
 # ---------------------------------------------------------------------------
 
 def match_deal_with_llm(pursue_en: str, deals: List[Dict]) -> Optional[str]:
+    """
+    Use LLM to match German Laufende Verfahren translated text against deals.
+
+    Args:
+        pursue_en: Translated (English) pursue text.
+        deals:     Pre-loaded deal list.
+
+    Returns deal_id string or None.
+    """
     if not pursue_en or pursue_en == "[Translation failed]":
         return None
-
-    deals_list = []
-    for deal in deals:
-        target = deal.get("target") or deal.get("target_name", "")
-        acquirer = deal.get("acquirer") or deal.get("acquire_name", "")
-        if not target and not acquirer:
-            continue
-        deal_info = {"deal_id": deal.get(
-            "deal_id", ""), "target": target, "acquirer": acquirer}
-        for field in ("target_aliases", "parent_aliases"):
-            aliases = deal.get(field) or []
-            if isinstance(aliases, list) and aliases:
-                deal_info[field] = aliases
-        deals_list.append(deal_info)
-
-    if not deals_list:
-        return "None"
-
-    lines = []
-    for d in deals_list:
-        line = f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {d.get('target', 'N/A')} | Acquirer: {d.get('acquirer', 'N/A')}"
-        for field in ("target_aliases", "parent_aliases"):
-            aliases = d.get(field, [])
-            if aliases:
-                line += f" | {field.replace('_', ' ').title()}: {', '.join(str(a) for a in aliases)}"
-        lines.append(line)
-
-    prompt = f"""You are an M&A deal analyst. Given the translated text about a German merger case (Laufende Verfahren), determine whether it explicitly relates to any of the deals listed below.
-
-DEALS TO MATCH:
-{chr(10).join(lines)}
-
-TRANSLATED TEXT:
-{pursue_en}
-
-INSTRUCTIONS:
-1.  Extract only the company names that are explicitly and directly mentioned in the German case text (pursue_en).
-2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, service providers, or any company not actually written in the German case text.  
-3. For each deal in the deals database, check whether:
-   - the Acquirer (or its known alias), AND
-   - the Target (or its known alias)
-   are both directly mentioned in the German case text.
-4. A deal is a valid match only if BOTH sides of the same deal are confidently matched from the German case text:
-   - one match for the Acquirer side
-   - one match for the Target side
-5. Do not return a match if only one side is present, even if that single company is an exact match.
-6. Allow only normal name variations when they clearly refer to the same company, such as:
-   - punctuation differences
-   - "Inc." vs "Incorporated"
-   - "Corp." vs "Corporation"
-   - "Ltd" vs "Limited"
-   - obvious spacing/casing differences
-7. Do not match based only on sector, business type, article topic, indirect association, or partial deal overlap.
-8. If the German case text does not directly name both companies for the same deal, return None.
-
-RESPONSE FORMAT:
-- If match found: Match: DEAL_ID|COMPANY_NAME|(target|acquirer)
-- If no match: None
-"""
-    try:
-        response = client.chat.completions.create(
-            model="gpt-5.2",
-            messages=[
-                {"role": "system", "content": "You are an expert in M&A deal recognition. Return Match: DEAL_ID|COMPANY|target|acquirer or None."},
-                {"role": "user", "content": prompt},
-            ]
-        )
-        result = response.choices[0].message.content.strip()
-        logger.info(f"   LLM match: {result}")
-        return result
-    except Exception as e:
-        logger.warning(f"LLM Error: {e}")
-        raise
-
+    return llm_match_deal_id(
+        regulator_name="German Bundeskartellamt (Laufende Verfahren)",
+        case_sections={"TRANSLATED TEXT": pursue_en},
+        source_label="the German case text",
+        deals=deals if deals else None,
+    )
 
 def parse_llm_match(result: str, deal_by_id: Dict) -> Tuple[Optional[Dict], str, str]:
-    """Parse LLM match result. Returns (deal_match, company, role) or (None, '', '')."""
+    """Look up deal dict by deal_id. Returns (deal_match, '', '') or (None, '', '')."""
     if not result or result.strip().lower() == "none":
         return None, "", ""
-    stripped = result.strip()
-    if not stripped.lower().startswith("match:"):
-        return None, "", ""
-    parts = stripped[6:].strip().split("|")
-    if len(parts) < 3:
-        return None, "", ""
-    llm_deal_id = parts[0].strip()
-    company = parts[1].strip()
-    role = parts[2].strip().lower().replace("(", "").replace(")", "")
-    if role not in ("target", "acquirer"):
-        role = "acquirer"
-    deal = deal_by_id.get(llm_deal_id)
-    return deal, company, role
+    deal_id = result.strip()
+    deal = deal_by_id.get(deal_id)
+    return deal, "", ""
 
 
 # ---------------------------------------------------------------------------
@@ -738,8 +670,6 @@ def main():
                     f"  {fn}: pursue_en={pursue_en[:50]}... | is_open={is_open}")
 
                 deal_match = None
-                matched_company = ""
-                matched_role = ""
 
                 if pursue_en and pursue_en != "[Translation failed]":
                     try:
@@ -754,14 +684,13 @@ def main():
                         )
                         match_result = None
                     if match_result:
-                        deal_match, matched_company, matched_role = parse_llm_match(
-                            match_result, deal_by_id)
+                        deal_match, _, _ = parse_llm_match(match_result, deal_by_id)
 
                 is_usa = False
                 if deal_match:
                     record["deal_id"] = deal_match.get("deal_id")
                     logger.info(
-                        f"  Matched: {matched_company} ({matched_role})")
+                        f"  Matched: deal_id={deal_match.get('deal_id')}")
                 else:
                     logger.info(f"  No deal match")
                     try:

@@ -39,6 +39,7 @@ from mongodb_connection import (
     is_connected,
 )
 from openai import OpenAI
+from deal_match_llm import llm_match_deal_id, fetch_open_deals
 from dotenv import load_dotenv
 from bson import ObjectId
 from playwright.sync_api import sync_playwright
@@ -471,107 +472,26 @@ def utc_now_iso() -> str:
 # ---------------------------------------------------------------------------
 
 def match_case_to_deal(
-    case_companies: List[str], deals: List[Dict[str, Any]]
-) -> Optional[Tuple[str, str, str]]:
-    if not case_companies or not deals:
+    case_companies: List[str],
+    deals: List[Dict[str, Any]],
+) -> Optional[str]:
+    """
+    Use LLM to match EC Foreign Subsidies case companies against deals.
+
+    Args:
+        case_companies: List of company names from the case title.
+        deals:          Pre-loaded deal list.
+
+    Returns deal_id string or None.
+    """
+    if not case_companies:
         return None
-
-    companies_str = " / ".join(case_companies)
-
-    lines = []
-    for d in deals:
-        deal_id = d.get("deal_id") or str(d.get("_id", ""))
-        target = d.get("target") or d.get("target_name", "N/A")
-        acquirer = d.get("acquirer") or d.get("acquire_name", "N/A")
-        line = f"Deal ID: {deal_id} | Target: {target} | Acquirer: {acquirer}"
-        for alias_field in ("target_aliases", "parent_aliases"):
-            aliases = d.get(alias_field) or []
-            if aliases:
-                line += f" | {alias_field.replace('_', ' ').title()}: {', '.join(str(a) for a in aliases)}"
-        lines.append(line)
-
-    prompt = f"""You are an M&A deal analyst. Given the company names from an EC Foreign Subsidies case (case title), determine whether any match any of the deals below.
-
-DEALS TO MATCH:
-{chr(10).join(lines)}
-
-CASE COMPANIES (from case title):
-{companies_str}
-
-INSTRUCTIONS:
-1. Extract only the company names that are explicitly and directly mentioned in the EC Foreign Subsidies case companies.
-2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, service providers, or any company not actually written in the EC Foreign Subsidies case companies.
-3. For each deal in the deals database, check whether:
-   - the Acquirer (or its known alias), AND
-   - the Target (or its known alias)
-   are both directly mentioned in the EC Foreign Subsidies case companies.
-4. A deal is a valid match only if BOTH sides of the same deal are confidently matched from the EC Foreign Subsidies case companies:
-   - one match for the Acquirer side
-   - one match for the Target side
-5. Do not return a match if only one side is present, even if that single company is an exact match.
-6. Allow only normal name variations when they clearly refer to the same company, such as:
-   - punctuation differences
-   - “Inc.” vs “Incorporated”
-   - “Corp.” vs “Corporation”
-   - “Ltd” vs “Limited”
-   - obvious spacing/casing differences
-7. Do not match based only on sector, business type, article topic, indirect association, or partial deal overlap.
-8. If the EC Foreign Subsidies case companies do not directly name both companies for the same deal, return None.
-
-RESPONSE FORMAT:
-- If you find BOTH the Acquirer and Target for one deal are directly matched, respond EXACTLY in this format:
-  Match: DEAL_ID|COMPANY_NAME|(target|acquirer)
-  Example: Match: 69665014d0bb42af1044aecd|General Motors|acquirer
-
-- If no deal satisfies this rule, respond exactly: None
-"""
-
-    logger.info(f"  LLM deal match — input companies: {companies_str}")
-    logger.info(f"  LLM deal match — checking against {len(deals)} deals")
-
-    try:
-        res = client.chat.completions.create(
-            model="gpt-5.2",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an expert in M&A deal recognition. Your job is to find matches between EC Foreign Subsidies case companies and deal companies. If the case companies match or are contained in any Target and Acquirer name, return the match. Be thorough and check all possibilities.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-        )
-        content = (res.choices[0].message.content or "").strip()
-        tokens_used = getattr(res.usage, "total_tokens",
-                              "N/A") if res.usage else "N/A"
-        logger.info(
-            f"  LLM match raw response: {content} (tokens={tokens_used})")
-
-        if not content.lower().startswith("match:"):
-            logger.info(f"  LLM match result: None (no match prefix)")
-            return None
-
-        parts = content[6:].strip().split("|")
-        if len(parts) < 3:
-            logger.warning(
-                f"  LLM match result: malformed response, parts={parts}")
-            return None
-
-        deal_id = parts[0].strip()
-        matched_company = parts[1].strip()
-        role_raw = parts[2].strip().lower().replace("(", "").replace(")", "")
-        matched_role = role_raw if role_raw in (
-            "target", "acquirer") else "acquirer"
-        logger.info(
-            f"  LLM match result: deal_id={deal_id} | company={matched_company} | role={matched_role}")
-        return (deal_id, matched_company, matched_role)
-    except Exception as e:
-        logger.exception(f"LLM deal match error: {e}")
-        raise
-
-
-# ---------------------------------------------------------------------------
-# Email via webhook
-# ---------------------------------------------------------------------------
+    return llm_match_deal_id(
+        regulator_name="EC Foreign Subsidies",
+        case_sections={"CASE COMPANIES (from case title)": " / ".join(case_companies)},
+        source_label="the EC Foreign Subsidies case companies",
+        deals=deals if deals else None,
+    )
 
 def send_email_via_webhook(
     subject: str,
@@ -988,9 +908,9 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                             )
 
                     if match_result:
-                        matched_deal_id, matched_company, matched_role = match_result
+                        matched_deal_id = match_result
                         logger.info(
-                            f"[STEP 3.13] [{case_num}] LLM returned match: deal_id={matched_deal_id}, company={matched_company}, role={matched_role}")
+                            f"[STEP 3.13] [{case_num}] LLM returned match: deal_id={matched_deal_id}")
                         deal = deal_by_id.get(matched_deal_id)
 
                         if not deal:

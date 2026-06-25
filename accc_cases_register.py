@@ -5,6 +5,7 @@ from mongodb_connection import (
     init_mongodb_connection,
     is_connected,
 )
+from deal_match_llm import llm_match_deal_id, fetch_open_deals
 from llm_verification_service import verify_usa_relation
 from log_utils import cleanup_old_logs, refresh_log_file
 from scraper_error_utils import collect_error, send_error_summary
@@ -263,102 +264,23 @@ Description: {desc_snippet}
 """.strip()
 
 
-def match_case_to_deal(title: str) -> Optional[str]:
+def match_case_to_deal(title: str, deals: Optional[List[Dict[str, Any]]] = None) -> Optional[str]:
     """
-    Use LLM to match the ACCC case to an existing deal.
+    Use LLM to match the ACCC case title to an existing deal.
+
+    Args:
+        title: ACCC case title string.
+        deals: Pre-loaded deal list. Fetched from MongoDB if None.
 
     Returns deal_id string or None.
-    Reference: accc_cases_update_monitor.py
     """
-    try:
-        deals_collection = get_deals_collection()
-        if deals_collection is None:
-            return None
-
-        status_filter = {
-            "$or": [
-                {"deal_status": {"$in": ["Open", "Unknown"]}},
-                {"deal_status": None},
-                {"deal_status": {"$exists": False}},
-            ]
-        }
-        deals = list(deals_collection.find(status_filter))
-        if not deals:
-            return None
-
-        lines = []
-        for d in deals:
-            deal_id = str(d.get("_id"))
-            target = d.get("target") or d.get("target_name", "N/A")
-            acquirer = d.get("acquirer") or d.get("acquire_name", "N/A")
-            line = f"Deal ID: {deal_id} | Target: {target} | Acquirer: {acquirer}"
-            target_aliases = d.get("target_aliases") or []
-            parent_aliases = d.get("parent_aliases") or []
-            if target_aliases:
-                line += f" | Target aliases: {', '.join(str(a) for a in target_aliases)}"
-            if parent_aliases:
-                line += f" | Parent aliases: {', '.join(str(a) for a in parent_aliases)}"
-            lines.append(line)
-
-        deals_text = "\n".join(lines)
-
-        prompt = f"""You are an expert M&A deal matcher. Your task is to determine if ANY company mentioned in the ACCC case title appears in our deals database.
-
-DEALS DATABASE:
-{deals_text}
-
-ACCC CASE TITLE TO MATCH:
-{title}
-
-MATCHING INSTRUCTIONS:
-1. . Extract only the company names that are explicitly and directly mentioned in the ACCC title (both acquirer and target / vendors).
-2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, service providers, or any company not actually written in the ACCC title.
-3. For each deal in the deals database, check whether:
-   - the Acquirer (or its known alias), AND
-   - the Target (or its known alias)
-   are both directly mentioned in the ACCC title.
-4. A deal is a valid match only if BOTH sides of the same deal are confidently matched from the ACCC title:
-   - one match for the Acquirer side
-   - one match for the Target side
-5. Do not return a match if only one side is present, even if that single company is an exact match.
-6. Allow only normal name variations when they clearly refer to the same company, such as:
-   - punctuation differences
-   - "Inc." vs "Incorporated"
-   - "Corp." vs "Corporation"
-   - "Ltd" vs "Limited"
-   - obvious spacing/casing differences
-7. Do not match based only on sector, business type, article topic, indirect association, or partial deal overlap.
-8. If the ACCC title does not directly name both companies for the same deal, return None.
-
-RESPONSE FORMAT:
--If BOTH the Acquirer and Target for one deal are directly matched, respond EXACTLY: Match: DEAL_ID
--If no deal satisfies this rule, respond exactly: None
-"""
-
-        res = client.chat.completions.create(
-            model="gpt-5.2",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an expert M&A deal identifier and matcher.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-        )
-
-        content = (res.choices[0].message.content or "").strip()
-        if not content.lower().startswith("match"):
-            return None
-
-        try:
-            _prefix, deal_id_raw = content.split(":", 1)
-            deal_id = deal_id_raw.strip()
-            return deal_id or None
-        except Exception:
-            return None
-    except Exception as e:
-        logger.exception(f"LLM match error: {e}")
-        raise
+    return llm_match_deal_id(
+        regulator_name="ACCC Australia",
+        case_sections={"ACCC CASE TITLE TO MATCH": title},
+        source_label="the ACCC title",
+        source_label_step1="the ACCC title (both acquirer and target / vendors)",
+        deals=deals,
+    )
 
 
 def _post_email_payload(payload: Dict[str, Any]) -> bool:

@@ -12,6 +12,7 @@ from bson import ObjectId
 from bs4 import BeautifulSoup
 from html import escape as escape_html
 from openai import OpenAI
+from deal_match_llm import llm_match_deal_id, fetch_open_deals
 from pymongo import MongoClient
 from typing import Any, Dict, List, Optional, Tuple
 from scraper_error_utils import collect_error, send_error_summary
@@ -451,81 +452,12 @@ def match_title_with_deals(title):
         print("⚠️ No deals with company names found")
         return None
 
-    lines = []
-    for deal in deals:
-        target = deal.get("target") or deal.get("target_name", "N/A")
-        acquirer = deal.get("acquirer") or deal.get("acquire_name", "N/A")
-        if not target and not acquirer:
-            continue
-        line = f"Deal ID: {deal.get('deal_id', 'N/A')} | Target: {target} | Acquirer: {acquirer}"
-        for alias_key in ("target_aliases", "parent_aliases"):
-            aliases = deal.get(alias_key) or []
-            if aliases:
-                line += f" | {alias_key}: {', '.join(str(a) for a in aliases)}"
-        lines.append(line)
-    deals_text = "\n".join(lines)
-
-    prompt = f"""You are a professional M&A analyst specializing in UK merger cases.
-
-Below is a CMA merger case title. Your task is to match it with any of the deals listed below.
-
-DEALS TO MATCH:
-{deals_text}
-
-CASE TITLE: {title}
-
-INSTRUCTIONS:
-1. Extract only the company names that are explicitly and directly mentioned in the UK CMA case text (title).
-2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, service providers, or any company not actually written in the UK CMA case text.
-3. For each deal in the deals database, check whether:
-   - the Acquirer (or its known alias), AND
-   - the Target (or its known alias)
-   are both directly mentioned in the UK CMA case text.
-4. A deal is a valid match only if BOTH sides of the same deal are confidently matched from the UK CMA case text:
-   - one match for the Acquirer side
-   - one match for the Target side
-5. Do not return a match if only one side is present, even if that single company is an exact match.
-6. Allow only normal name variations when they clearly refer to the same company, such as:
-   - punctuation differences
-   - “Inc.” vs “Incorporated”
-   - “Corp.” vs “Corporation”
-   - “Ltd” vs “Limited”
-   - obvious spacing/casing differences
-7. Do not match based only on sector, business type, article topic, indirect association, or partial deal overlap.
-8. If the UK CMA case text does not directly name both companies for the same deal, return None.
-
-RESPONSE FORMAT:
-If you find a match, respond EXACTLY: Match: DEAL_ID
-If no deal satisfies this rule, respond exactly: None"""
-
-    with open(PROMPT_LOG_PATH, "a", encoding="utf-8") as f:
-        f.write(
-            f"\n{'='*80}\n{datetime.datetime.now()} - Prompt for: {title}\n{prompt}\n")
-
-    try:
-        res = openai_client.chat.completions.create(
-            model="gpt-5.2",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You identify M&A deals from UK CMA merger case titles. Respond only with Match: DEAL_ID or None.",
-                },
-                {"role": "user", "content": prompt},
-            ]
-        )
-        content = (res.choices[0].message.content or "").strip()
-        print(f"  🧠 LLM match response: {content}")
-        if not content.lower().startswith("match"):
-            return None
-        try:
-            _prefix, deal_id_raw = content.split(":", 1)
-            return deal_id_raw.strip() or None
-        except Exception:
-            return None
-    except Exception as e:
-        print(f"  ❌ LLM error: {e}")
-        raise
-
+    return llm_match_deal_id(
+        regulator_name="UK CMA",
+        case_sections={"CASE TITLE": title},
+        source_label="the UK CMA case text (title)",
+        deals=deals,
+    )
 
 def find_deal_by_id(deal_id):
     deal_by_id = {str(d.get("deal_id", ""))

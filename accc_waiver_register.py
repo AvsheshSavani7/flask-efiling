@@ -6,6 +6,7 @@ from mongodb_connection import (
 )
 from llm_verification_service import verify_usa_relation
 from accc_cases_register import match_case_to_deal
+from deal_match_llm import fetch_open_deals
 from log_utils import cleanup_old_logs, refresh_log_file
 from scraper_error_utils import collect_error, send_error_summary
 from email_subject_builder import build_subject
@@ -735,6 +736,7 @@ def _process_waiver_case(
     title: str,
     error_items: List[Dict[str, Any]],
     test_mode: bool = False,
+    open_deals: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Handle a completed waiver case and insert into DB.
@@ -749,7 +751,7 @@ def _process_waiver_case(
     if not test_mode:
         try:
             matched_deal_id = match_case_to_deal(
-                case_info.get("title", "") or title)
+                case_info.get("title", "") or title, deals=open_deals)
         except Exception as e:
             logger.exception(f"  Error during deal matching: {e}")
             collect_error(
@@ -946,6 +948,7 @@ def run_accc_waiver_register(test_mode: bool = False):
                 },
             )
             pw_page = context.new_page()
+            open_deals = fetch_open_deals()
 
             for idx, item in enumerate(all_items, 1):
                 try:
@@ -1017,6 +1020,7 @@ def run_accc_waiver_register(test_mode: bool = False):
                         title=title,
                         error_items=error_items,
                         test_mode=test_mode,
+                        open_deals=open_deals,
                     )
                     if backup:
                         new_cases.append(backup)

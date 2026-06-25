@@ -10,6 +10,7 @@ import sys
 import traceback
 from logging.handlers import RotatingFileHandler
 from openai import OpenAI
+from deal_match_llm import llm_match_deal_id, fetch_open_deals
 import anthropic
 from bs4 import BeautifulSoup
 import re
@@ -221,7 +222,7 @@ def get_deals_from_mongodb():
 
 def load_deals():
     global deals
-    deals = get_deals_from_mongodb()
+    deals = fetch_open_deals()
     logger.info(f"Loaded {len(deals)} deals from MongoDB")
     return deals
 
@@ -414,108 +415,26 @@ def extract_page_records(page, page_num=1):
 # ---------------------------------------------------------------------------
 
 def match_deal_with_llm(title_en, title_cn):
-    """Match an English translated title with deals using LLM."""
+    """
+    Use LLM to match SAMR public notice title against deals.
+    Returns deal_id string or None.
+    """
     global deals
-
     if not deals:
         logger.warning("Deals list is empty, reloading from MongoDB...")
         load_deals()
-
-    deals_list = []
-    for deal in deals:
-        deal_info = {"deal_id": deal.get("deal_id", "")}
-        target = deal.get("target") or deal.get("target_name", "")
-        acquirer = deal.get("acquirer") or deal.get("acquire_name", "")
-        if target:
-            deal_info["target"] = target
-        if acquirer:
-            deal_info["acquirer"] = acquirer
-
-        target_aliases = deal.get("target_aliases") or []
-        parent_aliases = deal.get("parent_aliases") or []
-        if isinstance(target_aliases, list) and target_aliases:
-            deal_info["target_aliases"] = target_aliases
-        if isinstance(parent_aliases, list) and parent_aliases:
-            deal_info["parent_aliases"] = parent_aliases
-
-        if target or acquirer:
-            deals_list.append(deal_info)
-
-    if not deals_list:
+    if not deals:
         logger.warning("No deals with company names found")
-        return "None"
-
-    lines = []
-    for d in deals_list:
-        line = f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {d.get('target', 'N/A')} | Acquirer: {d.get('acquirer', 'N/A')}"
-        t_aliases = d.get("target_aliases", []) or []
-        p_aliases = d.get("parent_aliases", []) or []
-        if t_aliases:
-            line += f" | Target aliases: {', '.join(str(a) for a in t_aliases)}"
-        if p_aliases:
-            line += f" | Parent aliases: {', '.join(str(a) for a in p_aliases)}"
-        lines.append(line)
-    deals_text = "\n".join(lines)
-
-    prompt = f"""
-You are an M&A deal analyst. Given the translated title of a Chinese public notice, determine whether it explicitly relates to any of the companies listed below.
-
-DEALS TO MATCH:
-{deals_text}
-
-TITLE (English translation):
-{title_en}
-
-TITLE (Original Chinese):
-{title_cn}
-
-INSTRUCTIONS:
-1. Extract only the company names that are explicitly and directly mentioned in the public notice title.
-2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, service providers, or any company not actually written in the public notice title.
-3. For each deal in the deals database, check whether:
-   - the Acquirer (or its known alias), AND
-   - the Target (or its known alias)
-   are both directly mentioned in the public notice title.
-4. A deal is a valid match only if BOTH sides of the same deal are confidently matched from the public notice title:
-   - one match for the Acquirer side
-   - one match for the Target side
-5. Do not return a match if only one side is present, even if that single company is an exact match.
-6. Allow only normal name variations when they clearly refer to the same company, such as:
-   - punctuation differences
-   - "Inc." vs "Incorporated"
-   - "Corp." vs "Corporation"
-   - "Ltd" vs "Limited"
-   - obvious spacing/casing differences
-7. Do not match based only on sector, business type, article topic, indirect association, or partial deal overlap.
-8. If the public notice title does not directly name both companies for the same deal, return None.
-
-RESPONSE FORMAT:
-- If you find BOTH the Acquirer and Target for one deal are directly matched, respond EXACTLY in this format:
-  Match: DEAL_ID
-  Example: Match: 69665014d0bb42af1044aecd
-
-- If no deal satisfies this rule, respond exactly:
-  None
-"""
-    try:
-        response = client.chat.completions.create(
-            model="gpt-5.2",
-            messages=[
-                {"role": "system", "content": "You are an expert in M&A deal recognition. Your job is to find matches between public notice titles and deal companies. If the title matches or is contained in any Target and Acquirer name, return the match. Be thorough and check all possibilities."},
-                {"role": "user", "content": prompt},
-            ],
-        )
-        result = response.choices[0].message.content.strip()
-        logger.info(f"LLM Response: {result}")
-        return result
-    except Exception as e:
-        logger.warning(f"LLM Error: {e}")
-        raise
-
-
-# ---------------------------------------------------------------------------
-# Utility
-# ---------------------------------------------------------------------------
+        return None
+    return llm_match_deal_id(
+        regulator_name="SAMR China Public Notice",
+        case_sections={
+            "TITLE (English translation)": title_en,
+            "TITLE (Original Chinese)": title_cn,
+        },
+        source_label="the public notice title",
+        deals=deals,
+    )
 
 def convert_datetime_to_string(obj):
     """Recursively convert datetime objects to strings for JSON serialization."""
@@ -932,10 +851,8 @@ def main(headless=True):
                     match_result = None
 
                 logger.info(f"Match result: {match_result}")
-                if match_result and match_result.lower() != "none" and match_result.lower().startswith("match"):
-                    deal_id = match_result.replace(
-                        "Match:", "").replace("match:", "").strip()
-
+                if match_result:
+                    deal_id = match_result
                     deal_match = None
                     for deal in deals:
                         if deal.get("deal_id") == deal_id:

@@ -21,6 +21,7 @@ from mongodb_connection import (
 )
 from llm_verification_service import verify_usa_relation
 from accc_cases_register import match_case_to_deal
+from deal_match_llm import fetch_open_deals
 from log_utils import cleanup_old_logs, refresh_log_file
 from scraper_error_utils import collect_error, send_error_summary
 from email_subject_builder import build_subject
@@ -1036,6 +1037,7 @@ def process_accc_cases_updates():
             return
 
         deals_collection = get_deals_collection()
+        open_deals = fetch_open_deals()
 
         cursor = cases_collection.find(
             {"acquisition_status": {"$regex": "^under assessment$", "$options": "i"}}
@@ -1176,7 +1178,7 @@ def process_accc_cases_updates():
                             continue
 
                     try:
-                        matched_deal_id = match_case_to_deal(title)
+                        matched_deal_id = match_case_to_deal(title, deals=open_deals)
                     except Exception as e:
                         logger.exception(f"Error during deal matching: {e}")
                         collect_error(

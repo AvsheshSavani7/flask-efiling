@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from playwright.sync_api import sync_playwright
 
+from deal_match_llm import llm_match_deal_id, fetch_open_deals
 from llm_verification_service import verify_usa_relation
 from scraper_error_utils import collect_error, send_error_summary
 from mongodb_connection import (
@@ -152,116 +153,36 @@ def utc_now_iso() -> str:
 
 def get_open_deals_for_matching() -> List[Dict[str, Any]]:
     """Fetch deals with deal_status in Open/Unknown/None for LLM matching."""
-    try:
-        collection = get_deals_collection()
-        if collection is None:
-            return []
-        status_filter = {
-            "$or": [
-                {"deal_status": {"$in": ["Open", "Unknown"]}},
-                {"deal_status": None},
-                {"deal_status": {"$exists": False}},
-            ]
-        }
-        deals = list(collection.find(status_filter))
-        for d in deals:
-            if "_id" in d:
-                d["deal_id"] = str(d["_id"])
-                d.pop("_id", None)
-        return deals
-    except Exception as e:
-        logger.exception(f"Error fetching deals: {e}")
-        raise
+    return fetch_open_deals()
 
 
 def match_case_to_deal(
-    title: str, parties: str, description: str, deals: List[Dict[str, Any]]
+    title: str,
+    parties: str,
+    description: str,
+    deals: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[str]:
     """
-    Ask LLM if this NZ case matches any deal. Returns deal_id or None.
-    Reference: nz_cases_update_monitor.py
+    Use LLM to match NZ Commerce Commission case against deals.
+
+    Args:
+        title:       Case title.
+        parties:     Parties string from case details.
+        description: Case description.
+        deals:       Pre-loaded deal list. Fetched from MongoDB if None.
+
+    Returns deal_id string or None.
     """
-    if not deals:
-        return None
-
-    lines = []
-    for d in deals:
-        target = d.get("target") or d.get("target_name", "N/A")
-        acquirer = d.get("acquirer") or d.get("acquire_name", "N/A")
-        line = f"Deal ID: {d.get('deal_id', 'N/A')} | Target: {target} | Acquirer: {acquirer}"
-        for alias_key in ("target_aliases", "parent_aliases"):
-            aliases = d.get(alias_key) or []
-            if aliases:
-                line += f" | {alias_key}: {', '.join(str(a) for a in aliases)}"
-        lines.append(line)
-    deals_text = "\n".join(lines)
-
-    prompt = f"""You are an expert M&A deal matcher. Determine whether this NZ Commerce Commission case directly refers to a specific deal in our deals database.
-
-DEALS DATABASE:
-{deals_text}
-
-NZ CASE:
-- Title: {title}
-- Parties: {parties}
-- Description: {description}
-
-INSTRUCTIONS:
-1. Extract only the company names that are explicitly and directly mentioned in the NZ case text (title, parties, description).
-2. Ignore indirect relevance, industry overlap, market similarity, inferred relationships, competitors, customers, regulators, service providers, or any company not actually written in the NZ case text.
-3. For each deal in the deals database, check whether:
-   - the Acquirer (or its known alias), AND
-   - the Target (or its known alias)
-   are both directly mentioned in the NZ case text.
-4. A deal is a valid match only if BOTH sides of the same deal are confidently matched from the NZ case text:
-   - one match for the Acquirer side
-   - one match for the Target side
-5. Do not return a match if only one side is present, even if that single company is an exact match.
-6. Allow only normal name variations when they clearly refer to the same company, such as:
-   - punctuation differences
-   - “Inc.” vs “Incorporated”
-   - “Corp.” vs “Corporation”
-   - “Ltd” vs “Limited”
-   - obvious spacing/casing differences
-7. Do not match based only on sector, business type, article topic, indirect association, or partial deal overlap.
-8. If the NZ case does not directly name both companies for the same deal, return None.
-
-RESPONSE FORMAT:
-If BOTH the Acquirer and Target for one deal are directly matched, respond EXACTLY: Match: DEAL_ID
-If no deal satisfies this rule, respond exactly: None"""
-
-    try:
-        res = client.chat.completions.create(
-            model="gpt-5.2",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an expert M&A deal matcher. Respond only with Match: DEAL_ID or None.",
-                },
-                {"role": "user", "content": prompt},
-            ]
-        )
-        content = (res.choices[0].message.content or "").strip()
-        tokens_used = getattr(res.usage, "total_tokens",
-                              "N/A") if res.usage else "N/A"
-        logger.info(
-            f"   LLM match — input: title={title[:60]}, parties={parties[:60]}")
-        logger.info(
-            f"   LLM match raw response: {content} (tokens={tokens_used})")
-        if not content.lower().startswith("match"):
-            logger.info(f"   LLM match result: None")
-            return None
-        try:
-            _prefix, deal_id_raw = content.split(":", 1)
-            deal_id = deal_id_raw.strip() or None
-            logger.info(f"   LLM match result: deal_id={deal_id}")
-            return deal_id
-        except Exception:
-            logger.warning(f"   LLM match result: malformed response")
-            return None
-    except Exception as e:
-        logger.exception(f"LLM match error: {e}")
-        raise
+    return llm_match_deal_id(
+        regulator_name="NZ Commerce Commission",
+        case_sections={
+            "CASE TITLE": title,
+            "PARTIES": parties,
+            "DESCRIPTION": description,
+        },
+        source_label="the NZ case text (title, parties, description)",
+        deals=deals,
+    )
 
 
 def _post_webhook(payload: Dict[str, Any]) -> bool:

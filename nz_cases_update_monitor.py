@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from playwright.sync_api import sync_playwright
 from nz_comcom_case_register_to_db import match_case_to_deal
+from deal_match_llm import fetch_open_deals
 
 from llm_verification_service import verify_usa_relation
 from scraper_error_utils import collect_error, send_error_summary
@@ -54,6 +55,7 @@ LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
 BASE_URL = os.getenv("BASE_URL")
+
 
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
@@ -137,26 +139,7 @@ def get_nz_cases_collection():
 
 def get_open_deals_for_matching() -> List[Dict[str, Any]]:
     """Fetch deals with deal_status in Open, Unknown, or None (for LLM matching)."""
-    try:
-        collection = get_deals_collection()
-        if collection is None:
-            return []
-        status_filter = {
-            "$or": [
-                {"deal_status": {"$in": ["Open", "Unknown"]}},
-                {"deal_status": None},
-                {"deal_status": {"$exists": False}},
-            ]
-        }
-        deals = list(collection.find(status_filter))
-        for d in deals:
-            if "_id" in d:
-                d["deal_id"] = str(d["_id"])
-                d.pop("_id", None)
-        return deals
-    except Exception as e:
-        logger.exception(f"Error fetching deals: {e}")
-        raise
+    return fetch_open_deals()
 
 
 # ---------- Detail page fetch (copied from nz_comcom_case_register_to_db) ----------
@@ -720,7 +703,8 @@ def send_nz_update_email_via_webhook(
         deal_id = dm.get("deal_id", "N/A")
         case_number = (case_info.get("case_details")
                        or {}).get("Case number", "N/A")
-        subject = build_subject("nz_comcom", "update", deal_match if deal_match else None)
+        subject = build_subject("nz_comcom", "update",
+                                deal_match if deal_match else None)
         payload = {
             "subject": subject,
             "html": html_content,
@@ -790,8 +774,6 @@ def update_nz_case_document(collection, doc_id: Any, updated_doc: Dict[str, Any]
     except Exception as e:
         logger.exception(f"Error updating nz_cases: {e}")
         return False
-
-
 
 
 # ---------- Main ----------
@@ -876,7 +858,8 @@ def run():
                                 "Could not fetch case detail page",
                                 step="fetch_case_detail_page",
                                 case_number=case_number or None,
-                                context={"detail_url": detail_url, "title": title},
+                                context={"detail_url": detail_url,
+                                         "title": title},
                             )
                             continue
 
@@ -884,7 +867,8 @@ def run():
                         current_info["status"] = case_doc.get("status", "")
                         current_info["tag"] = case_doc.get("tag", "")
                         current_info["outcome"] = case_doc.get("outcome", "")
-                        scraped_details = current_info.get("case_details") or {}
+                        scraped_details = current_info.get(
+                            "case_details") or {}
                         current_info["status"] = scraped_details.get(
                             "Status", case_doc.get("status", ""))
                         current_info["outcome"] = scraped_details.get(
@@ -901,7 +885,8 @@ def run():
                             f"[STEP 2.8] Changes detected ({len(changes)} item(s))")
                         for field_name, old_val, new_val, change_type in changes:
                             if field_name.startswith("Case details:"):
-                                logger.info(f"[STEP 2.9] {field_name} ({change_type})")
+                                logger.info(
+                                    f"[STEP 2.9] {field_name} ({change_type})")
                             elif field_name.startswith("Timeline") and isinstance(new_val, list):
                                 if field_name == "Timeline (new)":
                                     logger.info(
@@ -942,8 +927,10 @@ def run():
                             "description", updated_case.get("description"))
                         updated_case["case_details"] = current_info.get(
                             "case_details") or updated_case.get("case_details")
-                        updated_case["timeline"] = current_info.get("timeline", [])
-                        updated_case["documents"] = current_info.get("documents", [])
+                        updated_case["timeline"] = current_info.get(
+                            "timeline", [])
+                        updated_case["documents"] = current_info.get(
+                            "documents", [])
                         updated_case["updates_media"] = current_info.get(
                             "updates_media", [])
                         detail_status = (updated_case.get("case_details")
@@ -962,7 +949,8 @@ def run():
                         description = updated_case.get("description", "")
 
                         existing_deal_id = case_doc.get("deal_id")
-                        logger.info(f"[STEP 2.13] existing_deal_id: {existing_deal_id}")
+                        logger.info(
+                            f"[STEP 2.13] existing_deal_id: {existing_deal_id}")
                         if existing_deal_id:
                             deal = get_deal_by_id(str(existing_deal_id))
                             if deal:
@@ -970,7 +958,8 @@ def run():
                                 logger.info(f"[STEP 2.14] deal: {deal}")
                                 html_content = generate_nz_update_email_html(
                                     updated_case, deal, changes)
-                                logger.info(f"[STEP 2.15] html_content: {html_content}")
+                                logger.info(
+                                    f"[STEP 2.15] html_content: {html_content}")
                                 if not send_nz_update_email_via_webhook(
                                     updated_case, deal, html_content, changes
                                 ):
@@ -992,7 +981,8 @@ def run():
                                 deal_id = match_case_to_deal(
                                     title or "", parties, description or "", deals)
                             except Exception as e:
-                                logger.exception(f"[STEP 2.17] LLM match error: {e}")
+                                logger.exception(
+                                    f"[STEP 2.17] LLM match error: {e}")
                                 collect_error(
                                     error_items,
                                     str(e),
@@ -1036,7 +1026,8 @@ def run():
                                     is_usa = bool(verify_usa_relation(
                                         company_details=nz_details, case_type="NZ"))
                                 except Exception as e:
-                                    logger.exception(f"[STEP 2.19] USA check error: {e}")
+                                    logger.exception(
+                                        f"[STEP 2.19] USA check error: {e}")
                                     collect_error(
                                         error_items,
                                         str(e),
@@ -1106,8 +1097,10 @@ def run():
         logger.info("")
         logger.info("=" * 60)
         logger.info("SUMMARY")
-        logger.info(f"[STEP 2.24] Total cases checked          : {total_checked}")
-        logger.info(f"[STEP 2.25] Cases updated                : {total_updated}")
+        logger.info(
+            f"[STEP 2.24] Total cases checked          : {total_checked}")
+        logger.info(
+            f"[STEP 2.25] Cases updated                : {total_updated}")
         logger.info(
             f"[STEP 2.26] Errors encountered           : {len(error_items)}")
         logger.info(f"[STEP 2.27] Total time                   : {elapsed}s")

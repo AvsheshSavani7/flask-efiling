@@ -27,6 +27,7 @@ from mongodb_connection import (
     is_connected,
 )
 from cade_cases_register import match_case_to_deal
+from deal_match_llm import fetch_open_deals
 from html import escape as escape_html
 from log_utils import cleanup_old_logs, refresh_log_file
 from email_subject_builder import build_subject
@@ -1010,6 +1011,7 @@ def process_brazil_cases_updates(headless: bool = True):
                 {"deal_status": {"$exists": False}},
             ]
         }
+        open_deals = fetch_open_deals()
 
         cases = list(cases_collection.find({"is_open": True}))
         if not cases:
@@ -1173,7 +1175,7 @@ def process_brazil_cases_updates(headless: bool = True):
                         if interessados_text:
                             try:
                                 matched_deal_id = match_case_to_deal(
-                                    interessados_text, translated_text)
+                                    interessados_text, translated_text, deals=open_deals)
                             except Exception as e:
                                 logger.exception(
                                     f"[STEP 2.15] Error during deal matching: {e}")
