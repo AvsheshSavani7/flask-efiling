@@ -5,7 +5,7 @@ from mongodb_connection import (
     is_connected,
 )
 from llm_verification_service import verify_usa_relation
-from accc_cases_register import match_case_to_deal
+from accc_cases_register import match_case_to_deal, regex_match_deal_by_title
 from deal_match_llm import fetch_open_deals
 from log_utils import cleanup_old_logs, refresh_log_file
 from scraper_error_utils import collect_error, send_error_summary
@@ -295,10 +295,17 @@ def _post_email_payload(
     return post_email_payload(payload, webhook_url=webhook_url)
 
 
-def send_new_case_email(case_info: Dict[str, Any], deal_id: Optional[str], deal_match: Optional[Dict[str, Any]] = None) -> bool:
+def send_new_case_email(
+    case_info: Dict[str, Any],
+    deal_id: Optional[str],
+    deal_match: Optional[Dict[str, Any]] = None,
+    matched_by_regex: bool = False,
+) -> bool:
     case_number = case_info.get("case_number", "N/A")
     title = case_info.get("title", "N/A")
     subject = build_subject("accc_waiver", "new", deal_match)
+    if matched_by_regex:
+        subject = subject.replace("[FRMD]", "[FRRMD]")
     url = case_info.get("url", "")
     notification_date = case_info.get("effective_notification_date", "")
     acquisition_status = case_info.get("acquisition_status", "")
@@ -762,12 +769,27 @@ def _process_waiver_case(
             )
             matched_deal_id = None
 
+        # Regex fallback — only when LLM found nothing
+        matched_by_regex = False
+        if matched_deal_id:
+            llm_match_count += 1
+        else:
+            matched_deal_id = regex_match_deal_by_title(
+                case_info.get("title", "") or title, open_deals
+            )
+            if matched_deal_id:
+                matched_by_regex = True
+                regex_match_count += 1
+                logger.info(f"  Regex fallback matched deal_id={matched_deal_id}")
+            else:
+                logger.info("  No match (LLM + regex both returned None)")
+
         if matched_deal_id:
             case_info["deal_id"] = matched_deal_id
             logger.info(
                 f"  Deal match found (deal_id={matched_deal_id}); sending email")
             deal_match = get_deal_by_id(matched_deal_id)
-            if not send_new_case_email(case_info, matched_deal_id, deal_match):
+            if not send_new_case_email(case_info, matched_deal_id, deal_match, matched_by_regex=matched_by_regex):
                 collect_error(
                     error_items,
                     "Failed to send new-case email",
@@ -949,6 +971,8 @@ def run_accc_waiver_register(test_mode: bool = False):
             )
             pw_page = context.new_page()
             open_deals = fetch_open_deals()
+            llm_match_count = 0
+            regex_match_count = 0
 
             for idx, item in enumerate(all_items, 1):
                 try:
@@ -1068,10 +1092,12 @@ def run_accc_waiver_register(test_mode: bool = False):
         elapsed = round(time.time() - run_start, 1)
         logger.info("=" * 60)
         logger.info("SUMMARY")
-        logger.info(f"Total items from list     : {len(all_items)}")
-        logger.info(f"New/updated cases          : {len(new_cases)}")
-        logger.info(f"Errors encountered         : {len(error_items)}")
-        logger.info(f"Total time                 : {elapsed}s")
+        logger.info(f"  Total items from list        : {len(all_items)}")
+        logger.info(f"  LLM deal matches             : {llm_match_count}")
+        logger.info(f"  Regex fallback matches       : {regex_match_count}")
+        logger.info(f"  New/updated cases            : {len(new_cases)}")
+        logger.info(f"  Errors encountered           : {len(error_items)}")
+        logger.info(f"  Total time                   : {elapsed}s")
         logger.info("=" * 60)
         logger.info("ACCC Waiver Register scraper finished")
 

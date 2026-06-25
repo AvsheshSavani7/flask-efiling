@@ -1252,8 +1252,8 @@ def bundeskartellamt_update_monitor():
 def bundeskartellamt_press_release():
     """
     Scrape Bundeskartellamt press releases and match with deals.
-    Extracts press release list from Expertensuche URL, applies cutoff date, matches headline with deals via LLM,
-    appends to deal german_scrap array with source: press_release.
+    Extracts press release list from Expertensuche URL, applies 30-day cutoff, deduplicates by URL,
+    matches new records via LLM deal match and USA check, saves to german_press_releases collection.
     Process runs in background - returns immediately.
     """
     try:
@@ -1265,7 +1265,7 @@ def bundeskartellamt_press_release():
                 if result.get("success"):
                     logger.info(
                         f"Bundeskartellamt press release scraper completed. Extracted {result.get('total_extracted', 0)} records, "
-                        f"matched {result.get('total_matched', 0)}.")
+                        f"new processed {result.get('processed_new', 0)}, matched {result.get('matched_frmd', 0)}.")
                 else:
                     logger.warning(
                         f"Bundeskartellamt press release scraper failed: {result.get('error', 'Unknown error')}")

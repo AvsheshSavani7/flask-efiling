@@ -20,7 +20,7 @@ from mongodb_connection import (
     is_connected,
 )
 from llm_verification_service import verify_usa_relation
-from accc_cases_register import match_case_to_deal
+from accc_cases_register import match_case_to_deal, regex_match_deal_by_title
 from deal_match_llm import fetch_open_deals
 from log_utils import cleanup_old_logs, refresh_log_file
 from scraper_error_utils import collect_error, send_error_summary
@@ -934,6 +934,7 @@ def send_update_email(
     deal: Optional[Dict[str, Any]],
     changes: List[Tuple[str, Any, Any, str]],
     is_usa: bool = False,
+    matched_by_regex: bool = False,
 ) -> bool:
     try:
         html = generate_update_email_html(
@@ -943,6 +944,8 @@ def send_update_email(
         deal_id = str(deal.get("_id")) if deal and deal.get("_id") else None
 
         subject = build_subject("accc", "update", deal)
+        if matched_by_regex:
+            subject = subject.replace("[FRMD]", "[FRRMD]")
 
         payload = {
             "subject": subject,
@@ -1038,6 +1041,9 @@ def process_accc_cases_updates():
 
         deals_collection = get_deals_collection()
         open_deals = fetch_open_deals()
+
+        llm_match_count = 0
+        regex_match_count = 0
 
         cursor = cases_collection.find(
             {"acquisition_status": {"$regex": "^under assessment$", "$options": "i"}}
@@ -1189,10 +1195,22 @@ def process_accc_cases_updates():
                         )
                         matched_deal_id = None
 
-                    logger.info(f"  Matched: {matched_deal_id}")
+                    # Regex fallback — only when LLM found nothing
+                    matched_by_regex = False
+                    if matched_deal_id:
+                        llm_match_count += 1
+                        logger.info(f"  LLM matched: deal_id={matched_deal_id}")
+                    else:
+                        matched_deal_id = regex_match_deal_by_title(title, open_deals)
+                        if matched_deal_id:
+                            matched_by_regex = True
+                            regex_match_count += 1
+                            logger.info(f"  Regex fallback matched deal_id={matched_deal_id}")
+                        else:
+                            logger.info("  No match (LLM + regex both returned None)")
+
                     if matched_deal_id:
                         deal_id_str = matched_deal_id
-                        logger.info(f"  LLM matched case to deal {deal_id_str}")
 
                         current_case["deal_id"] = deal_id_str
 
@@ -1208,7 +1226,7 @@ def process_accc_cases_updates():
                         else:
                             deal = None
 
-                        if not send_update_email(case_doc, current_case, deal, changes):
+                        if not send_update_email(case_doc, current_case, deal, changes, matched_by_regex=matched_by_regex):
                             collect_error(
                                 error_items,
                                 "Failed to send update email",
@@ -1316,6 +1334,8 @@ URL: {url}
         logger.info("SUMMARY")
         logger.info(f"  Total cases checked          : {total_checked}")
         logger.info(f"  Cases with changes           : {total_changed}")
+        logger.info(f"  LLM deal matches             : {llm_match_count}")
+        logger.info(f"  Regex fallback matches       : {regex_match_count}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")
         logger.info("=" * 60)

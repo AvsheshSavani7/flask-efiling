@@ -19,6 +19,7 @@ from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
+import re
 import time
 
 import requests
@@ -111,6 +112,7 @@ PROXY_DICT = {
     "http": f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}",
     "https": f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}",
 }
+
 
 def utc_now_iso() -> str:
     """UTC timestamp in ISO-8601 with Z suffix."""
@@ -283,14 +285,106 @@ def match_case_to_deal(title: str, deals: Optional[List[Dict[str, Any]]] = None)
     )
 
 
+# ACCC titles follow "ACQUIRER - TARGET" or "ACQUIRER – TARGET" format.
+# Split only on the first dash (hyphen, en dash, em dash) to preserve
+# multi-word names on each side.
+_DASH_SEPARATOR = re.compile(r"\s*[–—\-]\s*")
+
+_LEGAL_SUFFIXES = re.compile(
+    r"\b(pty|ltd|limited|inc|incorporated|corp|corporation|"
+    r"plc|llc|holdings|group|co|company|aust|australia|nv|sa|ag|se|gmbh)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalise_name(name: str) -> str:
+    """Lowercase, strip legal suffixes and punctuation for fuzzy comparison."""
+    name = name.lower()
+    name = _LEGAL_SUFFIXES.sub("", name)
+    name = re.sub(r"[^\w\s]", " ", name)
+    return re.sub(r"\s+", " ", name).strip()
+
+
+def regex_match_deal_by_title(
+    title: str,
+    deals: List[Dict[str, Any]],
+) -> Optional[str]:
+    """
+    Regex fallback for ACCC titles which follow 'ACQUIRER - TARGET' format.
+    Splits on the first dash variant only (maxsplit=1) so multi-word names are
+    preserved. Tries both orientations (left=acq/right=tgt and reversed).
+    Requires BOTH sides to match to avoid false positives.
+    Returns deal_id or None.
+    """
+    if not title or not deals:
+        return None
+
+    parts = _DASH_SEPARATOR.split(title, maxsplit=1)
+    if len(parts) < 2:
+        return None
+
+    left = _normalise_name(parts[0].strip())
+    right = _normalise_name(parts[1].strip())
+
+    if not left or not right:
+        return None
+
+    for deal in deals:
+        # Build full acquirer-side name set: main field + parent_aliases
+        acq_names: set = set()
+        for f in [deal.get("acquirer"), deal.get("acquire_name")]:
+            if f:
+                acq_names.add(_normalise_name(f))
+        for alias in (deal.get("parent_aliases") or []):
+            if alias:
+                acq_names.add(_normalise_name(alias))
+        acq_names.discard("")
+
+        # Build full target-side name set: main field + target_aliases
+        tgt_names: set = set()
+        for f in [deal.get("target"), deal.get("target_name")]:
+            if f:
+                tgt_names.add(_normalise_name(f))
+        for alias in (deal.get("target_aliases") or []):
+            if alias:
+                tgt_names.add(_normalise_name(alias))
+        tgt_names.discard("")
+
+        if not acq_names or not tgt_names:
+            continue
+
+        # normal: left=acquirer side, right=target side
+        match_normal = (
+            any(a in left or left in a for a in acq_names) and
+            any(t in right or right in t for t in tgt_names)
+        )
+        # reversed: left=target side, right=acquirer side
+        match_reversed = (
+            any(t in left or left in t for t in tgt_names) and
+            any(a in right or right in a for a in acq_names)
+        )
+
+        if match_normal or match_reversed:
+            return deal.get("deal_id")
+
+    return None
+
+
 def _post_email_payload(payload: Dict[str, Any]) -> bool:
     return post_email_payload(payload)
 
 
-def send_new_case_email(case_info: Dict[str, Any], deal_id: Optional[str], deal_match: Optional[Dict[str, Any]] = None) -> bool:
+def send_new_case_email(
+    case_info: Dict[str, Any],
+    deal_id: Optional[str],
+    deal_match: Optional[Dict[str, Any]] = None,
+    matched_by_regex: bool = False,
+) -> bool:
     case_number = case_info.get("case_number", "N/A")
     title = case_info.get("title", "N/A")
     subject = build_subject("accc", "new", deal_match)
+    if matched_by_regex:
+        subject = subject.replace("[FRMD]", "[FRRMD]")
     url = case_info.get("url", "")
     notification_date = case_info.get("effective_notification_date", "")
     acquisition_status = case_info.get("acquisition_status", "")
@@ -792,10 +886,18 @@ def run_accc_cases_register(test_mode: bool = False):
             )
             return
 
+        # Load deals once — reused by LLM match and regex fallback
+        deals = fetch_open_deals()
+        logger.info(f"Loaded {len(deals)} open/unknown deals for matching")
+
+        llm_match_count = 0
+        regex_match_count = 0
+
         # ------------------------------------------------------------------
         # Step 1: Fetch list page HTML via residential proxy (requests)
         # ------------------------------------------------------------------
-        logger.info(f"Loading ACCC acquisitions register list page: {LIST_URL}")
+        logger.info(
+            f"Loading ACCC acquisitions register list page: {LIST_URL}")
         logger.info(f"Using residential proxy: {PROXY_HOST}:{PROXY_PORT}")
 
         list_headers = {
@@ -823,7 +925,8 @@ def run_accc_cases_register(test_mode: bool = False):
                 items = parse_list_items(resp.text)
                 logger.info(f"[STEP 1.3] Items: {items}")
                 if not items:
-                    raise Exception("HTML fetched but no .views-row items found")
+                    raise Exception(
+                        "HTML fetched but no .views-row items found")
                 logger.info(
                     f"Found {len(items)} list items from acquisitions register")
                 break
@@ -880,7 +983,8 @@ def run_accc_cases_register(test_mode: bool = False):
                         f"[{idx}/{len(items)}] Case {case_number}: {title}")
 
                     if not case_number or not url:
-                        logger.warning("  Missing case_number or url; skipping")
+                        logger.warning(
+                            "  Missing case_number or url; skipping")
                         continue
 
                     if not test_mode and case_exists(collection, case_number):
@@ -913,10 +1017,10 @@ def run_accc_cases_register(test_mode: bool = False):
                     case_info.setdefault("created_at", now_iso)
                     case_info["updated_at"] = now_iso
 
+                    case_title = case_info.get("title", "") or title
                     try:
                         matched_deal_id = match_case_to_deal(
-                            case_info.get("title", "") or title
-                        )
+                            case_title, deals=deals)
                     except Exception as e:
                         logger.exception(f"Error during deal matching: {e}")
                         collect_error(
@@ -927,6 +1031,22 @@ def run_accc_cases_register(test_mode: bool = False):
                         )
                         matched_deal_id = None
 
+                    # Regex fallback — only when LLM found nothing
+                    matched_by_regex = False
+                    if matched_deal_id:
+                        llm_match_count += 1
+                    else:
+                        matched_deal_id = regex_match_deal_by_title(
+                            case_title, deals)
+                        if matched_deal_id:
+                            matched_by_regex = True
+                            regex_match_count += 1
+                            logger.info(
+                                f"  Regex fallback matched deal_id={matched_deal_id}")
+                        else:
+                            logger.info(
+                                "  No match (LLM + regex both returned None)")
+
                     if test_mode:
                         if matched_deal_id:
                             case_info["deal_id"] = matched_deal_id
@@ -934,7 +1054,8 @@ def run_accc_cases_register(test_mode: bool = False):
                                 f"  Deal match found (deal_id={matched_deal_id})"
                             )
 
-                        action = upsert_case_by_case_number(collection, case_info)
+                        action = upsert_case_by_case_number(
+                            collection, case_info)
                         logger.info(
                             f"  [TEST MODE] Upserted case into accc_cases ({action})"
                         )
@@ -949,7 +1070,7 @@ def run_accc_cases_register(test_mode: bool = False):
                                 f"  Deal match found (deal_id={matched_deal_id}); sending email"
                             )
                             deal_match = get_deal_by_id(matched_deal_id)
-                            if not send_new_case_email(case_info, matched_deal_id, deal_match):
+                            if not send_new_case_email(case_info, matched_deal_id, deal_match, matched_by_regex=matched_by_regex):
                                 collect_error(
                                     error_items,
                                     "Failed to send new-case email",
@@ -1028,7 +1149,8 @@ def run_accc_cases_register(test_mode: bool = False):
                     serializable_cases.append(d)
 
                 with open(BACKUP_JSON, "w", encoding="utf-8") as f:
-                    json.dump(serializable_cases, f, indent=2, ensure_ascii=False)
+                    json.dump(serializable_cases, f,
+                              indent=2, ensure_ascii=False)
                 logger.info(
                     f"Saved {len(serializable_cases)} new cases to backup JSON: {BACKUP_JSON}"
                 )
@@ -1050,7 +1172,9 @@ def run_accc_cases_register(test_mode: bool = False):
         elapsed = round(time.time() - run_start, 1)
         logger.info("=" * 60)
         logger.info("SUMMARY")
-        logger.info(f"Total cases checked: {len(items)}")
+        logger.info(f"  Total cases checked          : {len(items)}")
+        logger.info(f"  LLM deal matches             : {llm_match_count}")
+        logger.info(f"  Regex fallback matches       : {regex_match_count}")
         logger.info(f"  New cases inserted           : {len(new_cases)}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")

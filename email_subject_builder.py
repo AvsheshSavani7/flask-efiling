@@ -46,6 +46,7 @@ EVENT_LABELS: dict[str, str] = {
     "new":              "New Regulatory Case",
     "update":           "Regulatory Update",
     "under_assessment": "Under Assessment",
+    "press_release":    "Press Release",
 }
 
 
