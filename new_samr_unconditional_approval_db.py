@@ -11,6 +11,7 @@ import traceback
 from logging.handlers import RotatingFileHandler
 from openai import OpenAI
 from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_regex import apply_regex_match_subject, regex_match_samr_deal
 from bs4 import BeautifulSoup
 import re
 from bson import ObjectId
@@ -26,7 +27,7 @@ from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
 from email_subject_builder import build_subject
 from n8n_email_service import post_email_payload
-from typing import Any
+from typing import Any, Optional, Tuple
 
 # Configuration
 CUTOFF_DATE = (datetime.datetime.now() - datetime.timedelta(days=6)).replace(
@@ -115,6 +116,8 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 deals = []
 all_extracted_records = []
 matched_data = []
+llm_match_count = 0
+regex_match_count = 0
 
 
 # ---------------------------------------------------------------------------
@@ -575,21 +578,22 @@ RESPONSE:
 # LLM: match a samr_case title against deals
 # ---------------------------------------------------------------------------
 
-def match_samr_case_to_deals(samr_case):
+def match_samr_case_to_deals(samr_case) -> Tuple[Optional[dict], bool]:
     """
-    Use LLM to match SAMR case title against deals.
-    Returns deal_match dict or None.
+    Match SAMR case title against deals (LLM, then regex fallback on title_en).
+    Returns (deal_match dict or None, matched_by_regex).
     """
-    global deals
+    global deals, llm_match_count, regex_match_count
     if not deals:
         load_deals()
     if not deals:
-        return None
+        return None, False
 
     title_en = samr_case.get("title_en", "")
     title_cn = samr_case.get("title_cn", "")
     logger.info(f"samr_case title: {title_en} {title_cn}")
 
+    matched_by_regex = False
     deal_id = llm_match_deal_id(
         regulator_name="SAMR China",
         case_sections={
@@ -600,14 +604,25 @@ def match_samr_case_to_deals(samr_case):
         deals=deals,
     )
     if not deal_id:
-        return None
+        deal_id = regex_match_samr_deal(title_en, deals)
+        if deal_id:
+            matched_by_regex = True
+            logger.info(f"  Regex fallback matched deal_id={deal_id}")
+
+    if not deal_id:
+        return None, False
 
     for deal in deals:
         if deal.get("deal_id") == deal_id:
-            return deal
+            if matched_by_regex:
+                regex_match_count += 1
+            else:
+                llm_match_count += 1
+            return deal, matched_by_regex
 
-    logger.warning(f"  LLM returned deal_id '{deal_id}' but not found in loaded deals")
-    return None
+    logger.warning(
+        f"  Match returned deal_id '{deal_id}' but not found in loaded deals")
+    return None, False
 
 def convert_datetime_to_string(obj):
     if isinstance(obj, datetime.datetime):
@@ -719,10 +734,14 @@ def generate_samr_unconditional_email_html(samr_case, deal_match, unconditional_
     return subject, html_email
 
 
-def send_samr_unconditional_email_via_webhook(samr_case, deal_match, unconditional_data):
+def send_samr_unconditional_email_via_webhook(
+    samr_case, deal_match, unconditional_data, matched_by_regex: bool = False,
+):
     try:
         subject, html_email = generate_samr_unconditional_email_html(
             samr_case, deal_match, unconditional_data)
+        subject = apply_regex_match_subject(
+            subject, matched_by_regex=matched_by_regex)
         logger.info(f"Generated email subject: {subject}")
 
         target = deal_match.get("target") or deal_match.get(
@@ -1006,7 +1025,7 @@ def process_table_row(table_row, samr_cases_list, listing_record, error_items: l
         # Case B: no deal_id → try LLM deal matching
         logger.info("  No deal_id on samr_case, trying LLM deal match...")
         try:
-            deal_match = match_samr_case_to_deals(matched_case)
+            deal_match, matched_by_regex = match_samr_case_to_deals(matched_case)
         except Exception as e:
             logger.exception(f"  Deal match failed for {row_label}: {e}")
             if error_items is not None:
@@ -1020,6 +1039,7 @@ def process_table_row(table_row, samr_cases_list, listing_record, error_items: l
                     },
                 )
             deal_match = None
+            matched_by_regex = False
 
         if deal_match:
             deal_id = deal_match.get("deal_id", "")
@@ -1029,7 +1049,8 @@ def process_table_row(table_row, samr_cases_list, listing_record, error_items: l
             save_samr_unconditional_data_to_deal(
                 deal_match, unconditional_data)
             send_samr_unconditional_email_via_webhook(
-                matched_case, deal_match, unconditional_data)
+                matched_case, deal_match, unconditional_data,
+                matched_by_regex=matched_by_regex)
             matched_data.append({
                 "deal_id": deal_id,
                 "samr_case_title": case_title,
@@ -1085,7 +1106,7 @@ Operators (CN): {table_row['operators_cn']}
 def main(headless=True):
     global LOG_FILE
     LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
-    global all_extracted_records, matched_data, deals
+    global all_extracted_records, matched_data, deals, llm_match_count, regex_match_count
     run_start = datetime.datetime.now()
     error_items: list[dict[str, Any]] = []
 
@@ -1094,6 +1115,8 @@ def main(headless=True):
     new_records: list[dict] = []
     skipped = 0
     translated = 0
+    llm_match_count = 0
+    regex_match_count = 0
     logger.info("=" * 60)
     logger.info("Starting SAMR Unconditional Cases Register")
     logger.info(f"Log file: {LOG_FILE}")
@@ -1299,6 +1322,8 @@ def main(headless=True):
         logger.info(f"  Translated (new)             : {translated}")
         logger.info(f"  New listings processed       : {len(new_records)}")
         logger.info(f"  Total matches found          : {len(matched_data)}")
+        logger.info(f"  LLM deal matches             : {llm_match_count}")
+        logger.info(f"  Regex fallback matches       : {regex_match_count}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")
         logger.info("=" * 60)
