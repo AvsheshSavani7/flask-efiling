@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_regex import regex_match_bka_deal
 from email_subject_builder import build_subject
 from llm_verification_service import verify_country_relation
 from mongodb_connection import get_database, is_connected, init_mongodb_connection
@@ -413,7 +414,7 @@ def main():
     error_items: List[Dict[str, Any]] = []
     all_after_cutoff: List[Dict[str, Any]] = []
     new_records: List[Dict[str, Any]] = []
-    stats = {"saved": 0, "matched": 0, "usa_related": 0, "silent": 0}
+    stats = {"saved": 0, "matched": 0, "regex_matched": 0, "usa_related": 0, "silent": 0}
 
     logger.info("=" * 60)
     logger.info("BUNDESKARTELLAMT PRESS RELEASE SCRAPER")
@@ -568,6 +569,23 @@ def main():
                             context={"title": title[:80], "url": url},
                         )
 
+                # Regex fallback — only when LLM found nothing
+                # Uses title_english (preferred) and title_german (German fallback)
+                matched_by_regex = False
+                if not deal_match:
+                    regex_deal_id = regex_match_bka_deal(
+                        doc["title_english"], deals
+                    )
+                    if regex_deal_id:
+                        deal_match = deal_by_id.get(regex_deal_id)
+                        if deal_match:
+                            matched_by_regex = True
+                            logger.info("  Regex fallback matched deal_id=%s", regex_deal_id)
+                        else:
+                            logger.info("  Regex fallback returned deal_id=%s but not found in deal_by_id", regex_deal_id)
+                    else:
+                        logger.info("  No match (LLM + regex both returned None)")
+
                 # --- 7d: Branch ---
                 is_usa = False
                 if deal_match:
@@ -613,7 +631,11 @@ def main():
                         if deal_match:
                             subject, html_body = generate_matched_email(
                                 doc, deal_match)
-                            stats["matched"] += 1
+                            if matched_by_regex:
+                                subject = subject.replace("[FRMD]", "[FRRMD]")
+                                stats["regex_matched"] += 1
+                            else:
+                                stats["matched"] += 1
                             if not send_email_via_webhook(
                                 subject, html_body, url, deal_id=deal_match.get(
                                     "deal_id")
@@ -681,6 +703,7 @@ def main():
         logger.info("  New processed         : %d", len(new_records))
         logger.info("  Saved                 : %d", stats["saved"])
         logger.info("  Deal matches [FRMD]   : %d", stats["matched"])
+        logger.info("  Deal matches [FRRMD]  : %d", stats["regex_matched"])
         logger.info("  USA-related  [FRUD]   : %d", stats["usa_related"])
         logger.info("  Silent saves          : %d", stats["silent"])
         logger.info("  Errors                : %d", len(error_items))

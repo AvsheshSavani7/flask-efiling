@@ -466,6 +466,13 @@ def find_deal_by_id(deal_id):
 
 
 # ===================================================================
+# Regex fallback deal matching (UK CMA)
+# — shared function imported from the scraper; deals passed explicitly
+# ===================================================================
+from deal_match_regex import regex_match_uk_cma_deal
+
+
+# ===================================================================
 # LLM: verify USA relation
 # ===================================================================
 
@@ -743,7 +750,7 @@ def send_email_via_webhook(subject, html_email, extra_payload=None):
 # Process a single open case
 # ===================================================================
 
-def process_case(db_record, error_items: List[Dict[str, Any]]):
+def process_case(db_record, error_items: List[Dict[str, Any]], match_stats: Optional[Dict[str, int]] = None):
     doc_id = db_record.get("_id")
     detail_url = db_record.get("detail_url", "")
     title = db_record.get("title", "N/A")
@@ -855,6 +862,21 @@ def process_case(db_record, error_items: List[Dict[str, Any]]):
                 )
                 matched_deal_id = None
 
+            # Regex fallback — only when LLM found nothing
+            matched_by_regex = False
+            if matched_deal_id:
+                if match_stats is not None:
+                    match_stats["llm"] += 1
+            else:
+                matched_deal_id = regex_match_uk_cma_deal(case_info["title"], deals)
+                if matched_deal_id:
+                    matched_by_regex = True
+                    if match_stats is not None:
+                        match_stats["regex"] += 1
+                    print(f"  🔍 Regex fallback matched deal_id={matched_deal_id}")
+                else:
+                    print(f"  ➖ No match (LLM + regex both returned None)")
+
             print(f"STEP 1.5.16: Matched deal ID: {matched_deal_id}")
             deal_match = find_deal_by_id(
                 matched_deal_id) if matched_deal_id else None
@@ -870,6 +892,8 @@ def process_case(db_record, error_items: List[Dict[str, Any]]):
 
                 subj, html = generate_update_email_html(
                     case_info, changes, deal_match)
+                if matched_by_regex:
+                    subj = subj.replace("[FRMD]", "[FRRMD]")
                 if not send_email_via_webhook(subj, html, {
                     "deal_id": deal_id,
                     "title": case_info["title"],
@@ -974,6 +998,7 @@ def main():
     error_items: List[Dict[str, Any]] = []
     updated_count = 0
     unchanged_count = 0
+    match_stats = {"llm": 0, "regex": 0}
     open_cases: List[Dict[str, Any]] = []
     logger.info("=" * 60)
     logger.info("STEP 1: Starting UK CMA Cases Update Monitor")
@@ -1014,7 +1039,7 @@ def main():
             title = case.get("title", "N/A")
             print(f"\n[{idx}/{len(open_cases)}] {title[:70]}")
 
-            had_changes = process_case(case, error_items)
+            had_changes = process_case(case, error_items, match_stats=match_stats)
             print(f"STEP 1.5.3: Had changes: {had_changes}")
             if had_changes:
                 updated_count += 1
@@ -1048,6 +1073,10 @@ def main():
             f"STEP 1.6.4: Total open cases checked     : {len(open_cases)}")
         logger.info(
             f"STEP 1.6.5: Cases with updates           : {updated_count}")
+        logger.info(
+            f"STEP 1.6.5a: LLM deal matches            : {match_stats['llm']}")
+        logger.info(
+            f"STEP 1.6.5b: Regex fallback matches      : {match_stats['regex']}")
         logger.info(
             f"STEP 1.6.6: Cases unchanged              : {unchanged_count}")
         logger.info(

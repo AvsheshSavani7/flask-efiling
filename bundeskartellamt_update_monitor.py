@@ -41,6 +41,7 @@ from mongodb_connection import (
 from html import escape as escape_html
 from llm_verification_service import verify_country_relation
 from bundeskartellamt_initial_proxy import match_deal_with_llm
+from deal_match_regex import regex_match_bka_deal
 from deal_match_llm import fetch_open_deals
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
@@ -509,7 +510,7 @@ def main():
     run_start = time.time()
     error_items: List[Dict[str, Any]] = []
     stats = {"checked": 0, "unchanged": 0, "updated": 0, "not_found": 0,
-             "email_sent": 0, "matched_new": 0, "usa_related": 0}
+             "email_sent": 0, "matched_new": 0, "regex_matched_new": 0, "usa_related": 0}
     logger.info("=" * 60)
     logger.info("[STEP 1] Starting Germany Cases Update Monitor")
     logger.info(f"Log file: {LOG_FILE}")
@@ -658,15 +659,34 @@ def main():
 
                     deal_match, _, _ = parse_llm_match(match_result or "", deal_by_id)
 
+                    # Regex fallback — only when LLM found nothing
+                    # Uses pursue_en (translated, preferred) and pursue (German)
+                    matched_by_regex = False
+                    if not deal_match:
+                        regex_deal_id = regex_match_bka_deal(pursue_en, deals)
+                        if regex_deal_id:
+                            deal_match = deal_by_id.get(regex_deal_id)
+                            if deal_match:
+                                matched_by_regex = True
+                                logger.info(f"  Regex fallback matched deal_id={regex_deal_id}")
+                            else:
+                                logger.info(f"  Regex fallback returned deal_id={regex_deal_id} but not found in deal_by_id")
+                        else:
+                            logger.info("  No match (LLM + regex both returned None)")
+
                     if deal_match:
                         deal = deal_match
                         update_fields["deal_id"] = deal_match.get("deal_id")
                         logger.info(
-                            f"  New match: deal_id={deal_match.get('deal_id')} → sending [FRMD] update email")
+                            f"  New match: deal_id={deal_match.get('deal_id')} → sending update email")
                         subject, html = generate_update_email(
                             merged, changes, deal)
+                        if matched_by_regex:
+                            subject = subject.replace("[FRMD]", "[FRRMD]")
+                            stats["regex_matched_new"] += 1
+                        else:
+                            stats["matched_new"] += 1
                         stats["email_sent"] += 1
-                        stats["matched_new"] += 1
                         if not send_email_via_webhook(
                             subject, html, fn,
                             deal_id=deal_match.get("deal_id"),
@@ -771,7 +791,8 @@ def main():
         logger.info(f"  Not found in listing         : {stats['not_found']}")
         logger.info(f"  Updated                      : {stats['updated']}")
         logger.info(f"  Emails sent                  : {stats['email_sent']}")
-        logger.info(f"  New deal matches             : {stats['matched_new']}")
+        logger.info(f"  New deal matches (LLM)       : {stats['matched_new']}")
+        logger.info(f"  New deal matches (regex)     : {stats['regex_matched_new']}")
         logger.info(f"  USA-related                  : {stats['usa_related']}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")

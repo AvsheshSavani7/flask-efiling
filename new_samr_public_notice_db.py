@@ -11,6 +11,7 @@ import traceback
 from logging.handlers import RotatingFileHandler
 from openai import OpenAI
 from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_regex import apply_regex_match_subject, regex_match_samr_deal
 import anthropic
 from bs4 import BeautifulSoup
 import re
@@ -539,9 +540,11 @@ def generate_samr_email_html(samr_data, deal_match):
     return subject, html_email
 
 
-def send_samr_email_via_webhook(samr_data, deal_match):
+def send_samr_email_via_webhook(samr_data, deal_match, matched_by_regex: bool = False):
     try:
         subject, html_email = generate_samr_email_html(samr_data, deal_match)
+        subject = apply_regex_match_subject(
+            subject, matched_by_regex=matched_by_regex)
         logger.info(f"Generated email subject: {subject}")
 
         webhook_url = resolve_webhook_url(subject)
@@ -699,6 +702,8 @@ def main(headless=True):
     new_records: list[dict] = []
     skipped = 0
     translated = 0
+    llm_match_count = 0
+    regex_match_count = 0
     logger.info("=" * 60)
     logger.info("[STEP 1] Starting SAMR Public Notice Register")
     logger.info(f"Log file: {LOG_FILE}")
@@ -838,8 +843,10 @@ def main(headless=True):
                     save_to_samr_cases(samr_case_doc)
                     continue
 
+                matched_deal_id = None
+                matched_by_regex = False
                 try:
-                    match_result = match_deal_with_llm(title_en, title_cn)
+                    matched_deal_id = match_deal_with_llm(title_en, title_cn)
                 except Exception as e:
                     logger.exception(f"  LLM match failed: {e}")
                     collect_error(
@@ -848,11 +855,23 @@ def main(headless=True):
                         step="match_deal_with_llm",
                         context={"title": title_en[:80], "url": url},
                     )
-                    match_result = None
+                    matched_deal_id = None
 
-                logger.info(f"Match result: {match_result}")
-                if match_result:
-                    deal_id = match_result
+                if matched_deal_id:
+                    llm_match_count += 1
+                    logger.info(f"  LLM match: deal_id={matched_deal_id}")
+                else:
+                    matched_deal_id = regex_match_samr_deal(title_en, deals)
+                    if matched_deal_id:
+                        matched_by_regex = True
+                        regex_match_count += 1
+                        logger.info(
+                            f"  Regex fallback matched deal_id={matched_deal_id}")
+                    else:
+                        logger.info("  No match (LLM + regex both returned None)")
+
+                if matched_deal_id:
+                    deal_id = matched_deal_id
                     deal_match = None
                     for deal in deals:
                         if deal.get("deal_id") == deal_id:
@@ -878,7 +897,9 @@ def main(headless=True):
                         try:
                             samr_data = {
                                 k: v for k, v in matched_result.items() if k != "matched_deal"}
-                            send_samr_email_via_webhook(samr_data, deal_match)
+                            send_samr_email_via_webhook(
+                                samr_data, deal_match,
+                                matched_by_regex=matched_by_regex)
                         except Exception as e:
                             logger.exception(
                                 f"  Error sending email notification: {e}")
@@ -890,9 +911,8 @@ def main(headless=True):
                             )
                     else:
                         logger.warning(
-                            f"  LLM found match but deal not found in loaded deals: {deal_id}")
+                            f"  Match returned deal_id={deal_id} but deal not found in loaded deals")
                 else:
-                    logger.info("  No match")
                     try:
                         company_details = title_en if title_en and title_en != "[Translation failed]" else title_cn
                         is_usa_related = verify_usa_relation(
@@ -970,6 +990,8 @@ def main(headless=True):
         logger.info(f"  Translated (new)             : {translated}")
         logger.info(f"  New records processed        : {len(new_records)}")
         logger.info(f"  Total matches found          : {len(matched_data)}")
+        logger.info(f"  LLM deal matches             : {llm_match_count}")
+        logger.info(f"  Regex fallback matches       : {regex_match_count}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")
         logger.info("=" * 60)

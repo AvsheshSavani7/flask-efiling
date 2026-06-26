@@ -15,6 +15,8 @@ Flow:
    - If deal_id present → generate update email with change highlights → send [FRMD]
    - If no deal_id → LLM match deal
      -> matched → email + deal banner → send [FRMD] → add deal_id
+   - Regex fallback (if LLM found nothing): flat-scan company names
+     -> matched → email with [FRRMD] subject → send → add deal_id
      -> not matched → LLM USA check
         -> USA → email → send [FRUD]
         -> not USA → no email
@@ -60,6 +62,7 @@ import traceback
 
 from fs_html_scraper import parse_case_html
 from new_fs_cases_html import match_case_to_deal
+from deal_match_regex import apply_regex_match_subject, regex_match_fs_deal
 from log_utils import cleanup_old_logs, refresh_log_file
 from email_subject_builder import build_subject
 from n8n_email_service import post_email_payload
@@ -851,6 +854,8 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
     error_items: List[Dict[str, Any]] = []
     changed_count = 0
     closed_count = 0
+    llm_match_count = 0
+    regex_match_count = 0
     total = 0
 
     logger.info("=" * 60)
@@ -1074,10 +1079,11 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
 
                     logger.info(
                         f"Step 8.6:  [{case_number}] Path B: no deal_id -> LLM deal match | companies={companies}")
-                    match_result = None
+                    matched_deal_id = None
+                    matched_by_regex = False
                     if deals:
                         try:
-                            match_result = match_case_to_deal(companies, deals)
+                            matched_deal_id = match_case_to_deal(companies, deals)
                         except Exception as e:
                             logger.exception(
                                 f"Step 8.6:  [{case_number}] LLM deal match error: {e}")
@@ -1087,16 +1093,33 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                                 case_number=case_number,
                                 step="match_case_to_deal",
                             )
-                    logger.info(
-                        f"Step 8.7:  [{case_number}] match_case_to_deal() -> {match_result}")
+                            matched_deal_id = None
+
+                    if matched_deal_id:
+                        llm_match_count += 1
+                        logger.info(
+                            f"Step 8.7:  [{case_number}] LLM matched: deal_id={matched_deal_id}")
+                    else:
+                        fs_match_text = (
+                            " / ".join(companies) if companies else (case_title or "")
+                        )
+                        if deals and fs_match_text:
+                            matched_deal_id = regex_match_fs_deal(
+                                fs_match_text, deals)
+                            if matched_deal_id:
+                                matched_by_regex = True
+                                regex_match_count += 1
+                                logger.info(
+                                    f"Step 8.7b: [{case_number}] Regex fallback matched deal_id={matched_deal_id}")
+                            else:
+                                logger.info(
+                                    f"Step 8.7b: [{case_number}] No match (LLM + regex both returned None)")
+                        else:
+                            logger.info(
+                                f"Step 8.7b: [{case_number}] No match (LLM + regex both returned None)")
 
                     deal = None
-                    if match_result:
-                        matched_deal_id = match_result
-                        logger.info(
-                            f"Step 8.8:  [{case_number}] LLM matched: deal_id={matched_deal_id} | "
-                            f""
-                        )
+                    if matched_deal_id:
                         deal = deal_by_id.get(matched_deal_id)
                         if not deal:
                             logger.info(
@@ -1141,6 +1164,8 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                         acquirer = deal.get("acquirer") or deal.get(
                             "acquire_name", "N/A")
                         subject = build_subject("ec_fs", "update", deal)
+                        subject = apply_regex_match_subject(
+                            subject, matched_by_regex=matched_by_regex)
                         if not send_email_via_webhook(subject, email_html, case_number, case_title,
                                                       deal_id=matched_deal_id, changed_fields=changed_names):
                             collect_error(
@@ -1220,9 +1245,11 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
     logger.info(f"Step 8.19: Total open FS cases checked  : {total}")
     logger.info(f"Step 8.20: Cases with changes           : {changed_count}")
     logger.info(f"Step 8.21: Cases closed (is_open=false)  : {closed_count}")
+    logger.info(f"Step 8.22: LLM deal matches             : {llm_match_count}")
+    logger.info(f"Step 8.23: Regex fallback matches       : {regex_match_count}")
     logger.info(
-        f"Step 8.22: Errors encountered           : {len(error_items)}")
-    logger.info(f"Step 8.23: Total time                   : {elapsed}s")
+        f"Step 8.24: Errors encountered           : {len(error_items)}")
+    logger.info(f"Step 8.25: Total time                   : {elapsed}s")
     logger.info("=" * 60)
 
 

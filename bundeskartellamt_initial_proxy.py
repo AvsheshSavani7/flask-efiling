@@ -25,6 +25,7 @@ import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
 from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_regex import regex_match_bka_deal
 from dotenv import load_dotenv
 from datetime import datetime, date, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple, Set
@@ -575,7 +576,7 @@ def main():
     error_items: List[Dict[str, Any]] = []
     all_raw_records: List[Dict] = []
     stats = {"new": 0, "skipped": 0, "matched": 0,
-             "usa_related": 0, "saved": 0}
+             "regex_matched": 0, "usa_related": 0, "saved": 0}
     cutoff = CUTOFF_DATE.date() if isinstance(
         CUTOFF_DATE, datetime) else CUTOFF_DATE
     logger.info("=" * 60)
@@ -670,6 +671,7 @@ def main():
                     f"  {fn}: pursue_en={pursue_en[:50]}... | is_open={is_open}")
 
                 deal_match = None
+                matched_by_regex = False
 
                 if pursue_en and pursue_en != "[Translation failed]":
                     try:
@@ -685,6 +687,19 @@ def main():
                         match_result = None
                     if match_result:
                         deal_match, _, _ = parse_llm_match(match_result, deal_by_id)
+
+                # Regex fallback — only when LLM found nothing (English translation only)
+                if not deal_match:
+                    regex_deal_id = regex_match_bka_deal(pursue_en, deals)
+                    if regex_deal_id:
+                        deal_match = deal_by_id.get(regex_deal_id)
+                        if deal_match:
+                            matched_by_regex = True
+                            logger.info(f"  Regex fallback matched deal_id={regex_deal_id}")
+                        else:
+                            logger.info(f"  Regex fallback returned deal_id={regex_deal_id} but not found in deal_by_id")
+                    else:
+                        logger.info("  No match (LLM + regex both returned None)")
 
                 is_usa = False
                 if deal_match:
@@ -729,7 +744,11 @@ def main():
                         if deal_match:
                             subject, html = generate_matched_email(
                                 record, deal_match)
-                            stats["matched"] += 1
+                            if matched_by_regex:
+                                subject = subject.replace("[FRMD]", "[FRRMD]")
+                                stats["regex_matched"] += 1
+                            else:
+                                stats["matched"] += 1
                             if not send_email_via_webhook(
                                 subject, html, fn, deal_id=deal_match.get(
                                     "deal_id")
@@ -799,7 +818,8 @@ def main():
         logger.info(f"  Total extracted              : {len(all_raw_records)}")
         logger.info(f"  Skipped (existing)           : {stats['skipped']}")
         logger.info(f"  New records saved            : {stats['new']}")
-        logger.info(f"  Deal matches                 : {stats['matched']}")
+        logger.info(f"  Deal matches (LLM)           : {stats['matched']}")
+        logger.info(f"  Deal matches (regex)         : {stats['regex_matched']}")
         logger.info(f"  USA-related                  : {stats['usa_related']}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")

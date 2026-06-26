@@ -27,6 +27,7 @@ from mongodb_connection import (
     is_connected,
 )
 from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_regex import regex_match_cade_deal
 from html import escape as escape_html
 from log_utils import cleanup_old_logs, refresh_log_file
 from email_subject_builder import build_subject
@@ -971,7 +972,12 @@ def _post_email_payload(payload: Dict[str, Any]) -> bool:
     return post_email_payload(payload)
 
 
-def send_matched_email(case_data: Dict[str, Any], deal_id: str, deal_match: Optional[Dict[str, Any]] = None) -> bool:
+def send_matched_email(
+    case_data: Dict[str, Any],
+    deal_id: str,
+    deal_match: Optional[Dict[str, Any]] = None,
+    matched_by_regex: bool = False,
+) -> bool:
     process = case_data.get("process", "N/A")
     interessados = case_data.get(
         "interessados_en") or case_data.get("interessados", "N/A")
@@ -981,6 +987,8 @@ def send_matched_email(case_data: Dict[str, Any], deal_id: str, deal_match: Opti
     table_records = case_data.get("table_records", [])
 
     subject = build_subject("cade", "new", deal_match)
+    if matched_by_regex:
+        subject = subject.replace("[FRMD]", "[FRRMD]")
 
     table_html = ""
     if table_records:
@@ -1090,6 +1098,8 @@ def run_cade_cases_register(
     logger.info("=" * 60)
 
     new_cases: List[Dict[str, Any]] = []
+    llm_match_count = 0
+    regex_match_count = 0
 
     try:
         logger.info("[STEP 1] Initializing MongoDB connection...")
@@ -1286,6 +1296,23 @@ def run_cade_cases_register(
                                     },
                                 )
 
+                        # Regex fallback — only when LLM found nothing
+                        matched_by_regex = False
+                        if matched_deal_id:
+                            llm_match_count += 1
+                        else:
+                            matched_deal_id = regex_match_cade_deal(
+                                translated, open_deals
+                            )
+                            if matched_deal_id:
+                                matched_by_regex = True
+                                regex_match_count += 1
+                                logger.info(
+                                    f"[STEP 2.10b] Regex fallback matched deal_id={matched_deal_id}")
+                            else:
+                                logger.info(
+                                    "[STEP 2.10b] No match (LLM + regex both returned None)")
+
                         if matched_deal_id:
                             logger.info(
                                 f"[STEP 2.11] Deal match found (deal_id={matched_deal_id})")
@@ -1293,7 +1320,7 @@ def run_cade_cases_register(
 
                             if not test_mode:
                                 deal_match = get_deal_by_id(matched_deal_id)
-                                if not send_matched_email(case_doc, matched_deal_id, deal_match):
+                                if not send_matched_email(case_doc, matched_deal_id, deal_match, matched_by_regex=matched_by_regex):
                                     collect_error(
                                         error_items,
                                         "Failed to send matched-case email",
@@ -1412,6 +1439,8 @@ def run_cade_cases_register(
         logger.info("=" * 60)
         logger.info("SUMMARY")
         logger.info(f"[STEP 2.23] New cases inserted           : {len(new_cases)}")
+        logger.info(f"[STEP 2.23a] LLM deal matches            : {llm_match_count}")
+        logger.info(f"[STEP 2.23b] Regex fallback matches      : {regex_match_count}")
         logger.info(
             f"[STEP 2.24] Errors encountered           : {len(error_items)}")
         logger.info(f"[STEP 2.25] Total time                   : {elapsed}s")

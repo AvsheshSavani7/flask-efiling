@@ -14,6 +14,8 @@ Flow:
    - Open detail page, wait for SPA render, parse HTML in memory
    - LLM call #1: try to match with existing deals
      -> matched: send [FRMD] email, insert with deal_id + is_open=True
+   - Regex fallback (if LLM found nothing): flat-scan company names
+     -> matched: send [FRRMD] email, insert with deal_id + is_open=True
    - LLM call #2 (if no match): check if USA-related
      -> USA-related: send [FRUD] email, insert with is_open=True
    - Otherwise: insert with is_open=True (no email)
@@ -40,6 +42,7 @@ from mongodb_connection import (
 )
 from openai import OpenAI
 from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_regex import apply_regex_match_subject, regex_match_fs_deal
 from dotenv import load_dotenv
 from bson import ObjectId
 from playwright.sync_api import sync_playwright
@@ -742,6 +745,8 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
     error_items: List[Dict[str, Any]] = []
     new_count = 0
     skipped_count = 0
+    llm_match_count = 0
+    regex_match_count = 0
     visited_urls: Set[str] = set()
 
     logger.info("=" * 60)
@@ -893,10 +898,11 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                     # --- LLM #1: deal match ---
                     logger.info(
                         f"[STEP 3.12] [{case_num}] LLM Call #1: deal match (companies={companies})...")
-                    match_result = None
+                    matched_deal_id = None
+                    matched_by_regex = False
                     if deals:
                         try:
-                            match_result = match_case_to_deal(companies, deals)
+                            matched_deal_id = match_case_to_deal(companies, deals)
                         except Exception as e:
                             logger.exception(
                                 f"[STEP 3.12] [{case_num}] LLM deal match error: {e}")
@@ -906,11 +912,32 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                                 case_number=case_num,
                                 step="match_case_to_deal",
                             )
+                            matched_deal_id = None
 
-                    if match_result:
-                        matched_deal_id = match_result
+                    if matched_deal_id:
+                        llm_match_count += 1
                         logger.info(
                             f"[STEP 3.13] [{case_num}] LLM returned match: deal_id={matched_deal_id}")
+                    else:
+                        fs_match_text = (
+                            " / ".join(companies) if companies else (case_title or "")
+                        )
+                        if deals and fs_match_text:
+                            matched_deal_id = regex_match_fs_deal(
+                                fs_match_text, deals)
+                            if matched_deal_id:
+                                matched_by_regex = True
+                                regex_match_count += 1
+                                logger.info(
+                                    f"[STEP 3.13b] [{case_num}] Regex fallback matched deal_id={matched_deal_id}")
+                            else:
+                                logger.info(
+                                    f"[STEP 3.13b] [{case_num}] No match (LLM + regex both returned None)")
+                        else:
+                            logger.info(
+                                f"[STEP 3.13b] [{case_num}] No match (LLM + regex both returned None)")
+
+                    if matched_deal_id:
                         deal = deal_by_id.get(matched_deal_id)
 
                         if not deal:
@@ -950,6 +977,8 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
 
                             subject, html_email = generate_matched_email(
                                 case, deal, companies)
+                            subject = apply_regex_match_subject(
+                                subject, matched_by_regex=matched_by_regex)
                             if not send_email_via_webhook(
                                     subject, html_email, case_num, case_title, deal_id=matched_deal_id):
                                 collect_error(
@@ -979,7 +1008,7 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                             continue
                         else:
                             logger.warning(
-                                f"[STEP 3.19] [{case_num}] LLM returned deal_id={matched_deal_id} but deal not found anywhere; falling through to USA check")
+                                f"[STEP 3.19] [{case_num}] deal_id={matched_deal_id} returned but deal not found anywhere; falling through to USA check")
 
                     # --- LLM #2: USA check ---
                     logger.info(
@@ -1088,6 +1117,8 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
         logger.info(f"  New cases inserted           : {new_count}")
         logger.info(
             f"[STEP 3.29] Skipped (already in DB)      : {skipped_count}")
+        logger.info(f"  LLM deal matches             : {llm_match_count}")
+        logger.info(f"  Regex fallback matches       : {regex_match_count}")
         logger.info(
             f"[STEP 3.30] Errors encountered           : {len(error_items)}")
         logger.info(f"[STEP 3.31] Total time                   : {elapsed}s")

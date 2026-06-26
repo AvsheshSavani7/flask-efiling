@@ -26,7 +26,7 @@ from mongodb_connection import (
     init_mongodb_connection,
     is_connected,
 )
-from cade_cases_register import match_case_to_deal
+from cade_cases_register import match_case_to_deal, regex_match_cade_deal
 from deal_match_llm import fetch_open_deals
 from html import escape as escape_html
 from log_utils import cleanup_old_logs, refresh_log_file
@@ -811,6 +811,7 @@ def generate_update_email_html(
     case_data: Dict[str, Any],
     changes: List[Tuple[str, Any, Any, str]],
     deal: Optional[Dict[str, Any]],
+    matched_by_regex: bool = False,
 ) -> Tuple[str, str]:
     """Generate subject + HTML email for an update notification."""
     process = case_data.get("process", "N/A")
@@ -874,6 +875,8 @@ def generate_update_email_html(
 </div>"""
 
     subject = build_subject("cade", "update", deal)
+    if matched_by_regex:
+        subject = subject.replace("[FRMD]", "[FRRMD]")
 
     # New document records table
     doc_table_html = ""
@@ -935,8 +938,10 @@ def send_update_email(
     case_data: Dict[str, Any],
     changes: List[Tuple[str, Any, Any, str]],
     deal: Optional[Dict[str, Any]],
+    matched_by_regex: bool = False,
 ) -> bool:
-    subject, html = generate_update_email_html(case_data, changes, deal)
+    subject, html = generate_update_email_html(
+        case_data, changes, deal, matched_by_regex=matched_by_regex)
     print(f"    📤 Sending email: {subject}")
     return _post_email_payload({
         "subject": subject,
@@ -971,6 +976,8 @@ def process_brazil_cases_updates(headless: bool = True):
 
     total_checked = 0
     total_changed = 0
+    llm_match_count = 0
+    regex_match_count = 0
 
     try:
         logger.info("[STEP 1] Initializing MongoDB connection...")
@@ -1018,7 +1025,8 @@ def process_brazil_cases_updates(headless: bool = True):
             logger.info("[STEP 1.5] No open records in brazil_cases. Exiting.")
             return
 
-        logger.info(f"[STEP 1.6] Found {len(cases)} open records in brazil_cases")
+        logger.info(
+            f"[STEP 1.6] Found {len(cases)} open records in brazil_cases")
 
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -1046,7 +1054,8 @@ def process_brazil_cases_updates(headless: bool = True):
                             f"[STEP 2] Checking case: {case_doc.get('process', 'N/A')}")
                         logger.info(
                             f"[STEP 2.1] Detail URL: {case_doc.get('detail_url', 'N/A')}")
-                        logger.info(f"[STEP 2.2]  type: {case_doc.get('type', 'N/A')}")
+                        logger.info(
+                            f"[STEP 2.2]  type: {case_doc.get('type', 'N/A')}")
                         logger.info(
                             f"[STEP 2.3]  interessados: {case_doc.get('interessados', 'N/A')}")
 
@@ -1058,7 +1067,8 @@ def process_brazil_cases_updates(headless: bool = True):
                             f"[STEP 2.4] [{idx}/{len(cases)}] Process {process_num}")
 
                         if not detail_url:
-                            logger.warning("[STEP 2.5] No detail_url; skipping")
+                            logger.warning(
+                                "[STEP 2.5] No detail_url; skipping")
                             continue
 
                         autuacao = extract_autuacao_info(
@@ -1113,12 +1123,14 @@ def process_brazil_cases_updates(headless: bool = True):
                                     error_items,
                                     "Failed to update case document",
                                     step="update_case",
-                                    context={"process": process_num, "detail_url": detail_url},
+                                    context={"process": process_num,
+                                             "detail_url": detail_url},
                                 )
                             continue
 
                         total_changed += 1
-                        logger.info(f"[STEP 2.10] {len(changes)} change(s) detected:")
+                        logger.info(
+                            f"[STEP 2.10] {len(changes)} change(s) detected:")
                         for field, old_val, new_val, ctype in changes:
                             if ctype == "new_items":
                                 logger.info(
@@ -1133,10 +1145,12 @@ def process_brazil_cases_updates(headless: bool = True):
                         if deal_id and deals_collection is not None:
                             try:
                                 deal = deals_collection.find_one(
-                                    {"_id": ObjectId(deal_id), **deals_status_filter}
+                                    {"_id": ObjectId(deal_id),
+                                     **deals_status_filter}
                                 )
                             except Exception as e:
-                                logger.exception(f"[STEP 2.13] Invalid deal_id: {e}")
+                                logger.exception(
+                                    f"[STEP 2.13] Invalid deal_id: {e}")
                                 collect_error(
                                     error_items,
                                     str(e),
@@ -1145,13 +1159,15 @@ def process_brazil_cases_updates(headless: bool = True):
                                 )
 
                             if deal:
-                                logger.info("[STEP 2.14] Deal linked — sending email")
+                                logger.info(
+                                    "[STEP 2.14] Deal linked — sending email")
                                 if not send_update_email(case_doc, changes, deal):
                                     collect_error(
                                         error_items,
                                         "Failed to send update email",
                                         step="send_email",
-                                        context={"process": process_num, "detail_url": detail_url},
+                                        context={"process": process_num,
+                                                 "detail_url": detail_url},
                                     )
                                 if not update_case_in_db(
                                     cases_collection, case_doc, changes,
@@ -1162,7 +1178,8 @@ def process_brazil_cases_updates(headless: bool = True):
                                         error_items,
                                         "Failed to update case document",
                                         step="update_case",
-                                        context={"process": process_num, "detail_url": detail_url},
+                                        context={"process": process_num,
+                                                 "detail_url": detail_url},
                                     )
                                 continue
 
@@ -1183,8 +1200,26 @@ def process_brazil_cases_updates(headless: bool = True):
                                     error_items,
                                     str(e),
                                     step="match_case_to_deal",
-                                    context={"process": process_num, "detail_url": detail_url},
+                                    context={"process": process_num,
+                                             "detail_url": detail_url},
                                 )
+
+                        # Regex fallback — only when LLM found nothing
+                        matched_by_regex = False
+                        if matched_deal_id:
+                            llm_match_count += 1
+                        else:
+                            matched_deal_id = regex_match_cade_deal(
+                                translated_text, open_deals
+                            )
+                            if matched_deal_id:
+                                matched_by_regex = True
+                                regex_match_count += 1
+                                logger.info(
+                                    f"[STEP 2.15b] Regex fallback matched deal_id={matched_deal_id}")
+                            else:
+                                logger.info(
+                                    "[STEP 2.15b] No match (LLM + regex both returned None)")
 
                         if matched_deal_id:
                             logger.info(
@@ -1205,12 +1240,13 @@ def process_brazil_cases_updates(headless: bool = True):
                                         context={"process": process_num},
                                     )
 
-                            if not send_update_email(case_doc, changes, matched_deal):
+                            if not send_update_email(case_doc, changes, matched_deal, matched_by_regex=matched_by_regex):
                                 collect_error(
                                     error_items,
                                     "Failed to send update email",
                                     step="send_email",
-                                    context={"process": process_num, "detail_url": detail_url},
+                                    context={"process": process_num,
+                                             "detail_url": detail_url},
                                 )
                             if not update_case_in_db(
                                 cases_collection, case_doc, changes,
@@ -1222,7 +1258,8 @@ def process_brazil_cases_updates(headless: bool = True):
                                     error_items,
                                     "Failed to update case document",
                                     step="update_case",
-                                    context={"process": process_num, "detail_url": detail_url},
+                                    context={"process": process_num,
+                                             "detail_url": detail_url},
                                 )
                         else:
                             is_usa = False
@@ -1247,17 +1284,20 @@ def process_brazil_cases_updates(headless: bool = True):
                                         error_items,
                                         str(e),
                                         step="verify_usa_relation",
-                                        context={"process": process_num, "detail_url": detail_url},
+                                        context={"process": process_num,
+                                                 "detail_url": detail_url},
                                     )
 
                             if is_usa:
-                                logger.info("[STEP 2.19] USA-related — sending email")
+                                logger.info(
+                                    "[STEP 2.19] USA-related — sending email")
                                 if not send_update_email(case_doc, changes, None):
                                     collect_error(
                                         error_items,
                                         "Failed to send update email",
                                         step="send_email",
-                                        context={"process": process_num, "detail_url": detail_url},
+                                        context={"process": process_num,
+                                                 "detail_url": detail_url},
                                     )
 
                             if not update_case_in_db(
@@ -1269,7 +1309,8 @@ def process_brazil_cases_updates(headless: bool = True):
                                     error_items,
                                     "Failed to update case document",
                                     step="update_case",
-                                    context={"process": process_num, "detail_url": detail_url},
+                                    context={"process": process_num,
+                                             "detail_url": detail_url},
                                 )
 
                         time.sleep(2)
@@ -1292,7 +1333,8 @@ def process_brazil_cases_updates(headless: bool = True):
                 logger.info("[STEP 2.20] Browser closed")
 
     except Exception as e:
-        logger.exception(f"Unhandled error in process_brazil_cases_updates(): {e}")
+        logger.exception(
+            f"Unhandled error in process_brazil_cases_updates(): {e}")
         collect_error(
             error_items,
             f"Unhandled error in process_brazil_cases_updates(): {e}",
@@ -1306,8 +1348,14 @@ def process_brazil_cases_updates(headless: bool = True):
         logger.info("")
         logger.info("=" * 60)
         logger.info("SUMMARY")
-        logger.info(f"[STEP 2.23] Total records checked        : {total_checked}")
-        logger.info(f"[STEP 2.24] Records with changes         : {total_changed}")
+        logger.info(
+            f"[STEP 2.23] Total records checked        : {total_checked}")
+        logger.info(
+            f"[STEP 2.24] Records with changes         : {total_changed}")
+        logger.info(
+            f"[STEP 2.24a] LLM deal matches            : {llm_match_count}")
+        logger.info(
+            f"[STEP 2.24b] Regex fallback matches      : {regex_match_count}")
         logger.info(
             f"[STEP 2.25] Errors encountered           : {len(error_items)}")
         logger.info(f"[STEP 2.26] Total time                   : {elapsed}s")

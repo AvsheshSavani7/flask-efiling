@@ -22,6 +22,7 @@ from openai import OpenAI
 from playwright.sync_api import sync_playwright
 
 from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_regex import regex_match_nz_deal
 from llm_verification_service import verify_usa_relation
 from scraper_error_utils import collect_error, send_error_summary
 from mongodb_connection import (
@@ -190,7 +191,12 @@ def _post_webhook(payload: Dict[str, Any]) -> bool:
     return post_email_payload(payload)
 
 
-def send_nz_new_case_matched_email(case_info: Dict[str, Any], deal_id: str, deal_match: Optional[Dict[str, Any]] = None) -> bool:
+def send_nz_new_case_matched_email(
+    case_info: Dict[str, Any],
+    deal_id: str,
+    deal_match: Optional[Dict[str, Any]] = None,
+    matched_by_regex: bool = False,
+) -> bool:
     """Send matched NZ case email via webhook (new case)."""
     details = case_info.get("case_details") or {}
     case_number = details.get("Case number", "N/A")
@@ -199,6 +205,8 @@ def send_nz_new_case_matched_email(case_info: Dict[str, Any], deal_id: str, deal
     detail_url = case_info.get("detail_url", "")
 
     subject = build_subject("nz_comcom", "new", deal_match)
+    if matched_by_regex:
+        subject = subject.replace("[FRMD]", "[FRRMD]")
     html = f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -535,6 +543,8 @@ def run():
     inserted = 0
     skipped = 0
     updated = 0
+    llm_match_count = 0
+    regex_match_count = 0
     env_flag = os.getenv("NZ_CASES_TEST_MODE", "").lower()
     test_mode = env_flag in ("1", "true", "yes", "y")
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"
@@ -644,12 +654,25 @@ def run():
                             )
                             deal_id = None
 
+                        # Regex fallback — only when LLM found nothing
+                        matched_by_regex = False
+                        if deal_id:
+                            llm_match_count += 1
+                        else:
+                            deal_id = regex_match_nz_deal(title or "", deals)
+                            if deal_id:
+                                matched_by_regex = True
+                                regex_match_count += 1
+                                logger.info(f"[STEP 2.5b] Regex fallback matched deal_id={deal_id}")
+                            else:
+                                logger.info("[STEP 2.5b] No match (LLM + regex both returned None)")
+
                         if deal_id:
                             doc["deal_id"] = deal_id
                             logger.info(f"[STEP 2.5] Deal match found (deal_id={deal_id})")
                             if not test_mode:
                                 deal_match = get_deal_by_id(deal_id)
-                                if not send_nz_new_case_matched_email(doc, deal_id, deal_match):
+                                if not send_nz_new_case_matched_email(doc, deal_id, deal_match, matched_by_regex=matched_by_regex):
                                     collect_error(
                                         error_items,
                                         "Failed to send matched-case email",
@@ -755,6 +778,8 @@ def run():
         logger.info(f"[STEP 2.13] Inserted                     : {inserted}")
         logger.info(f"[STEP 2.14] Updated                      : {updated}")
         logger.info(f"[STEP 2.15] Skipped (already in DB)      : {skipped}")
+        logger.info(f"[STEP 2.15a] LLM deal matches            : {llm_match_count}")
+        logger.info(f"[STEP 2.15b] Regex fallback matches      : {regex_match_count}")
         logger.info(
             f"[STEP 2.16] Errors encountered           : {len(error_items)}")
         logger.info(f"[STEP 2.17] Total time                   : {elapsed}s")

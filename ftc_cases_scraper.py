@@ -32,6 +32,7 @@ from mongodb_connection import (
     is_connected,
 )
 from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_regex import regex_match_ftc_deal
 from llm_verification_service import verify_usa_relation
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
@@ -335,6 +336,8 @@ def match_case_to_deal(title: str, deals: Optional[List[Dict[str, Any]]] = None)
         source_label_step1="the FTC title (both acquirer and target)",
         deals=deals,
     )
+
+
 # ---------------------------------------------------------------------------
 # Email helpers
 # ---------------------------------------------------------------------------
@@ -343,11 +346,18 @@ def _post_email_payload(payload: Dict[str, Any]) -> bool:
     return post_email_payload(payload)
 
 
-def send_new_case_email(case_info: Dict[str, Any], deal_id: Optional[str], deal_match: Optional[Dict[str, Any]] = None) -> bool:
+def send_new_case_email(
+    case_info: Dict[str, Any],
+    deal_id: Optional[str],
+    deal_match: Optional[Dict[str, Any]] = None,
+    matched_by_regex: bool = False,
+) -> bool:
     case_id = case_info.get("case_id", "N/A")
     title = case_info.get("title", "N/A")
     title_clean = title_without_case_id_prefix(case_id, title)
     subject = build_subject("ftc", "new", deal_match)
+    if matched_by_regex:
+        subject = subject.replace("[FRMD]", "[FRRMD]")
     detail_url = case_info.get("detail_url", "")
     date_str = format_notice_date_for_display(case_info.get("date"))
     acquiring = case_info.get("acquiring_party", "")
@@ -489,17 +499,19 @@ def _process_ftc_case(
     error_items: List[Dict[str, Any]],
     test_mode: bool = False,
     open_deals: Optional[List[Dict[str, Any]]] = None,
-) -> Optional[Dict[str, Any]]:
+) -> tuple:
     """
     Handle a new FTC early termination case.
 
     Test mode  — directly insert, no LLM calls or emails.
-    Live mode  — deal match -> USA check -> email -> insert.
+    Live mode  — LLM match -> regex fallback -> USA check -> email -> insert.
 
-    Returns the backup-ready case dict on success, or None on failure.
+    Returns (backup_dict_or_None, match_type_str_or_None) where match_type is
+    "llm", "regex", or None (no match / test mode).
     """
     case_id = case_info.get("case_id", "")
     title = case_info.get("parties_text") or case_info.get("title", "")
+    match_type: Optional[str] = None
 
     if not test_mode:
         try:
@@ -514,12 +526,26 @@ def _process_ftc_case(
             )
             matched_deal_id = None
 
+        # Regex fallback — only when LLM found nothing
+        matched_by_regex = False
+        if matched_deal_id:
+            match_type = "llm"
+        else:
+            matched_deal_id = regex_match_ftc_deal(title, open_deals or [])
+            if matched_deal_id:
+                matched_by_regex = True
+                match_type = "regex"
+                logger.info(
+                    f"  Regex fallback matched deal_id={matched_deal_id}")
+            else:
+                logger.info("  No match (LLM + regex both returned None)")
+
         if matched_deal_id:
             case_info["deal_id"] = matched_deal_id
             logger.info(
                 f"  Deal match found (deal_id={matched_deal_id}); sending email")
             deal_match = get_deal_by_id(matched_deal_id)
-            if not send_new_case_email(case_info, matched_deal_id, deal_match):
+            if not send_new_case_email(case_info, matched_deal_id, deal_match, matched_by_regex=matched_by_regex):
                 collect_error(
                     error_items,
                     "Failed to send new-case email",
@@ -568,7 +594,7 @@ def _process_ftc_case(
             f"  {label}Inserted new case into ftc_cases (id={inserted_id})")
         backup = dict(case_info)
         backup.pop("_id", None)
-        return backup
+        return backup, match_type
 
     collect_error(
         error_items,
@@ -576,7 +602,7 @@ def _process_ftc_case(
         step="insert_case",
         context={"case_id": case_id},
     )
-    return None
+    return None, match_type
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +625,8 @@ def run_ftc_cases_scraper(test_mode: bool = False):
     all_items: List[Dict[str, Any]] = []
     unique_items: List[Dict[str, Any]] = []
     filtered_items: List[Dict[str, Any]] = []
+    llm_match_count = 0
+    regex_match_count = 0
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"
 
     logger.info("=" * 60)
@@ -744,7 +772,7 @@ def run_ftc_cases_scraper(test_mode: bool = False):
                     "updated_at": now_iso,
                 }
 
-                backup = _process_ftc_case(
+                backup, match_type = _process_ftc_case(
                     collection=collection,
                     case_info=case_info,
                     error_items=error_items,
@@ -753,6 +781,10 @@ def run_ftc_cases_scraper(test_mode: bool = False):
                 )
                 if backup:
                     new_cases.append(backup)
+                if match_type == "llm":
+                    llm_match_count += 1
+                elif match_type == "regex":
+                    regex_match_count += 1
 
             except Exception as e:
                 logger.exception(f"Error processing item #{idx}: {e}")
@@ -804,6 +836,8 @@ def run_ftc_cases_scraper(test_mode: bool = False):
         logger.info(f"Unique items               : {len(unique_items)}")
         logger.info(f"Items in date window       : {len(filtered_items)}")
         logger.info(f"New cases inserted         : {len(new_cases)}")
+        logger.info(f"LLM deal matches           : {llm_match_count}")
+        logger.info(f"Regex fallback matches     : {regex_match_count}")
         logger.info(f"Errors encountered         : {len(error_items)}")
         logger.info(f"Total time                 : {elapsed}s")
         logger.info("=" * 60)

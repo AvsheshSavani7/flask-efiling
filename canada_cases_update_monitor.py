@@ -21,7 +21,7 @@ from mongodb_connection import (
     is_connected,
 )
 from llm_verification_service import verify_usa_relation
-from canada_cases_register import match_case_to_deal
+from canada_cases_register import match_case_to_deal, regex_match_canada_deal
 from deal_match_llm import fetch_open_deals
 from scraper_error_utils import collect_error, send_error_summary
 import os
@@ -370,6 +370,7 @@ def send_update_email(
     new_case: Dict[str, Any],
     deal: Optional[Dict[str, Any]],
     changes: List[Tuple[str, Any, Any]],
+    matched_by_regex: bool = False,
 ) -> bool:
     """Send update email via n8n webhook."""
     try:
@@ -378,6 +379,8 @@ def send_update_email(
 
         if deal:
             subject = build_subject("canada", "update", deal)
+            if matched_by_regex:
+                subject = subject.replace("[FRMD]", "[FRRMD]")
             deal_id = str(deal.get("_id")) if deal.get("_id") else None
         else:
             subject = build_subject("canada", "update")
@@ -395,7 +398,7 @@ def send_update_email(
         print(f"    📤 Sending email via n8n webhook")
         return post_email_payload(payload, subject=subject)
     except Exception as e:
-        print(f"    ⚠️ Error sending email: {e}", level="warning")
+        logger.warning(f"Error sending email: {e}")
         return False
 
 
@@ -434,6 +437,8 @@ def process_canada_cases_updates():
     error_items: List[Dict[str, Any]] = []
     total_checked = 0
     total_changed = 0
+    llm_match_count = 0
+    regex_match_count = 0
     logger.info("=" * 60)
     logger.info(f"[STEP 1] Starting Canada Cases Update Monitor")
     logger.info(f"Log file: {LOG_FILE}")
@@ -572,9 +577,24 @@ def process_canada_cases_updates():
                         )
                         matched_deal_id = None
 
+                    # Regex fallback — only when LLM found nothing
+                    matched_by_regex = False
+                    if matched_deal_id:
+                        llm_match_count += 1
+                    else:
+                        matched_deal_id = regex_match_canada_deal(parties, open_deals)
+                        if matched_deal_id:
+                            matched_by_regex = True
+                            regex_match_count += 1
+                            logger.info(
+                                f"[STEP 1.17b] Regex fallback matched deal_id={matched_deal_id}")
+                        else:
+                            logger.info(
+                                "[STEP 1.17b] No match (LLM + regex both returned None)")
+
                     if matched_deal_id:
                         logger.info(
-                            f"[STEP 1.18] LLM matched case to deal_id={matched_deal_id}")
+                            f"[STEP 1.18] Deal matched to deal_id={matched_deal_id}")
                         if deals_collection is not None:
                             try:
                                 deal = deals_collection.find_one(
@@ -592,7 +612,7 @@ def process_canada_cases_updates():
                                     },
                                 )
 
-                        if not send_update_email(case_doc, new_row, deal, differences):
+                        if not send_update_email(case_doc, new_row, deal, differences, matched_by_regex=matched_by_regex):
                             collect_error(
                                 error_items,
                                 "Failed to send update email",
@@ -683,6 +703,8 @@ def process_canada_cases_updates():
         logger.info("SUMMARY")
         logger.info(f"[STEP 1.27] Total cases checked          : {total_checked}")
         logger.info(f"[STEP 1.28] Cases with changes           : {total_changed}")
+        logger.info(f"[STEP 1.28a] LLM deal matches            : {llm_match_count}")
+        logger.info(f"[STEP 1.28b] Regex fallback matches      : {regex_match_count}")
         logger.info(
             f"[STEP 1.29] Errors encountered           : {len(error_items)}")
         logger.info(f"[STEP 1.30] Total time                   : {elapsed}s")

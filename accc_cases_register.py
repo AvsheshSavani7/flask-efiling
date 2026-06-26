@@ -6,6 +6,7 @@ from mongodb_connection import (
     is_connected,
 )
 from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_regex import regex_match_deal_by_title
 from llm_verification_service import verify_usa_relation
 from log_utils import cleanup_old_logs, refresh_log_file
 from scraper_error_utils import collect_error, send_error_summary
@@ -283,91 +284,6 @@ def match_case_to_deal(title: str, deals: Optional[List[Dict[str, Any]]] = None)
         source_label_step1="the ACCC title (both acquirer and target / vendors)",
         deals=deals,
     )
-
-
-# ACCC titles follow "ACQUIRER - TARGET" or "ACQUIRER – TARGET" format.
-# Split only on the first dash (hyphen, en dash, em dash) to preserve
-# multi-word names on each side.
-_DASH_SEPARATOR = re.compile(r"\s*[–—\-]\s*")
-
-_LEGAL_SUFFIXES = re.compile(
-    r"\b(pty|ltd|limited|inc|incorporated|corp|corporation|"
-    r"plc|llc|holdings|group|co|company|aust|australia|nv|sa|ag|se|gmbh)\b",
-    re.IGNORECASE,
-)
-
-
-def _normalise_name(name: str) -> str:
-    """Lowercase, strip legal suffixes and punctuation for fuzzy comparison."""
-    name = name.lower()
-    name = _LEGAL_SUFFIXES.sub("", name)
-    name = re.sub(r"[^\w\s]", " ", name)
-    return re.sub(r"\s+", " ", name).strip()
-
-
-def regex_match_deal_by_title(
-    title: str,
-    deals: List[Dict[str, Any]],
-) -> Optional[str]:
-    """
-    Regex fallback for ACCC titles which follow 'ACQUIRER - TARGET' format.
-    Splits on the first dash variant only (maxsplit=1) so multi-word names are
-    preserved. Tries both orientations (left=acq/right=tgt and reversed).
-    Requires BOTH sides to match to avoid false positives.
-    Returns deal_id or None.
-    """
-    if not title or not deals:
-        return None
-
-    parts = _DASH_SEPARATOR.split(title, maxsplit=1)
-    if len(parts) < 2:
-        return None
-
-    left = _normalise_name(parts[0].strip())
-    right = _normalise_name(parts[1].strip())
-
-    if not left or not right:
-        return None
-
-    for deal in deals:
-        # Build full acquirer-side name set: main field + parent_aliases
-        acq_names: set = set()
-        for f in [deal.get("acquirer"), deal.get("acquire_name")]:
-            if f:
-                acq_names.add(_normalise_name(f))
-        for alias in (deal.get("parent_aliases") or []):
-            if alias:
-                acq_names.add(_normalise_name(alias))
-        acq_names.discard("")
-
-        # Build full target-side name set: main field + target_aliases
-        tgt_names: set = set()
-        for f in [deal.get("target"), deal.get("target_name")]:
-            if f:
-                tgt_names.add(_normalise_name(f))
-        for alias in (deal.get("target_aliases") or []):
-            if alias:
-                tgt_names.add(_normalise_name(alias))
-        tgt_names.discard("")
-
-        if not acq_names or not tgt_names:
-            continue
-
-        # normal: left=acquirer side, right=target side
-        match_normal = (
-            any(a in left or left in a for a in acq_names) and
-            any(t in right or right in t for t in tgt_names)
-        )
-        # reversed: left=target side, right=acquirer side
-        match_reversed = (
-            any(t in left or left in t for t in tgt_names) and
-            any(a in right or right in a for a in acq_names)
-        )
-
-        if match_normal or match_reversed:
-            return deal.get("deal_id")
-
-    return None
 
 
 def _post_email_payload(payload: Dict[str, Any]) -> bool:

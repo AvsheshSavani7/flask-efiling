@@ -5,7 +5,8 @@ from mongodb_connection import (
     is_connected,
 )
 from llm_verification_service import verify_usa_relation
-from accc_cases_register import match_case_to_deal, regex_match_deal_by_title
+from accc_cases_register import match_case_to_deal
+from deal_match_regex import apply_regex_match_subject, regex_match_deal_by_title
 from deal_match_llm import fetch_open_deals
 from log_utils import cleanup_old_logs, refresh_log_file
 from scraper_error_utils import collect_error, send_error_summary
@@ -304,8 +305,7 @@ def send_new_case_email(
     case_number = case_info.get("case_number", "N/A")
     title = case_info.get("title", "N/A")
     subject = build_subject("accc_waiver", "new", deal_match)
-    if matched_by_regex:
-        subject = subject.replace("[FRMD]", "[FRRMD]")
+    subject = apply_regex_match_subject(subject, matched_by_regex)
     url = case_info.get("url", "")
     notification_date = case_info.get("effective_notification_date", "")
     acquisition_status = case_info.get("acquisition_status", "")

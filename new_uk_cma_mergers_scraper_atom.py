@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup
 from html import escape as escape_html
 from openai import OpenAI
 from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_regex import regex_match_uk_cma_deal
 from pymongo import MongoClient
 from typing import Any, Dict, List, Optional, Tuple
 from scraper_error_utils import collect_error, send_error_summary
@@ -757,16 +758,16 @@ def process_record(record, existing_urls, error_items: List[Dict[str, Any]]):
     try:
         if not detail_url:
             print(f"  ⏩ Skipped (no URL): {title[:60]}")
-            return None
+            return None, None
         print(f"STEP 1.5.3: Detail URL: {detail_url}")
         if detail_url in existing_urls:
             print(f"  ⏩ Already in DB: {title[:60]}")
-            return None
+            return None, None
         print(f"STEP 1.5.4: Already in DB: {title[:60]}")
         scraped = scrape_detail_page(detail_url, error_items=error_items)
         if not scraped:
             print(f"  ⚠️ Failed to scrape, skipping: {title[:60]}")
-            return None
+            return None, None
         print(f"STEP 1.5.5: Scraped: {scraped}")
         case_record = {
             "atom_id": record.get("id", ""),
@@ -799,6 +800,20 @@ def process_record(record, existing_urls, error_items: List[Dict[str, Any]]):
             )
             deal_id = None
 
+        # Regex fallback — only when LLM found nothing
+        matched_by_regex = False
+        match_type = None
+        if deal_id:
+            match_type = "llm"
+        else:
+            deal_id = regex_match_uk_cma_deal(case_record["title"], deals)
+            if deal_id:
+                matched_by_regex = True
+                match_type = "regex"
+                print(f"  🔍 Regex fallback matched deal_id={deal_id}")
+            else:
+                print(f"  ➖ No match (LLM + regex both returned None)")
+
         deal_match = find_deal_by_id(deal_id) if deal_id else None
         print(f"STEP 1.5.6: Deal match: {deal_match}")
         if deal_match:
@@ -812,6 +827,8 @@ def process_record(record, existing_urls, error_items: List[Dict[str, Any]]):
 
             email_info = {**case_record, "updated": record.get("updated", "")}
             subj, html = generate_matched_email_html(email_info, deal_match)
+            if matched_by_regex:
+                subj = subj.replace("[FRMD]", "[FRRMD]")
             if not send_email_via_webhook(subj, html, {
                 "deal_id": deal_id,
                 "target": target,
@@ -874,10 +891,10 @@ def process_record(record, existing_urls, error_items: List[Dict[str, Any]]):
                 step="insert_uk_cma_case",
                 context={"title": case_record["title"][:80], "detail_url": detail_url},
             )
-            return None
+            return None, match_type
 
         print(f"STEP 1.5.14: Inserted into uk_cma_cases collection: {case_record}")
-        return case_record
+        return case_record, match_type
     except Exception as e:
         logger.exception(f"Error processing record: {e}")
         collect_error(
@@ -886,7 +903,7 @@ def process_record(record, existing_urls, error_items: List[Dict[str, Any]]):
             step="process_record",
             context={"title": title[:80], "detail_url": detail_url},
         )
-        return None
+        return None, None
 
 
 # ===================================================================
@@ -900,6 +917,8 @@ def main():
     error_items: List[Dict[str, Any]] = []
     new_count = 0
     skipped_count = 0
+    llm_match_count = 0
+    regex_match_count = 0
     atom_records: List[Dict[str, Any]] = []
     logger.info("=" * 60)
     logger.info("STEP 1: Starting UK CMA Cases Register")
@@ -949,10 +968,14 @@ def main():
             title = record.get("title", "N/A")
             print(f"\n[{idx}/{len(atom_records)}] {title[:70]}")
 
-            result = process_record(record, existing_urls, error_items)
+            result, match_type = process_record(record, existing_urls, error_items)
             if result:
                 new_count += 1
                 existing_urls.add(record.get("url", ""))
+                if match_type == "llm":
+                    llm_match_count += 1
+                elif match_type == "regex":
+                    regex_match_count += 1
             else:
                 skipped_count += 1
 
@@ -980,6 +1003,8 @@ def main():
         logger.info(
             f"STEP 1.6.4: Total feed entries           : {len(atom_records)}")
         logger.info(f"STEP 1.6.5: New records processed        : {new_count}")
+        logger.info(f"STEP 1.6.5a: LLM deal matches           : {llm_match_count}")
+        logger.info(f"STEP 1.6.5b: Regex fallback matches     : {regex_match_count}")
         logger.info(f"STEP 1.6.6: Skipped                      : {skipped_count}")
         logger.info(f"STEP 1.6.7: Errors encountered           : {len(error_items)}")
         logger.info(f"STEP 1.6.8: Total time                   : {elapsed}s")

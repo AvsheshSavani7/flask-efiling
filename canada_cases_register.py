@@ -25,6 +25,7 @@ from mongodb_connection import (
     is_connected,
 )
 from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_regex import regex_match_canada_deal
 from llm_verification_service import verify_usa_relation
 from scraper_error_utils import collect_error, send_error_summary
 import logging
@@ -279,6 +280,7 @@ def match_case_to_deal(parties: str, deals=None) -> Optional[str]:
         deals=deals,
     )
 
+
 def generate_matched_case_email_html(
     case_info: Dict[str, Any], deal: Dict[str, Any]
 ) -> str:
@@ -448,6 +450,8 @@ def run_canada_cases_register(headless: bool = True):
     run_start = datetime.now()
     error_items: List[Dict[str, Any]] = []
     new_cases: List[Dict[str, Any]] = []
+    llm_match_count = 0
+    regex_match_count = 0
     logger.info("=" * 60)
     logger.info(f"[STEP 1] Starting Canada Cases Register")
     logger.info(f"Log file: {LOG_FILE}")
@@ -556,6 +560,21 @@ def run_canada_cases_register(headless: bool = True):
                     )
                     matched_deal_id = None
 
+                # Regex fallback — only when LLM found nothing
+                matched_by_regex = False
+                if matched_deal_id:
+                    llm_match_count += 1
+                else:
+                    matched_deal_id = regex_match_canada_deal(parties, open_deals)
+                    if matched_deal_id:
+                        matched_by_regex = True
+                        regex_match_count += 1
+                        logger.info(
+                            f"[STEP 1.11b] Regex fallback matched deal_id={matched_deal_id}")
+                    else:
+                        logger.info(
+                            "[STEP 1.11b] No match (LLM + regex both returned None)")
+
                 now_iso = utc_now_iso()
                 case_info: Dict[str, Any] = {
                     "parties": parties,
@@ -593,6 +612,8 @@ def run_canada_cases_register(headless: bool = True):
 
                     if deal:
                         subject = build_subject("canada", "new", deal)
+                        if matched_by_regex:
+                            subject = subject.replace("[FRMD]", "[FRRMD]")
                         html_email = generate_matched_case_email_html(
                             case_info, deal)
                         if not send_email_via_webhook(
@@ -700,6 +721,8 @@ def run_canada_cases_register(headless: bool = True):
         logger.info("=" * 60)
         logger.info("SUMMARY")
         logger.info(f"  New cases inserted           : {len(new_cases)}")
+        logger.info(f"  LLM deal matches             : {llm_match_count}")
+        logger.info(f"  Regex fallback matches       : {regex_match_count}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")
         logger.info("=" * 60)
