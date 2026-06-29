@@ -4,7 +4,7 @@ deal_match_regex.py — Shared regex fallback deal-matching engine.
 Two matching strategies:
 
   1. regex_match_split_orient — titles with a left/right separator (ACCC, FTC, UK CMA)
-  2. regex_match_flat_scan   — flat party lists with no reliable split (CADE, BKA, Canada, NZ)
+  2. regex_match_flat_scan   — flat party lists with no reliable split (CADE, BKA, Canada, NZ, EC, FS, SAMR)
 
 Regulator wrappers handle title parsing; core logic lives here.
 
@@ -61,6 +61,20 @@ NZ_SUFFIXES = re.compile(
     r"\b(limited|ltd|inc|incorporated|corp|corporation|plc|llc|lp|l\.p|"
     r"holdings|group|co|company|nv|ag|se|gmbh|trust|fund|partners|"
     r"foundation|pbc|pty)\b",
+    re.IGNORECASE,
+)
+
+EC_SUFFIXES = re.compile(
+    r"\b(inc|incorporated|corp|corporation|plc|llc|lp|l\.p|ltd|limited|"
+    r"holdings|group|co|company|nv|ag|se|gmbh|sa|s\.a|s\.a\.|kg|kgaa|"
+    r"bv|oy|ab|as|spa|sp|trust|fund|partners|foundation|pbc|pty)\b",
+    re.IGNORECASE,
+)
+
+SAMR_SUFFIXES = re.compile(
+    r"\b(inc|incorporated|corp|corporation|plc|llc|lp|l\.p|ltd|limited|"
+    r"holdings|group|co|company|nv|ag|se|gmbh|sa|s\.a|s\.a\.|spa|"
+    r"trust|fund|partners|foundation|pbc|pty|partnership)\b",
     re.IGNORECASE,
 )
 
@@ -323,7 +337,34 @@ def regex_match_nz_deal(
     return regex_match_flat_scan(title, deals, suffixes=NZ_SUFFIXES)
 
 
+def regex_match_ec_deal(
+    companies_text: str,
+    deals: List[Dict[str, Any]],
+) -> Optional[str]:
+    """EC merger: slash-separated company list from case title/companies field."""
+    return regex_match_flat_scan(companies_text, deals, suffixes=EC_SUFFIXES)
+
+
+def regex_match_fs_deal(
+    companies_text: str,
+    deals: List[Dict[str, Any]],
+) -> Optional[str]:
+    """EC Foreign Subsidies: slash-separated company list from case title/companies."""
+    return regex_match_flat_scan(companies_text, deals, suffixes=EC_SUFFIXES)
+
+
+def regex_match_samr_deal(
+    title_en: str,
+    deals: List[Dict[str, Any]],
+) -> Optional[str]:
+    """SAMR public notice: English translation of notice title (flat scan)."""
+    return regex_match_flat_scan(title_en, deals, suffixes=SAMR_SUFFIXES)
+
+
 # Aliases for test scripts
 _normalise_accc = lambda t: normalise_company_name(t, ACCC_SUFFIXES)
 _normalise_cade = lambda t: normalise_company_name(t, CADE_SUFFIXES)
 _normalise_nz = lambda t: normalise_company_name(t, NZ_SUFFIXES)
+_normalise_ec = lambda t: normalise_company_name(t, EC_SUFFIXES)
+_normalise_fs = lambda t: normalise_company_name(t, EC_SUFFIXES)
+_normalise_samr = lambda t: normalise_company_name(t, SAMR_SUFFIXES)
