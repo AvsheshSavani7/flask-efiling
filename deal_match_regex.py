@@ -103,40 +103,53 @@ def normalise_company_name(text: str, suffixes: Pattern[str] = DEFAULT_SUFFIXES)
     return re.sub(r"\s+", " ", text).strip()
 
 
-def name_hits_text(name: str, text: str, min_phrase_len: int = 6) -> bool:
-    """
-    Returns True if:
-    1. The full normalised name appears as a substring in text, OR
-    2. Any consecutive 2+ word phrase (min min_phrase_len chars) from the name
-       appears in text.
+# Generic placeholder words that are sometimes stored as aliases but must never
+# be used for matching (they match too broadly across unrelated deals).
+_GENERIC_ALIAS_BLOCKLIST: frozenset[str] = frozenset({
+    "parent",
+    "merger sub",
+    "merger sub i",
+    "merger sub ii",
+    "merger subs",
+    "buyer parties",
+    "sponsors",
+    "purchaser",
+    "acquirer",
+    "target",
+    "company",
+    "seller",
+})
 
-    Handles truncated forms, e.g. "Warner Bros" matching "Warner Bros. Discovery".
+
+def name_hits_text(name: str, text: str) -> bool:
     """
-    if name in text:
-        return True
-    words = name.split()
-    if len(words) < 2:
-        return False
-    for size in range(len(words), 1, -1):
-        for start in range(len(words) - size + 1):
-            phrase = " ".join(words[start: start + size])
-            if len(phrase) >= min_phrase_len and phrase in text:
-                return True
-    return False
+    Returns True if the full normalised name appears as a substring in text.
+
+    Matching direction: the deal name must be contained within the input text,
+    not the other way around.  e.g. deal="Warner Bros", text="Warner Bros Discovery"
+    → match; deal="Warner Bros Discovery", text="Warner Bros" → no match.
+    """
+    return name in text
 
 
 def build_deal_name_sets(
     deal: Dict[str, Any],
     normalise: Callable[[str], str],
 ) -> tuple[set[str], set[str]]:
-    """Build normalised acquirer-side and target-side name sets (main + aliases)."""
+    """Build normalised acquirer-side and target-side name sets (main + aliases).
+
+    Generic placeholder aliases (e.g. 'Parent', 'Merger Sub', 'Company') are
+    filtered out before returning to prevent false-positive matches.
+    """
     acq_names: set[str] = set()
     for f in [deal.get("acquirer"), deal.get("acquire_name")]:
         if f:
             acq_names.add(normalise(f))
     for alias in deal.get("parent_aliases") or []:
         if alias:
-            acq_names.add(normalise(alias))
+            normed = normalise(alias)
+            if normed not in _GENERIC_ALIAS_BLOCKLIST:
+                acq_names.add(normed)
     acq_names.discard("")
 
     tgt_names: set[str] = set()
@@ -145,7 +158,9 @@ def build_deal_name_sets(
             tgt_names.add(normalise(f))
     for alias in deal.get("target_aliases") or []:
         if alias:
-            tgt_names.add(normalise(alias))
+            normed = normalise(alias)
+            if normed not in _GENERIC_ALIAS_BLOCKLIST:
+                tgt_names.add(normed)
     tgt_names.discard("")
 
     return acq_names, tgt_names
@@ -208,12 +223,13 @@ def regex_match_flat_scan(
     *,
     suffixes: Pattern[str] = DEFAULT_SUFFIXES,
     min_name_len: int = 2,
-    min_phrase_len: int = 6,
 ) -> Optional[str]:
     """
     Flat-scan: require acquirer hit AND target hit anywhere in normalised text.
 
-    Uses name_hits_text (sliding-window phrase matching) for truncated names.
+    Uses exact substring matching: the deal name must appear fully inside the
+    input text (not the reverse).  e.g. deal="Warner Bros", text="Warner Bros
+    Discovery" → match; deal="Warner Bros Discovery", text="Warner Bros" → no match.
     """
     if not text or not deals:
         return None
@@ -227,12 +243,12 @@ def regex_match_flat_scan(
             continue
 
         acq_hit = any(
-            name_hits_text(a, norm_text, min_phrase_len)
+            name_hits_text(a, norm_text)
             for a in acq_names
             if len(a) > min_name_len
         )
         tgt_hit = any(
-            name_hits_text(t, norm_text, min_phrase_len)
+            name_hits_text(t, norm_text)
             for t in tgt_names
             if len(t) > min_name_len
         )
