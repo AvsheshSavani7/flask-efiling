@@ -32,6 +32,7 @@ from nz_cases_update_monitor import run as nz_cases_update_monitor_run
 from mt_psc_scraper import scrape_mt_psc
 from ne_psc_scraper import scrape_ne_psc
 from sd_puc_scraper import scrape_sd_puc
+from nj_bpu_scraper import scrape_nj_bpu
 from under_review_scraper import run_under_review_scraper
 from cci_scraper_runtime import run_cci_datatable_scraper
 from orders_section31_scraper import CONFIG as CCI_SECTION31_CONFIG
@@ -186,6 +187,7 @@ def home():
             "/nz-cases-update-monitor": "GET - Monitor nz_cases collection for updates, match to deals, and send emails",
             "/new-canada-cases-register": "GET - Register new Canada Competition Bureau cases into canada_cases collection",
             "/new-canada-cases-update-monitor": "GET - Monitor canada_cases collection for updates and send email notifications",
+            "/nj-bpu-scraper": "GET/POST - Scrape NJ BPU docket documents, download PDFs, run tier1/2/3 analysis (params: case_id, docket_number, headless, no_proxy, test_mode, save_json)",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -2224,6 +2226,59 @@ def sd_puc_scraper_endpoint():
 
     except Exception as e:
         logger.error(f"Error starting SD PUC scraper: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/nj-bpu-scraper', methods=['GET', 'POST'])
+def nj_bpu_scraper_endpoint():
+    """
+    Scrape New Jersey BPU docket documents, download PDFs, and run tier1/2/3 analysis.
+
+    GET params or POST JSON body:
+        case_id:        NJ BPU case_id (required, e.g. 2114202)
+        docket_number:  Docket number for metadata (required, e.g. TM26030047)
+        headless:       Run Playwright headless (default: true)
+        no_proxy:       Disable residential proxy (default: false)
+        test_mode:      Analyze but skip MongoDB/S3 writes (default: false)
+        save_json:      Save parsed document list to JSON (default: false)
+    """
+    try:
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+        else:
+            data = request.args.to_dict()
+
+        case_id = data.get("case_id", "").strip()
+        docket_number = data.get("docket_number", "").strip()
+
+        if not case_id or not docket_number:
+            return jsonify({
+                "success": False,
+                "error": "case_id and docket_number are required."
+            }), 400
+
+        headless = str(data.get("headless", "true")).lower() != "false"
+        no_proxy = str(data.get("no_proxy", "false")).lower() == "true"
+        test_mode = str(data.get("test_mode", "false")).lower() == "true"
+        save_json = str(data.get("save_json", "false")).lower() == "true"
+
+        logger.info(
+            f"Starting NJ BPU scraper for case_id={case_id}, "
+            f"docket_number={docket_number}, test_mode={test_mode}"
+        )
+
+        result = scrape_nj_bpu(
+            case_id=case_id,
+            docket_number=docket_number,
+            headless=headless,
+            use_proxy=not no_proxy,
+            test_mode=test_mode,
+            save_json=save_json,
+        )
+        return jsonify(result), 200 if result.get("success") else 500
+
+    except Exception as e:
+        logger.error(f"Error in NJ BPU scraper: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 

@@ -7,12 +7,14 @@ N8N_WEBHOOK_INTERNAL_WITH_JOSH).
 
 Organisation-aware dispatch
 ---------------------------
-send_report_email(report_type, payload, org_id=None)
+send_report_email(report_type, payload, org_id=None, deal_id=None)
   1. Find active organization(s).
   2. Check organization_notification_settings — keep only those where
      enabled_report_types contains the given report_type.
   3. Find active organization_email_recipients for each qualifying org
      — keep only those whose report_types list contains the report_type.
+     When deal_id is provided ([FRMD] / [FRRMD]), further filter to
+     recipients whose allowed_deal_ids list contains the deal_id.
   4. POST one webhook request per org (with its recipients list)
      to NEW_N8N_EMAIL_WEBHOOK_URL.
 
@@ -26,7 +28,8 @@ MongoDB collections (Deal_DB)
 - organizations                    : _id (ObjectId), status ("active"|...), name
 - organization_notification_settings: organization_id (str), enabled_report_types (list)
 - organization_email_recipients    : organization_id (str), email, name,
-                                     is_active (bool), report_types (list)
+                                     is_active (bool), report_types (list),
+                                     allowed_deal_ids (list, may be absent)
 """
 
 from __future__ import annotations
@@ -58,6 +61,11 @@ CC_EMAILS: List[str] = [
     "josh@hyperiontechnologies.ai",
 ]
 _INTERNAL_ORG_ID = "6a031d87e4f1d72367bd2f92"
+
+_DEAL_FILTERED_REPORT_TYPES = frozenset({
+    "foreign_regulatory_matched_deal",
+    "foreign_regulatory_regex_match_deal",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +117,14 @@ def post_email_payload(
         report_type = None
 
     if report_type:
-        summary = send_report_email(report_type, payload)
+        deal_id = None
+        if report_type in _DEAL_FILTERED_REPORT_TYPES:
+            deal_id = payload.get("deal_id")
+            if not deal_id:
+                logger.warning(
+                    "Matched-deal email missing deal_id in payload: %s", subj
+                )
+        summary = send_report_email(report_type, payload, deal_id=deal_id)
         return summary.get("orgs_sent", 0) > 0
 
     return True
@@ -148,20 +163,23 @@ def _is_report_type_enabled(organization_id: str, report_type: str) -> bool:
     return report_type in settings.get("enabled_report_types", [])
 
 
-def _get_recipients(organization_id: str, report_type: str) -> list:
+def _get_recipients(
+    organization_id: str,
+    report_type: str,
+    deal_id: Optional[str] = None,
+) -> list:
     """Return active recipients for this org subscribed to report_type."""
     db = get_database()
     if db is None:
         return []
-    return list(
-        db["organization_email_recipients"].find(
-            {
-                "organization_id": organization_id,
-                "is_active": True,
-                "report_types": report_type,
-            }
-        )
-    )
+    query: Dict[str, Any] = {
+        "organization_id": organization_id,
+        "is_active": True,
+        "report_types": report_type,
+    }
+    if deal_id:
+        query["allowed_deal_ids"] = deal_id
+    return list(db["organization_email_recipients"].find(query))
 
 
 def _post_to_webhook(url: str, payload: dict, timeout: int = 30) -> bool:
@@ -193,6 +211,7 @@ def send_report_email(
     payload: dict,
     org_id: Optional[str] = None,
     webhook_url: Optional[str] = None,
+    deal_id: Optional[str] = None,
 ) -> dict:
     """
     Send a report email to all eligible org recipients for the given report_type.
@@ -211,6 +230,9 @@ def send_report_email(
         Target a single organisation. If omitted, all active orgs are processed.
     webhook_url : str, optional
         Override NEW_N8N_EMAIL_WEBHOOK_URL (useful for testing).
+    deal_id : str, optional
+        When provided, only recipients whose ``allowed_deal_ids`` list contains
+        this deal_id will receive the email. Used for [FRMD] / [FRRMD] sends.
 
     Returns
     -------
@@ -244,8 +266,9 @@ def send_report_email(
 
     active_orgs = _get_active_orgs(org_id)
     logger.info(
-        "send_report_email | report_type=%s | active orgs=%d",
+        "send_report_email | report_type=%s | deal_id=%s | active orgs=%d",
         report_type,
+        deal_id or "-",
         len(active_orgs),
     )
 
@@ -268,17 +291,22 @@ def send_report_email(
             })
             continue
 
-        recipients = _get_recipients(org_id_str, report_type)
+        recipients = _get_recipients(org_id_str, report_type, deal_id=deal_id)
         if not recipients:
+            skip_reason = (
+                "no active recipients for this report_type and deal_id"
+                if deal_id
+                else "no active recipients for this report_type"
+            )
             logger.info(
-                "Org '%s' — no active recipients for '%s', skipping.",
-                org_name, report_type,
+                "Org '%s' — %s, skipping.",
+                org_name, skip_reason,
             )
             summary["orgs_skipped_no_recipients"] += 1
             summary["results"].append({
                 "org_id": org_id_str,
                 "org_name": org_name,
-                "skipped_reason": "no active recipients for this report_type",
+                "skipped_reason": skip_reason,
                 "sent": False,
             })
             continue

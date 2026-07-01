@@ -780,7 +780,8 @@ def _process_waiver_case(
             if matched_deal_id:
                 matched_by_regex = True
                 regex_match_count += 1
-                logger.info(f"  Regex fallback matched deal_id={matched_deal_id}")
+                logger.info(
+                    f"  Regex fallback matched deal_id={matched_deal_id}")
             else:
                 logger.info("  No match (LLM + regex both returned None)")
 

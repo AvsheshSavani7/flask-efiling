@@ -106,6 +106,7 @@ PROXY_PORT = 46885
 PROXY_USERNAME = "GSenAgrfKhuNWkd"
 PROXY_PASSWORD = "8lmVa5yl0pKp9MI"
 
+
 def get_accc_cases_collection():
     db = get_database()
     if db is None:
@@ -1090,9 +1091,11 @@ def process_accc_cases_updates():
                     title = case_doc.get("title", "N/A")
                     url = case_doc.get("url")
 
-                    logger.info(f"[{idx}/{len(cases)}] Case {case_number}: {title}")
+                    logger.info(
+                        f"[{idx}/{len(cases)}] Case {case_number}: {title}")
                     if not url:
-                        logger.warning("  No URL stored for this case; skipping")
+                        logger.warning(
+                            "  No URL stored for this case; skipping")
                         continue
 
                     current_case = fetch_current_case_from_page(page, url)
@@ -1144,11 +1147,15 @@ def process_accc_cases_updates():
                     logger.info(f"  Changes detected ({len(changes)} fields)")
                     for label, old_val, new_val, change_type in changes:
                         if label == "Decisions and key events":
-                            count = len(new_val) if isinstance(new_val, list) else 0
-                            logger.info(f"    - {label}: {count} new event(s) (NEW)")
+                            count = len(new_val) if isinstance(
+                                new_val, list) else 0
+                            logger.info(
+                                f"    - {label}: {count} new event(s) (NEW)")
                         else:
-                            old_disp = "N/A" if old_val is None else str(old_val)
-                            new_disp = "N/A" if new_val is None else str(new_val)
+                            old_disp = "N/A" if old_val is None else str(
+                                old_val)
+                            new_disp = "N/A" if new_val is None else str(
+                                new_val)
                             tag = "NEW" if change_type == "new" else "UPDATED"
                             logger.info(
                                 f"    - {label}: {old_disp} → {new_disp} ({tag})")
@@ -1184,7 +1191,8 @@ def process_accc_cases_updates():
                             continue
 
                     try:
-                        matched_deal_id = match_case_to_deal(title, deals=open_deals)
+                        matched_deal_id = match_case_to_deal(
+                            title, deals=open_deals)
                     except Exception as e:
                         logger.exception(f"Error during deal matching: {e}")
                         collect_error(
@@ -1199,15 +1207,19 @@ def process_accc_cases_updates():
                     matched_by_regex = False
                     if matched_deal_id:
                         llm_match_count += 1
-                        logger.info(f"  LLM matched: deal_id={matched_deal_id}")
+                        logger.info(
+                            f"  LLM matched: deal_id={matched_deal_id}")
                     else:
-                        matched_deal_id = regex_match_deal_by_title(title, open_deals)
+                        matched_deal_id = regex_match_deal_by_title(
+                            title, open_deals)
                         if matched_deal_id:
                             matched_by_regex = True
                             regex_match_count += 1
-                            logger.info(f"  Regex fallback matched deal_id={matched_deal_id}")
+                            logger.info(
+                                f"  Regex fallback matched deal_id={matched_deal_id}")
                         else:
-                            logger.info("  No match (LLM + regex both returned None)")
+                            logger.info(
+                                "  No match (LLM + regex both returned None)")
 
                     if matched_deal_id:
                         deal_id_str = matched_deal_id
@@ -1319,7 +1331,8 @@ URL: {url}
         logger.info("Done!")
 
     except Exception as e:
-        logger.exception(f"Unhandled error in process_accc_cases_updates(): {e}")
+        logger.exception(
+            f"Unhandled error in process_accc_cases_updates(): {e}")
         collect_error(
             error_items,
             f"Unhandled error in process_accc_cases_updates(): {e}",
