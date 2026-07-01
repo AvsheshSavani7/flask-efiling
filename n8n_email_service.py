@@ -25,7 +25,8 @@ Supported report_types (foreign regulatory):
 
 MongoDB collections (Deal_DB)
 ------------------------------
-- organizations                    : _id (ObjectId), status ("active"|...), name
+- organizations                    : _id (ObjectId), status ("active"|...), name,
+                                     add_cc (bool, optional — if True, CC_EMAILS are included)
 - organization_notification_settings: organization_id (str), enabled_report_types (list)
 - organization_email_recipients    : organization_id (str), email, name,
                                      is_active (bool), report_types (list),
@@ -60,8 +61,6 @@ CC_EMAILS: List[str] = [
     "kaushal@hyperiontechnologies.ai",
     "josh@hyperiontechnologies.ai",
 ]
-_INTERNAL_ORG_ID = "6a031d87e4f1d72367bd2f92"
-
 _DEAL_FILTERED_REPORT_TYPES = frozenset({
     "foreign_regulatory_matched_deal",
     "foreign_regulatory_regex_match_deal",
@@ -312,7 +311,7 @@ def send_report_email(
             continue
 
         recipient_list: List[str] = [r["email"] for r in recipients]
-        cc_list = CC_EMAILS if org_id_str != _INTERNAL_ORG_ID else []
+        cc_list = CC_EMAILS if org.get("add_cc") else []
         webhook_payload = {
             **payload,
             "report_type": report_type,
