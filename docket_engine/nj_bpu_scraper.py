@@ -1,8 +1,11 @@
 """
 New Jersey BPU (Board of Public Utilities) Docket Scraper
 ==========================================================
-Fetches a BPU case summary page, parses the documents table, downloads PDFs,
+Fetches BPU case summary pages, parses the documents table, downloads PDFs,
 extracts text, and runs tier1/2/3 analysis via docket_entry_analyzer.
+
+Dockets to follow are configured in nj_bpu_dockets.json (same folder).
+To add a new docket, just add an entry to that file — no code changes needed.
 
 Case URL pattern:
     https://publicaccess.bpu.state.nj.us/CaseSummary.aspx?case_id=<CASE_ID>
@@ -14,11 +17,17 @@ Install:
     pip install requests beautifulsoup4 PyPDF2 playwright playwright-stealth
     playwright install chromium
 
-Run:
-    python nj_bpu_scraper.py --case-id 2114202 --docket-number TM26030047
-    python nj_bpu_scraper.py --case-id 2114202 --docket-number TM26030047 --test-mode
-    python nj_bpu_scraper.py --case-id 2114202 --docket-number TM26030047 --save-json
-    python nj_bpu_scraper.py --case-id 2114202 --docket-number TM26030047 --no-proxy
+Run all active dockets from nj_bpu_dockets.json:
+    python docket_engine/nj_bpu_scraper.py --all
+
+Run a single docket:
+    python docket_engine/nj_bpu_scraper.py --case-id 2114202 --docket-number TM26030047
+
+Other flags (apply to both modes):
+    --test-mode    Analyze but skip MongoDB/S3 writes
+    --save-json    Save parsed document list to JSON for debugging
+    --no-proxy     Disable residential proxy
+    --no-headless  Show browser window (Playwright fallback only)
 """
 
 from __future__ import annotations
@@ -34,23 +43,29 @@ from datetime import datetime, timezone
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple
 
+# Ensure project root is on sys.path so imports like docket_entry_analyzer work
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_THIS_DIR)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from pymongo import MongoClient
 
-load_dotenv(".env")
+from docket_engine.intake_analyzer import generate_intake_note
+from docket_engine.email_renderer import render_intake_card, render_email_html
+from docket_engine.docket_email_service import send_docket_email
+from log_utils import ensure_script_logger, refresh_script_log
+from error_email_service import send_error_email
 
-LOG_LEVEL = (os.getenv("LOG_LEVEL") or "INFO").upper()
-logger = logging.getLogger("nj_bpu_scraper")
-logger.setLevel(LOG_LEVEL)
-if not logger.handlers:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-    )
-    logger.addHandler(handler)
-logger.propagate = False
+load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
+
+# Logger writes to /var/data/logs/nj_bpu_scraper/<YYYY-MM-DD>.log (IST)
+# and stdout. Child loggers (intake_analyzer, email_renderer) propagate here.
+logger, _get_log_file = ensure_script_logger("nj_bpu_scraper")
+LOG_FILE = _get_log_file()
 
 NJ_BPU_BASE = "https://publicaccess.bpu.state.nj.us"
 NJ_BPU_CASE_URL = f"{NJ_BPU_BASE}/CaseSummary.aspx"
@@ -58,6 +73,9 @@ NJ_BPU_DOC_URL = f"{NJ_BPU_BASE}/DocumentHandler.ashx"
 
 DOCKET_TYPE = "nj-bpu"
 COLLECTION_NAME = "docket"
+
+# Config file lives next to this script
+NJ_BPU_DOCKETS_FILE = os.path.join(_THIS_DIR, "nj_bpu_dockets.json")
 
 # Static residential proxy (same as other scrapers in this repo)
 DEFAULT_PROXY_HOST = "108.59.242.138"
@@ -113,6 +131,38 @@ def _normalize_docket_number(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Config loader
+# ---------------------------------------------------------------------------
+
+def load_dockets_config(dockets_file: str = NJ_BPU_DOCKETS_FILE) -> List[Dict[str, Any]]:
+    """
+    Load active docket entries from nj_bpu_dockets.json.
+
+    Each entry must have:
+        case_id       — BPU case_id from the URL
+        docket_number — docket number for MongoDB metadata
+    Optional:
+        description   — human-readable label (for logging)
+        active        — set false to skip without removing (default: true)
+    """
+    if not os.path.isfile(dockets_file):
+        raise FileNotFoundError(
+            f"Dockets config file not found: {dockets_file}\n"
+            f"Expected at: {NJ_BPU_DOCKETS_FILE}"
+        )
+    with open(dockets_file, "r", encoding="utf-8") as f:
+        config = json.load(f)
+
+    all_dockets = config.get("dockets", [])
+    active = [d for d in all_dockets if d.get("active", True)]
+    logger.info(
+        f"Loaded {len(active)} active docket(s) from {dockets_file} "
+        f"(total in file: {len(all_dockets)})."
+    )
+    return active
+
+
+# ---------------------------------------------------------------------------
 # MongoDB helpers
 # ---------------------------------------------------------------------------
 
@@ -124,10 +174,6 @@ def _get_mongo_collection() -> Tuple[Any, Any]:
     db_name = (os.environ.get("MONGODB_DATABASE_NAME") or "").strip()
     db = client.get_database(db_name) if db_name else client.get_database()
     return db[COLLECTION_NAME], client
-
-
-def _already_in_db(collection, doc_id: str) -> bool:
-    return collection.find_one({"metadata.document_id": doc_id}) is not None
 
 
 def _batch_filter_existing(
@@ -182,9 +228,7 @@ def _fetch_case_html_requests(
         resp.raise_for_status()
         html = resp.text
         if "gvDocuments" in html:
-            logger.info(
-                f"Case page fetched via requests ({len(html):,} chars)."
-            )
+            logger.info(f"Case page fetched via requests ({len(html):,} chars).")
             return html
         logger.info("requests fetch succeeded but #gvDocuments missing — trying Playwright.")
         return None
@@ -201,14 +245,11 @@ def _fetch_case_html_playwright(
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
     url = f"{NJ_BPU_CASE_URL}?case_id={case_id}"
-
     launch_args = ["--no-sandbox", "--ignore-certificate-errors"]
     context_kwargs: Dict[str, Any] = {
         "ignore_https_errors": True,
         "user_agent": _REQUEST_HEADERS["User-Agent"],
-        "extra_http_headers": {
-            "Accept-Language": "en-US,en;q=0.9",
-        },
+        "extra_http_headers": {"Accept-Language": "en-US,en;q=0.9"},
     }
 
     if use_proxy:
@@ -228,7 +269,6 @@ def _fetch_case_html_playwright(
             browser = p.chromium.launch(headless=headless, args=launch_args)
             context = browser.new_context(**context_kwargs)
             page = context.new_page()
-
             try:
                 page.goto(url, wait_until="load", timeout=120_000)
                 try:
@@ -236,7 +276,7 @@ def _fetch_case_html_playwright(
                 except PlaywrightTimeoutError:
                     pass
 
-                # If the Documents tab is not active, click it
+                # Click Documents tab if not already active
                 try:
                     tab = page.query_selector("#ui-id-1, a[href='#tabs-1']")
                     if tab:
@@ -245,16 +285,13 @@ def _fetch_case_html_playwright(
                 except Exception:
                     pass
 
-                # Wait for the documents table to appear
                 try:
                     page.wait_for_selector("#gvDocuments", timeout=15_000)
                 except PlaywrightTimeoutError:
                     logger.warning("Playwright: #gvDocuments not found after wait.")
 
                 html = page.content()
-                logger.info(
-                    f"Case page fetched via Playwright ({len(html):,} chars)."
-                )
+                logger.info(f"Case page fetched via Playwright ({len(html):,} chars).")
                 return html
             except PlaywrightTimeoutError as e:
                 logger.error(f"Playwright timeout fetching case page: {e}")
@@ -287,8 +324,7 @@ def fetch_case_html(
 def parse_documents(html: str) -> List[Dict[str, Any]]:
     """
     Parse the #gvDocuments table into a list of document dicts.
-
-    Returns list ordered as they appear on the page (newest first on the site).
+    Returns list ordered as they appear on the page (newest first).
     """
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table", id="gvDocuments")
@@ -297,13 +333,10 @@ def parse_documents(html: str) -> List[Dict[str, Any]]:
         return []
 
     documents: List[Dict[str, Any]] = []
-    rows = table.find_all("tr")
-
-    for row in rows:
+    for row in table.find_all("tr"):
         checkbox = row.find("input", {"name": "document_id", "type": "checkbox"})
         if not checkbox:
             continue
-
         doc_id = checkbox.get("value", "").strip()
         if not doc_id:
             continue
@@ -312,9 +345,8 @@ def parse_documents(html: str) -> List[Dict[str, Any]]:
         if len(cells) < 7:
             continue
 
-        # Columns: checkbox | Docket # | Document Title (link) | Folder | Uploaded By | Description | Posted Date
-        docket_num_raw = cells[1].get_text(strip=True)
-        docket_number = _normalize_docket_number(docket_num_raw)
+        # Columns: checkbox | Docket # | Title (link) | Folder | Uploaded By | Description | Posted Date
+        docket_number = _normalize_docket_number(cells[1].get_text(strip=True))
 
         title_cell = cells[2]
         link_tag = title_cell.find("a")
@@ -323,21 +355,15 @@ def parse_documents(html: str) -> List[Dict[str, Any]]:
         if doc_href and not doc_href.startswith("http"):
             doc_href = f"{NJ_BPU_BASE}/{doc_href.lstrip('/')}"
 
-        folder = cells[3].get_text(strip=True)
-        uploaded_by = cells[4].get_text(strip=True)
-        description = cells[5].get_text(strip=True)
-        posted_date_raw = cells[6].get_text(strip=True)
-        posted_date = _normalize_date(posted_date_raw)
-
         documents.append({
             "document_id": doc_id,
             "docket_number": docket_number,
             "title": title,
             "url": doc_href or f"{NJ_BPU_DOC_URL}?document_id={doc_id}",
-            "folder": folder,
-            "uploaded_by": uploaded_by,
-            "description": description,
-            "posted_date": posted_date,
+            "folder": cells[3].get_text(strip=True),
+            "uploaded_by": cells[4].get_text(strip=True),
+            "description": cells[5].get_text(strip=True),
+            "posted_date": _normalize_date(cells[6].get_text(strip=True)),
         })
 
     logger.info(f"Parsed {len(documents)} document(s) from #gvDocuments.")
@@ -349,11 +375,9 @@ def parse_documents(html: str) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def _extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
-    """Extract text from PDF bytes using PyPDF2, with pymupdf fallback."""
+    """Extract text from PDF bytes — PyPDF2 first, pymupdf fallback."""
     if not pdf_bytes:
         return ""
-
-    # PyPDF2 first
     try:
         import PyPDF2
         reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))
@@ -371,7 +395,6 @@ def _extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
     except Exception as e:
         logger.debug(f"PyPDF2 extraction failed: {e}")
 
-    # pymupdf fallback
     try:
         import fitz  # type: ignore
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -404,8 +427,6 @@ def _download_document(
         resp = session.get(url, proxies=proxies, timeout=60)
         resp.raise_for_status()
         content = resp.content
-
-        # Detect content type — guard against HTML error pages
         content_type = resp.headers.get("Content-Type", "")
         if "html" in content_type.lower() or (
             content and content[:5] != b"%PDF-" and b"<html" in content[:200].lower()
@@ -415,7 +436,6 @@ def _download_document(
                 f"(Content-Type={content_type!r}). Skipping."
             )
             return None
-
         logger.info(f"  Downloaded {len(content):,} bytes for doc {doc_id}.")
         return content
     except Exception as e:
@@ -443,7 +463,7 @@ def _upload_to_s3(pdf_bytes: bytes, doc_id: str, title: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Main scraper
+# Single-docket scraper
 # ---------------------------------------------------------------------------
 
 def scrape_nj_bpu(
@@ -455,27 +475,41 @@ def scrape_nj_bpu(
     save_json: bool = False,
 ) -> Dict[str, Any]:
     """
-    Scrape NJ BPU docket, download PDFs, run tier1/2/3 analysis, save to MongoDB.
+    Scrape one NJ BPU docket: fetch page → dedup → download PDFs →
+    extract text → analyze (tier1/2/3) → save to MongoDB.
 
     Args:
-        case_id:        NJ BPU case_id (e.g. "2114202")
-        docket_number:  Docket number for metadata (e.g. "TM26030047")
+        case_id:        NJ BPU case_id, e.g. "2114202"
+        docket_number:  Docket number for metadata, e.g. "TM26030047"
         headless:       Run Playwright in headless mode (fallback only)
         use_proxy:      Use residential proxy for requests
         test_mode:      Analyze but do NOT write to MongoDB or S3
         save_json:      Save parsed document list to JSON for debugging
 
     Returns:
-        Dict with success, processed count, and per-doc results.
+        Dict with success, counts, and per-doc results.
     """
     from docket_entry_analyzer import analyze_docket_entry
 
+    # Roll log file over to today's IST date (handles midnight crossover in long-lived workers)
+    refresh_script_log(logger, _get_log_file)
+
     logger.info(
-        f"Starting NJ BPU scraper — case_id={case_id}, "
-        f"docket_number={docket_number}, test_mode={test_mode}"
+        f"=== NJ BPU scraper — case_id={case_id} "
+        f"docket_number={docket_number} test_mode={test_mode} ==="
     )
 
-    # --- Step 1: MongoDB setup ---
+    # Shared base context for all error emails in this run
+    _run_ctx = {"case_id": case_id, "docket_number": docket_number}
+
+    def _error_email(error_message: str, extra_ctx: Optional[dict] = None) -> None:
+        send_error_email(
+            script_name="nj_bpu_scraper",
+            error_message=error_message,
+            context={**_run_ctx, **(extra_ctx or {})},
+        )
+
+    # Step 1: MongoDB setup
     collection = None
     mongo_client = None
     if not test_mode:
@@ -483,19 +517,22 @@ def scrape_nj_bpu(
             collection, mongo_client = _get_mongo_collection()
             logger.info("MongoDB connection established.")
         except Exception as e:
-            logger.error(f"MongoDB connection failed: {e}")
-            return {"success": False, "error": str(e), "processed": []}
+            msg = f"MongoDB connection failed: {e}"
+            logger.error(msg)
+            _error_email(msg, {"step": "mongodb_connect"})
+            return {"success": False, "error": msg, "processed": []}
 
-    # --- Step 2: Fetch case page ---
+    # Step 2: Fetch case page
     html = fetch_case_html(case_id, headless=headless, use_proxy=use_proxy)
     if not html:
         msg = f"Could not fetch case page for case_id={case_id}"
         logger.error(msg)
+        _error_email(msg, {"step": "fetch_html", "url": f"{NJ_BPU_CASE_URL}?case_id={case_id}"})
         if mongo_client:
             mongo_client.close()
         return {"success": False, "error": msg, "processed": []}
 
-    # --- Step 3: Parse documents ---
+    # Step 3: Parse documents
     documents = parse_documents(html)
     if not documents:
         logger.info("No documents found on case page.")
@@ -503,18 +540,17 @@ def scrape_nj_bpu(
             mongo_client.close()
         return {"success": True, "processed": [], "message": "No documents found."}
 
-    # Normalize docket_number from metadata if parsed value is more specific
     for doc in documents:
         if not doc.get("docket_number"):
             doc["docket_number"] = docket_number
 
     if save_json:
-        out_file = f"nj_bpu_{case_id}_documents.json"
+        out_file = os.path.join(_THIS_DIR, f"nj_bpu_{case_id}_documents.json")
         with open(out_file, "w", encoding="utf-8") as f:
             json.dump(documents, f, indent=2, ensure_ascii=False)
         logger.info(f"Saved document list to {out_file}")
 
-    # --- Step 4: Dedup check ---
+    # Step 4: Dedup check
     all_ids = [d["document_id"] for d in documents]
     if collection is not None:
         new_ids_set = set(_batch_filter_existing(collection, all_ids))
@@ -523,7 +559,7 @@ def scrape_nj_bpu(
 
     new_documents = [d for d in documents if d["document_id"] in new_ids_set]
     if not new_documents:
-        logger.info("All documents are already in the database. Nothing to do.")
+        logger.info("All documents already in the database.")
         if mongo_client:
             mongo_client.close()
         return {
@@ -534,14 +570,14 @@ def scrape_nj_bpu(
             "new": 0,
         }
 
-    # Process oldest first (reverse order — table shows newest at top)
+    # Process oldest first (site shows newest at top)
     new_documents = list(reversed(new_documents))
     logger.info(
         f"{len(new_documents)} new document(s) to process "
         f"(out of {len(documents)} total)."
     )
 
-    # --- Step 5: Process each new document ---
+    # Step 5: Download → extract → analyze
     processed = []
     download_session = requests.Session()
     download_session.headers.update(_REQUEST_HEADERS)
@@ -561,30 +597,25 @@ def scrape_nj_bpu(
             f"date={posted_date} | {title[:70]}"
         )
 
+        # Shared per-document context for error emails
+        _doc_ctx = {"doc_id": doc_id, "title": title[:120], "posted_date": posted_date}
+
         # 5a: Download PDF
-        pdf_bytes = _download_document(
-            doc_id, use_proxy=use_proxy, session=download_session
-        )
+        pdf_bytes = _download_document(doc_id, use_proxy=use_proxy, session=download_session)
         if not pdf_bytes:
-            logger.warning(f"  Skipping doc {doc_id} — no content downloaded.")
-            processed.append({
-                "doc_id": doc_id,
-                "title": title,
-                "status": "download_failed",
-            })
+            msg = f"PDF download failed for doc_id={doc_id}"
+            logger.warning(f"  {msg}")
+            _error_email(msg, {**_doc_ctx, "step": "download_pdf", "doc_url": doc_url})
+            processed.append({"doc_id": doc_id, "title": title, "status": "download_failed"})
             continue
 
         # 5b: Extract text
         extracted_text = _extract_text_from_pdf_bytes(pdf_bytes)
         if not extracted_text.strip():
-            logger.warning(
-                f"  doc {doc_id}: no text extracted from PDF."
-            )
-            processed.append({
-                "doc_id": doc_id,
-                "title": title,
-                "status": "no_text_extracted",
-            })
+            msg = f"No text extracted from PDF for doc_id={doc_id}"
+            logger.warning(f"  {msg}")
+            _error_email(msg, {**_doc_ctx, "step": "extract_text"})
+            processed.append({"doc_id": doc_id, "title": title, "status": "no_text_extracted"})
             continue
         logger.info(f"  Extracted {len(extracted_text):,} chars.")
 
@@ -593,25 +624,20 @@ def scrape_nj_bpu(
         if not test_mode:
             s3_url = _upload_to_s3(pdf_bytes, doc_id, title)
 
-        final_url = s3_url or doc_url
-
         # 5d: Build metadata
         metadata = {
             "docket_type": DOCKET_TYPE,
             "docket_number": doc_docket_number,
             "document_id": doc_id,
             "date": posted_date,
-            "document_type": folder,          # BPU uses folder as doc type
+            "document_type": folder,
             "on_behalf_of": uploaded_by,
             "additional_info": description[:200] if description else title[:200],
-            "url": final_url,
+            "url": s3_url or doc_url,
         }
 
         # 5e: Analyze (tier 1/2/3 + MongoDB insert)
-        logger.info(
-            f"  Analyzing doc {doc_id} — "
-            f"folder={folder} uploaded_by={uploaded_by[:50]}"
-        )
+        logger.info(f"  Analyzing — folder={folder} uploaded_by={uploaded_by[:50]}")
         try:
             result = analyze_docket_entry(
                 doc_number=doc_id,
@@ -620,36 +646,86 @@ def scrape_nj_bpu(
                 test_mode=test_mode,
             )
             status = result.get("status", "unknown")
+
             if result.get("error"):
-                logger.warning(f"  Analysis error: {result['error']}")
+                msg = f"Docket analysis error for doc_id={doc_id}: {result['error']}"
+                logger.warning(f"  {msg}")
+                _error_email(msg, {**_doc_ctx, "step": "docket_analysis", "analysis_error": result["error"]})
+                processed.append({"doc_id": doc_id, "title": title, "status": "analysis_error", "error": result["error"]})
+                # Use a flag instead of continue so time.sleep(2) still runs
+                analysis_failed = True
             else:
                 logger.info(f"  → status={status}")
+                analysis_failed = False
 
-            processed.append({
-                "doc_id": doc_id,
-                "title": title,
-                "posted_date": posted_date,
-                "status": status,
-                "s3_url": s3_url,
-            })
+            # 5f & 5g: Only proceed if analysis succeeded
+            intake_note = None
+            email_html = None
+            if not analysis_failed:
+                if status == "new_analysis":
+                    comprehensive_summary = result.get("comprehensive_summary") or ""
+                    intake_note = generate_intake_note(comprehensive_summary)
+
+                    if intake_note is None:
+                        msg = f"GPT intake note generation failed for doc_id={doc_id}"
+                        logger.warning(f"  {msg}")
+                        _error_email(msg, {**_doc_ctx, "step": "gpt_intake_note"})
+                    else:
+                        # 5g: Build HTML email from intake note + tier2/tier3 analysis
+                        document_url = metadata.get("url") or metadata.get("document_id") or ""
+                        base_html = render_intake_card(intake_note, document_url)
+                        email_html = render_email_html(
+                            tier2_response=((result.get("tier2_analysis") or {}).get("response") or ""),
+                            tier3_response=((result.get("tier3_risk_assessment") or {}).get("response") or ""),
+                            base_html=base_html,
+                            metadata=metadata,
+                        )
+                        logger.info("  Email HTML rendered.")
+
+                        # 5h: Send email via docket_email_service (org-aware routing)
+                        target_company_name = (result.get("metadata") or {}).get("target_company_name", "")
+                        additional_info = metadata.get("additional_info", "")
+                        document_type = metadata.get("document_type", "")
+                        subject = (
+                            f"{target_company_name} : NJ - {doc_docket_number}"
+                            f": {additional_info} - {document_type}"
+                        )
+                        send_docket_email(
+                            subject=subject,
+                            email_html=email_html,
+                            doc_id=doc_id,
+                            docket_number=doc_docket_number,
+                            docket_type=DOCKET_TYPE,
+                            deal_id=result.get("deal_id"),
+                        )
+                else:
+                    logger.info(f"  Skipping intake note and email HTML — status={status}")
+
+                processed.append({
+                    "doc_id": doc_id,
+                    "title": title,
+                    "posted_date": posted_date,
+                    "status": status,
+                    "s3_url": s3_url,
+                    "intake_note": intake_note,
+                    "email_html": email_html,
+                })
         except Exception as e:
-            logger.error(f"  analyze_docket_entry exception for doc {doc_id}: {e}")
-            processed.append({
-                "doc_id": doc_id,
-                "title": title,
-                "status": "analysis_error",
-                "error": str(e),
-            })
+            msg = f"Docket analysis exception for doc_id={doc_id}: {e}"
+            logger.error(f"  {msg}")
+            _error_email(msg, {**_doc_ctx, "step": "docket_analysis"})
+            processed.append({"doc_id": doc_id, "title": title, "status": "analysis_error", "error": str(e)})
 
-        time.sleep(2)  # polite delay between documents
+        time.sleep(2)
 
     if mongo_client:
         mongo_client.close()
 
-    success_count = sum(1 for p in processed if p["status"] not in ("download_failed", "no_text_extracted", "analysis_error"))
-    logger.info(
-        f"Finished. {success_count}/{len(new_documents)} new document(s) analyzed."
+    success_count = sum(
+        1 for p in processed
+        if p["status"] not in ("download_failed", "no_text_extracted", "analysis_error")
     )
+    logger.info(f"Finished. {success_count}/{len(new_documents)} new document(s) analyzed.")
 
     return {
         "success": True,
@@ -664,6 +740,77 @@ def scrape_nj_bpu(
 
 
 # ---------------------------------------------------------------------------
+# Multi-docket runner (reads nj_bpu_dockets.json)
+# ---------------------------------------------------------------------------
+
+def scrape_all_nj_bpu(
+    dockets_file: str = NJ_BPU_DOCKETS_FILE,
+    headless: bool = True,
+    use_proxy: bool = True,
+    test_mode: bool = False,
+    save_json: bool = False,
+) -> Dict[str, Any]:
+    """
+    Read nj_bpu_dockets.json and run scrape_nj_bpu() for every active entry.
+
+    To add a new docket: just add it to nj_bpu_dockets.json with active=true.
+    No code changes required.
+    """
+    try:
+        dockets = load_dockets_config(dockets_file)
+    except FileNotFoundError as e:
+        return {"success": False, "error": str(e)}
+
+    if not dockets:
+        logger.info("No active dockets found in config file.")
+        return {"success": True, "dockets_processed": 0, "total_analyzed": 0, "results": []}
+
+    all_results = []
+    for entry in dockets:
+        case_id = entry.get("case_id", "").strip()
+        docket_number = entry.get("docket_number", "").strip()
+        description = entry.get("description", "")
+
+        if not case_id or not docket_number:
+            logger.warning(f"Skipping invalid config entry (missing case_id or docket_number): {entry}")
+            continue
+
+        logger.info(
+            f"\n{'='*60}\n"
+            f"Docket: {docket_number} | case_id: {case_id}\n"
+            f"{description}\n"
+            f"{'='*60}"
+        )
+
+        result = scrape_nj_bpu(
+            case_id=case_id,
+            docket_number=docket_number,
+            headless=headless,
+            use_proxy=use_proxy,
+            test_mode=test_mode,
+            save_json=save_json,
+        )
+        all_results.append(result)
+
+        if len(dockets) > 1:
+            time.sleep(5)  # polite delay between dockets
+
+    total_analyzed = sum(r.get("analyzed", 0) for r in all_results)
+    logger.info(
+        f"\nAll done. {len(all_results)} docket(s) processed, "
+        f"{total_analyzed} document(s) analyzed in total."
+    )
+
+    return {
+        "success": True,
+        "dockets_processed": len(all_results),
+        "total_analyzed": total_analyzed,
+        "results": all_results,
+        "timestamp": _now_iso(),
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -671,21 +818,28 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="NJ BPU Docket Scraper — downloads PDFs and runs tier1/2/3 analysis"
     )
+
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
+        "--all", action="store_true",
+        help="Run all active dockets from nj_bpu_dockets.json",
+    )
+    mode.add_argument(
+        "--case-id",
+        help="Single case_id to process, e.g. 2114202",
+    )
+
     parser.add_argument(
-        "--case-id", required=True,
-        help="NJ BPU case_id, e.g. 2114202",
+        "--docket-number",
+        help="Docket number (required when --case-id is used), e.g. TM26030047",
     )
     parser.add_argument(
-        "--docket-number", required=True,
-        help="Docket number for metadata, e.g. TM26030047",
+        "--dockets-file", default=NJ_BPU_DOCKETS_FILE,
+        help=f"Path to dockets config JSON (default: {NJ_BPU_DOCKETS_FILE})",
     )
     parser.add_argument(
-        "--headless", action="store_true", default=True,
-        help="Run Playwright in headless mode (default: true)",
-    )
-    parser.add_argument(
-        "--no-headless", action="store_false", dest="headless",
-        help="Run Playwright with browser window visible",
+        "--no-headless", action="store_true", default=False,
+        help="Show browser window (Playwright fallback only)",
     )
     parser.add_argument(
         "--no-proxy", action="store_true", default=False,
@@ -702,14 +856,28 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    result = scrape_nj_bpu(
-        case_id=args.case_id,
-        docket_number=args.docket_number,
-        headless=args.headless,
-        use_proxy=not args.no_proxy,
-        test_mode=args.test_mode,
-        save_json=args.save_json,
-    )
+    headless = not args.no_headless
+    use_proxy = not args.no_proxy
+
+    if args.all:
+        result = scrape_all_nj_bpu(
+            dockets_file=args.dockets_file,
+            headless=headless,
+            use_proxy=use_proxy,
+            test_mode=args.test_mode,
+            save_json=args.save_json,
+        )
+    else:
+        if not args.docket_number:
+            parser.error("--docket-number is required when using --case-id")
+        result = scrape_nj_bpu(
+            case_id=args.case_id,
+            docket_number=args.docket_number,
+            headless=headless,
+            use_proxy=use_proxy,
+            test_mode=args.test_mode,
+            save_json=args.save_json,
+        )
 
     print(json.dumps(result, indent=2, ensure_ascii=False))
 

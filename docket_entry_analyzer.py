@@ -1175,6 +1175,7 @@ Be factual and concise. Focus on substantive content, not procedural details."""
         # MongoDB native _id (string) for client reference only — not stored as a separate field
         "record_id": str(inserted_id) if inserted_id else None,
         "enrichment_scheduled": enrichment_scheduled,
+        "deal_id": deal_id,
     }
 
     # Add comprehensive summary to result if generated

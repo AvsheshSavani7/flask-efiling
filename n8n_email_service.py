@@ -343,6 +343,56 @@ def send_report_email(
     return summary
 
 
+def get_docket_recipients(deal_id: Optional[str] = None) -> Dict[str, List[str]]:
+    """
+    Resolve email recipients and CC for docket notifications.
+
+    Loops all active orgs, checks each has "dockets" in enabled_report_types,
+    then collects recipients who have "dockets" in their report_types.
+    When deal_id is provided, further filters to recipients whose
+    allowed_deal_ids list contains that deal_id.
+    When deal_id is None, returns all active "dockets" subscribers.
+
+    Returns
+    -------
+    dict:
+        {
+          "recipients": ["email1@...", "email2@..."],
+          "cc":         ["cc1@...", ...]   # only when org.add_cc is True
+        }
+    """
+    recipients: List[str] = []
+    cc: List[str] = []
+
+    active_orgs = _get_active_orgs()
+    for org in active_orgs:
+        org_id_str = str(org["_id"])
+
+        if not _is_report_type_enabled(org_id_str, "dockets"):
+            continue
+
+        org_recipients = _get_recipients(
+            org_id_str, "dockets", deal_id=deal_id)
+        recipients.extend(r["email"] for r in org_recipients if r.get("email"))
+
+        if org.get("add_cc"):
+            cc = CC_EMAILS
+
+    # Deduplicate while preserving order
+    seen: set = set()
+    unique_recipients = []
+    for email in recipients:
+        if email not in seen:
+            seen.add(email)
+            unique_recipients.append(email)
+
+    logger.info(
+        "get_docket_recipients | deal_id=%s | recipients=%d | cc=%d",
+        deal_id or "(none)", len(unique_recipients), len(cc),
+    )
+    return {"recipients": unique_recipients, "cc": cc}
+
+
 def send_direct_email(
     recipients: List[str],
     payload: dict,

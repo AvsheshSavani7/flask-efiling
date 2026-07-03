@@ -5,6 +5,7 @@ from mn_scraper import scrape_mn_documents
 from demo4 import fetch_with_playwright_2captcha
 from puc_scraper import fetch_with_playwright_2captcha_puc
 from docket_entry_analyzer import analyze_docket_entry
+from n8n_email_service import get_docket_recipients
 from docket_manager import get_dockets
 from fcc_html_scraper import process_fcc_scraper
 from mergers_manager import get_all_mergers
@@ -32,7 +33,7 @@ from nz_cases_update_monitor import run as nz_cases_update_monitor_run
 from mt_psc_scraper import scrape_mt_psc
 from ne_psc_scraper import scrape_ne_psc
 from sd_puc_scraper import scrape_sd_puc
-from nj_bpu_scraper import scrape_nj_bpu
+from docket_engine.nj_bpu_scraper import scrape_nj_bpu, scrape_all_nj_bpu
 from under_review_scraper import run_under_review_scraper
 from cci_scraper_runtime import run_cci_datatable_scraper
 from orders_section31_scraper import CONFIG as CCI_SECTION31_CONFIG
@@ -187,7 +188,7 @@ def home():
             "/nz-cases-update-monitor": "GET - Monitor nz_cases collection for updates, match to deals, and send emails",
             "/new-canada-cases-register": "GET - Register new Canada Competition Bureau cases into canada_cases collection",
             "/new-canada-cases-update-monitor": "GET - Monitor canada_cases collection for updates and send email notifications",
-            "/nj-bpu-scraper": "GET/POST - Scrape NJ BPU docket documents, download PDFs, run tier1/2/3 analysis (params: case_id, docket_number, headless, no_proxy, test_mode, save_json)",
+            "/nj-bpu-scraper": "GET/POST - Scrape NJ BPU docket documents, download PDFs, run tier1/2/3 analysis. Omit case_id to run all dockets from docket_engine/nj_bpu_dockets.json (params: case_id, docket_number, headless, no_proxy, test_mode, save_json)",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -388,6 +389,20 @@ def analyze_docket():
             response["comprehensive_summary"] = entry.get(
                 "comprehensive_summary") if entry.get("comprehensive_summary") else text
             response["entry"] = entry  # Include the full entry in the response
+
+        # Resolve dynamic email recipients for n8n webhook
+        # Filters by report_type="docket" + deal_id (when available)
+        deal_id = result.get("deal_id")
+        try:
+            email_routing = get_docket_recipients(deal_id=deal_id)
+            response["recipients"] = email_routing["recipients"]
+            response["cc"] = email_routing["cc"]
+            response["deal_id"] = deal_id
+        except Exception as e:
+            logger.warning(f"Could not resolve docket recipients: {e}")
+            response["recipients"] = []
+            response["cc"] = []
+            response["deal_id"] = deal_id
 
         return jsonify(response), 200
 
@@ -2235,12 +2250,16 @@ def nj_bpu_scraper_endpoint():
     Scrape New Jersey BPU docket documents, download PDFs, and run tier1/2/3 analysis.
 
     GET params or POST JSON body:
-        case_id:        NJ BPU case_id (required, e.g. 2114202)
-        docket_number:  Docket number for metadata (required, e.g. TM26030047)
+        case_id:        NJ BPU case_id (optional). Omit to run all active dockets from nj_bpu_dockets.json.
+        docket_number:  Docket number (required when case_id is provided, e.g. TM26030047)
         headless:       Run Playwright headless (default: true)
         no_proxy:       Disable residential proxy (default: false)
         test_mode:      Analyze but skip MongoDB/S3 writes (default: false)
         save_json:      Save parsed document list to JSON (default: false)
+
+    Modes:
+        - Omit case_id → run all active dockets from docket_engine/nj_bpu_dockets.json
+        - Provide case_id + docket_number → run a single specific docket
     """
     try:
         if request.method == 'POST':
@@ -2250,31 +2269,43 @@ def nj_bpu_scraper_endpoint():
 
         case_id = data.get("case_id", "").strip()
         docket_number = data.get("docket_number", "").strip()
-
-        if not case_id or not docket_number:
-            return jsonify({
-                "success": False,
-                "error": "case_id and docket_number are required."
-            }), 400
-
         headless = str(data.get("headless", "true")).lower() != "false"
         no_proxy = str(data.get("no_proxy", "false")).lower() == "true"
         test_mode = str(data.get("test_mode", "false")).lower() == "true"
         save_json = str(data.get("save_json", "false")).lower() == "true"
 
-        logger.info(
-            f"Starting NJ BPU scraper for case_id={case_id}, "
-            f"docket_number={docket_number}, test_mode={test_mode}"
-        )
+        if not case_id:
+            # Run all active dockets from nj_bpu_dockets.json
+            logger.info(
+                f"Starting NJ BPU scraper (all dockets from config), test_mode={test_mode}"
+            )
+            result = scrape_all_nj_bpu(
+                headless=headless,
+                use_proxy=not no_proxy,
+                test_mode=test_mode,
+                save_json=save_json,
+            )
+        elif case_id and docket_number:
+            # Run a single specific docket
+            logger.info(
+                f"Starting NJ BPU scraper for case_id={case_id}, "
+                f"docket_number={docket_number}, test_mode={test_mode}"
+            )
+            result = scrape_nj_bpu(
+                case_id=case_id,
+                docket_number=docket_number,
+                headless=headless,
+                use_proxy=not no_proxy,
+                test_mode=test_mode,
+                save_json=save_json,
+            )
+        else:
+            return jsonify({
+                "success": False,
+                "error": "Provide both case_id and docket_number for a single docket, "
+                         "or omit case_id to run all dockets from nj_bpu_dockets.json."
+            }), 400
 
-        result = scrape_nj_bpu(
-            case_id=case_id,
-            docket_number=docket_number,
-            headless=headless,
-            use_proxy=not no_proxy,
-            test_mode=test_mode,
-            save_json=save_json,
-        )
         return jsonify(result), 200 if result.get("success") else 500
 
     except Exception as e:
@@ -2314,6 +2345,7 @@ KNOWN_LOG_SCRIPTS = {
     "cci_section31",
     "cci_section43a_44",
     "cci_approved_with_modification",
+    "nj_bpu_scraper",
 }
 
 
