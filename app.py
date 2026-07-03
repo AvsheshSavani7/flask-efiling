@@ -390,18 +390,16 @@ def analyze_docket():
                 "comprehensive_summary") if entry.get("comprehensive_summary") else text
             response["entry"] = entry  # Include the full entry in the response
 
-        # Resolve dynamic email recipients for n8n webhook
-        # Filters by report_type="docket" + deal_id (when available)
+        # Resolve per-org email routing for n8n webhook.
+        # n8n should Split Out on email_routing to send one email per org.
         deal_id = result.get("deal_id")
         try:
-            email_routing = get_docket_recipients(deal_id=deal_id)
-            response["recipients"] = email_routing["recipients"]
-            response["cc"] = email_routing["cc"]
+            routing = get_docket_recipients(deal_id=deal_id)
+            response["email_routing"] = routing["email_routing"]
             response["deal_id"] = deal_id
         except Exception as e:
             logger.warning(f"Could not resolve docket recipients: {e}")
-            response["recipients"] = []
-            response["cc"] = []
+            response["email_routing"] = []
             response["deal_id"] = deal_id
 
         return jsonify(response), 200

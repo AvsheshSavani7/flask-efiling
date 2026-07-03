@@ -343,54 +343,61 @@ def send_report_email(
     return summary
 
 
-def get_docket_recipients(deal_id: Optional[str] = None) -> Dict[str, List[str]]:
+def get_docket_recipients(deal_id: Optional[str] = None) -> Dict[str, Any]:
     """
-    Resolve email recipients and CC for docket notifications.
+    Resolve email recipients per org for docket notifications.
 
     Loops all active orgs, checks each has "dockets" in enabled_report_types,
-    then collects recipients who have "dockets" in their report_types.
-    When deal_id is provided, further filters to recipients whose
-    allowed_deal_ids list contains that deal_id.
-    When deal_id is None, returns all active "dockets" subscribers.
+    then collects per-org recipient lists filtered by deal_id when provided.
+    When deal_id is None, returns all active "dockets" subscribers per org.
 
     Returns
     -------
     dict:
         {
-          "recipients": ["email1@...", "email2@..."],
-          "cc":         ["cc1@...", ...]   # only when org.add_cc is True
+          "email_routing": [
+            {
+              "org_id":     "...",
+              "org_name":   "Firm A",
+              "recipients": ["email1@...", "email2@..."],
+              "cc":         ["cc1@..."]     # only when org.add_cc is True
+            },
+            ...
+          ]
         }
+    n8n: Split Out on email_routing → one email per org with org-specific recipients.
     """
-    recipients: List[str] = []
-    cc: List[str] = []
+    email_routing: List[Dict[str, Any]] = []
 
     active_orgs = _get_active_orgs()
     for org in active_orgs:
         org_id_str = str(org["_id"])
+        org_name = org.get("name", org_id_str)
 
         if not _is_report_type_enabled(org_id_str, "dockets"):
             continue
 
-        org_recipients = _get_recipients(
-            org_id_str, "dockets", deal_id=deal_id)
-        recipients.extend(r["email"] for r in org_recipients if r.get("email"))
+        org_recipients = _get_recipients(org_id_str, "dockets", deal_id=deal_id)
+        recipient_emails = [r["email"] for r in org_recipients if r.get("email")]
 
-        if org.get("add_cc"):
-            cc = CC_EMAILS
+        if not recipient_emails:
+            continue
 
-    # Deduplicate while preserving order
-    seen: set = set()
-    unique_recipients = []
-    for email in recipients:
-        if email not in seen:
-            seen.add(email)
-            unique_recipients.append(email)
+        org_cc = list(CC_EMAILS) if org.get("add_cc") else []
 
+        email_routing.append({
+            "org_id":     org_id_str,
+            "org_name":   org_name,
+            "recipients": recipient_emails,
+            "cc":         org_cc,
+        })
+
+    total_recipients = sum(len(o["recipients"]) for o in email_routing)
     logger.info(
-        "get_docket_recipients | deal_id=%s | recipients=%d | cc=%d",
-        deal_id or "(none)", len(unique_recipients), len(cc),
+        "get_docket_recipients | deal_id=%s | orgs=%d | total_recipients=%d",
+        deal_id or "(none)", len(email_routing), total_recipients,
     )
-    return {"recipients": unique_recipients, "cc": cc}
+    return {"email_routing": email_routing}
 
 
 def send_direct_email(
