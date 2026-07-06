@@ -114,10 +114,16 @@ cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
 # PC_PORT = "5959"
 
 # New proxy
-PC_USERNAME = "pc4skeYeOB-res-de"
-PC_PASSWORD = "PC_4zJleejNQeQebD04n"
-PC_HOST = "proxy-eu.proxy-cheap.com"
-PC_PORT = "5959"
+# PC_USERNAME = "pc4skeYeOB-res-de"
+# PC_PASSWORD = "PC_4zJleejNQeQebD04n"
+# PC_HOST = "proxy-eu.proxy-cheap.com"
+# PC_PORT = "5959"
+
+# New proxy replace by proxy cheap
+PC_USERNAME = "OAvucx71Nfse7sA"
+PC_PASSWORD = "MMnZtnp9g1VNyIL_country-DE"
+PC_HOST = "thehub.proxy-cheap.com"
+PC_PORT = "8080"
 
 FETCH_HEADERS = {
     "User-Agent": (
@@ -132,7 +138,7 @@ FETCH_HEADERS = {
 
 
 def _build_proxy_dict():
-    proxy_url = f"http://{PC_USERNAME}-country-de:{PC_PASSWORD}@{PC_HOST}:{PC_PORT}"
+    proxy_url = f"http://{PC_USERNAME}:{PC_PASSWORD}@{PC_HOST}:{PC_PORT}"
     return {"http": proxy_url, "https": proxy_url}
 
 
@@ -446,6 +452,7 @@ def match_deal_with_llm(pursue_en: str, deals: List[Dict]) -> Optional[str]:
         deals=deals if deals else None,
     )
 
+
 def parse_llm_match(result: str, deal_by_id: Dict) -> Tuple[Optional[Dict], str, str]:
     """Look up deal dict by deal_id. Returns (deal_match, '', '') or (None, '', '')."""
     if not result or result.strip().lower() == "none":
@@ -596,7 +603,8 @@ def main():
             return {"success": False, "error": message}
 
         deals = fetch_deals()
-        deal_by_id = {str(d.get("deal_id", ""))                      : d for d in deals if d.get("deal_id")}
+        deal_by_id = {str(d.get("deal_id", ""))
+                          : d for d in deals if d.get("deal_id")}
 
         gc_collection = get_german_cases_collection()
         if gc_collection is None:
@@ -686,7 +694,8 @@ def main():
                         )
                         match_result = None
                     if match_result:
-                        deal_match, _, _ = parse_llm_match(match_result, deal_by_id)
+                        deal_match, _, _ = parse_llm_match(
+                            match_result, deal_by_id)
 
                 # Regex fallback — only when LLM found nothing (English translation only)
                 if not deal_match:
@@ -695,11 +704,14 @@ def main():
                         deal_match = deal_by_id.get(regex_deal_id)
                         if deal_match:
                             matched_by_regex = True
-                            logger.info(f"  Regex fallback matched deal_id={regex_deal_id}")
+                            logger.info(
+                                f"  Regex fallback matched deal_id={regex_deal_id}")
                         else:
-                            logger.info(f"  Regex fallback returned deal_id={regex_deal_id} but not found in deal_by_id")
+                            logger.info(
+                                f"  Regex fallback returned deal_id={regex_deal_id} but not found in deal_by_id")
                     else:
-                        logger.info("  No match (LLM + regex both returned None)")
+                        logger.info(
+                            "  No match (LLM + regex both returned None)")
 
                 is_usa = False
                 if deal_match:
@@ -819,7 +831,8 @@ def main():
         logger.info(f"  Skipped (existing)           : {stats['skipped']}")
         logger.info(f"  New records saved            : {stats['new']}")
         logger.info(f"  Deal matches (LLM)           : {stats['matched']}")
-        logger.info(f"  Deal matches (regex)         : {stats['regex_matched']}")
+        logger.info(
+            f"  Deal matches (regex)         : {stats['regex_matched']}")
         logger.info(f"  USA-related                  : {stats['usa_related']}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")
