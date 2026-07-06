@@ -917,12 +917,62 @@ def _email_field_row(label: str, value: Any) -> str:
     )
 
 
+def _build_changes_html(changes: Dict[str, Any]) -> str:
+    """Render a 'What Changed' table for update emails (old → new, skips unchanged)."""
+    old = changes.get("old") or {}
+    new = changes.get("new") or {}
+
+    CHANGE_LABELS = [
+        ("cci_status", "Status"),
+        ("stage", "Stage"),
+        ("decision_date", "Decision Date"),
+        ("notice_under_review_url", "Notice PDF URL"),
+    ]
+
+    rows_html = ""
+    for field, label in CHANGE_LABELS:
+        old_val = (old.get(field) or "").strip() if isinstance(
+            old.get(field), str) else (old.get(field) or "")
+        new_val = (new.get(field) or "").strip() if isinstance(
+            new.get(field), str) else (new.get(field) or "")
+        if str(old_val) == str(new_val):
+            continue
+        old_display = escape_html(
+            str(old_val)) if old_val else '<span style="color:#94a3b8;">—</span>'
+        new_display = escape_html(
+            str(new_val)) if new_val else '<span style="color:#94a3b8;">—</span>'
+        rows_html += (
+            f'<tr>'
+            f'<td style="padding:5px 8px 5px 0;font-size:13px;color:#334155;white-space:nowrap;">{escape_html(label)}</td>'
+            f'<td style="padding:5px 12px 5px 8px;font-size:13px;color:#dc2626;">{old_display}</td>'
+            f'<td style="padding:5px 0 5px 8px;font-size:13px;color:#16a34a;font-weight:600;">{new_display}</td>'
+            f'</tr>'
+        )
+
+    if not rows_html:
+        return ""
+
+    return f"""
+<div style="background:#f0fdf4;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #16a34a;">
+  <strong style="font-size:14px;color:#15803d;">What Changed</strong>
+  <table style="width:100%;border-collapse:collapse;margin-top:10px;">
+    <tr>
+      <th style="text-align:left;color:#64748b;font-size:12px;padding:4px 8px 4px 0;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Field</th>
+      <th style="text-align:left;color:#64748b;font-size:12px;padding:4px 12px 4px 8px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Previous</th>
+      <th style="text-align:left;color:#64748b;font-size:12px;padding:4px 0 4px 8px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">New</th>
+    </tr>
+    {rows_html}
+  </table>
+</div>"""
+
+
 def build_cci_email_html(
     record: Dict[str, Any],
     deal_match: Optional[Dict[str, Any]],
     event_type: str,
     source_label: str,
     list_page_url: Optional[str] = None,
+    changes: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, str]:
     subject = build_subject("cci", event_type, deal_match)
     reg_no = record.get("combination_registration_no", "N/A")
@@ -990,6 +1040,8 @@ def build_cci_email_html(
         ]
     )
 
+    changes_html = _build_changes_html(changes) if changes else ""
+
     html = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><title>{escape_html(subject)}</title></head>
 <body style="margin:0;padding:0;font-family:Arial,sans-serif;background-color:#f4f4f4;">
@@ -997,6 +1049,7 @@ def build_cci_email_html(
   <h2 style="color:#333;margin-top:0;border-bottom:3px solid #2563eb;padding-bottom:12px;">{escape_html(subject)}</h2>
   {pipeline_banner}
   {banner}
+  {changes_html}
   <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
     <tr><td style="padding:6px 0;color:#64748b;font-size:14px;">Combination Registration No.:</td>
         <td style="padding:6px 0 6px 12px;font-size:14px;font-weight:600;">{escape_html(str(reg_no))}</td></tr>
@@ -1025,6 +1078,7 @@ def send_cci_email(
     source_label: str = "Notice Under Review",
     list_page_url: Optional[str] = None,
     source_key: Optional[str] = None,
+    changes: Optional[Dict[str, Any]] = None,
 ) -> bool:
     reg_no = record.get("combination_registration_no", "")
     tag = "[FRMD]" if deal_match else "[FRUD]"
@@ -1054,7 +1108,8 @@ def send_cci_email(
         list_page_url = CCI_LIST_PAGE_URLS.get(source_key)
 
     subject, html = build_cci_email_html(
-        record, deal_match, event_type, source_label, list_page_url=list_page_url
+        record, deal_match, event_type, source_label,
+        list_page_url=list_page_url, changes=changes,
     )
     detail_urls = record.get("detail_urls") or {}
     detail_for_source = detail_urls.get(source_key) if source_key else None
@@ -1088,9 +1143,13 @@ def process_deal_match_and_email(
     source_label: str = "Notice Under Review",
     list_page_url: Optional[str] = None,
     source_key: Optional[str] = None,
+    changes: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
     Deal match / USA check / email per plan. Skips LLM if deal_id already set.
+
+    changes: optional {"old": {...}, "new": {...}} dict built by the scraper when
+             a status-change update is detected; forwarded into the email HTML.
 
     Returns True if an email was sent (webhook succeeded), False otherwise.
     """
@@ -1125,6 +1184,7 @@ def process_deal_match_and_email(
             source_label,
             list_page_url=list_page_url,
             source_key=source_key,
+            changes=changes,
         )
 
     match_text = record.get(
@@ -1174,6 +1234,7 @@ def process_deal_match_and_email(
             source_label,
             list_page_url=list_page_url,
             source_key=source_key,
+            changes=changes,
         )
 
     logger.info("  No deal match; running USA relation check (case_type=CCI)...")
@@ -1202,6 +1263,7 @@ def process_deal_match_and_email(
             source_label,
             list_page_url=list_page_url,
             source_key=source_key,
+            changes=changes,
         )
 
     logger.info(
@@ -1211,5 +1273,6 @@ def process_deal_match_and_email(
     return False
 
 
-def under_review_cutoff_date() -> date:
-    return (datetime.now() - timedelta(days=15)).date()
+def under_review_cutoff_date() -> Optional[date]:
+    """No cutoff — all notice-under-review rows are checked on every run."""
+    return None
