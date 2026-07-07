@@ -744,6 +744,7 @@ def _process_waiver_case(
     error_items: List[Dict[str, Any]],
     test_mode: bool = False,
     open_deals: Optional[List[Dict[str, Any]]] = None,
+    counters: Optional[Dict[str, int]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Handle a completed waiver case and insert into DB.
@@ -772,14 +773,16 @@ def _process_waiver_case(
         # Regex fallback — only when LLM found nothing
         matched_by_regex = False
         if matched_deal_id:
-            llm_match_count += 1
+            if counters is not None:
+                counters["llm_match_count"] += 1
         else:
             matched_deal_id = regex_match_deal_by_title(
                 case_info.get("title", "") or title, open_deals
             )
             if matched_deal_id:
                 matched_by_regex = True
-                regex_match_count += 1
+                if counters is not None:
+                    counters["regex_match_count"] += 1
                 logger.info(
                     f"  Regex fallback matched deal_id={matched_deal_id}")
             else:
@@ -866,6 +869,7 @@ def run_accc_waiver_register(test_mode: bool = False):
     error_items: List[Dict[str, Any]] = []
     new_cases: List[Dict[str, Any]] = []
     all_items: List[Dict[str, Any]] = []
+    counters = {"llm_match_count": 0, "regex_match_count": 0}
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"
 
     logger.info("=" * 60)
@@ -972,8 +976,6 @@ def run_accc_waiver_register(test_mode: bool = False):
             )
             pw_page = context.new_page()
             open_deals = fetch_open_deals()
-            llm_match_count = 0
-            regex_match_count = 0
 
             for idx, item in enumerate(all_items, 1):
                 try:
@@ -1046,6 +1048,7 @@ def run_accc_waiver_register(test_mode: bool = False):
                         error_items=error_items,
                         test_mode=test_mode,
                         open_deals=open_deals,
+                        counters=counters,
                     )
                     if backup:
                         new_cases.append(backup)
@@ -1094,8 +1097,8 @@ def run_accc_waiver_register(test_mode: bool = False):
         logger.info("=" * 60)
         logger.info("SUMMARY")
         logger.info(f"  Total items from list        : {len(all_items)}")
-        logger.info(f"  LLM deal matches             : {llm_match_count}")
-        logger.info(f"  Regex fallback matches       : {regex_match_count}")
+        logger.info(f"  LLM deal matches             : {counters['llm_match_count']}")
+        logger.info(f"  Regex fallback matches       : {counters['regex_match_count']}")
         logger.info(f"  New/updated cases            : {len(new_cases)}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")
