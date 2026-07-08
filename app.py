@@ -2424,6 +2424,7 @@ KNOWN_LOG_SCRIPTS = {
     "cci_section43a_44",
     "cci_approved_with_modification",
     "nj_bpu_scraper",
+    "fcc_ecfs_scraper"
 }
 
 
