@@ -34,6 +34,7 @@ from mt_psc_scraper import scrape_mt_psc
 from ne_psc_scraper import scrape_ne_psc
 from sd_puc_scraper import scrape_sd_puc
 from docket_engine.nj_bpu_scraper import scrape_nj_bpu, scrape_all_nj_bpu
+from docket_engine.fcc_ecfs_scraper import scrape_fcc_ecfs, scrape_all_fcc_ecfs
 from under_review_scraper import run_under_review_scraper
 from cci_scraper_runtime import run_cci_datatable_scraper
 from orders_section31_scraper import CONFIG as CCI_SECTION31_CONFIG
@@ -189,6 +190,7 @@ def home():
             "/new-canada-cases-register": "GET - Register new Canada Competition Bureau cases into canada_cases collection",
             "/new-canada-cases-update-monitor": "GET - Monitor canada_cases collection for updates and send email notifications",
             "/nj-bpu-scraper": "GET/POST - Scrape NJ BPU docket documents, download PDFs, run tier1/2/3 analysis. Omit case_id to run all dockets from docket_engine/nj_bpu_dockets.json (params: case_id, docket_number, headless, no_proxy, test_mode, save_json)",
+            "/fcc-ecfs-scraper": "GET/POST - Scrape FCC ECFS docket filings, download PDFs, run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/fcc_ecfs_dockets.json (params: docket_number, no_proxy, test_mode, save_json)",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -2308,6 +2310,84 @@ def nj_bpu_scraper_endpoint():
 
     except Exception as e:
         logger.error(f"Error in NJ BPU scraper: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/fcc-ecfs-scraper', methods=['GET', 'POST'])
+def fcc_ecfs_scraper_endpoint():
+    """
+    Scrape FCC ECFS docket filings, download PDFs, and run tier1/2/3 analysis.
+
+    GET params or POST JSON body:
+        docket_number:  FCC docket number (optional, e.g. "26-134").
+                        Omit to run all active dockets from fcc_ecfs_dockets.json.
+        no_proxy:       Disable residential proxy (default: false)
+        test_mode:      Save to MongoDB, send email to personal address only,
+                        skip S3 upload (default: false)
+        save_json:      Save parsed filing list to JSON for debugging (default: false)
+
+    Modes:
+        - Omit docket_number → run all active dockets from docket_engine/fcc_ecfs_dockets.json
+        - Provide docket_number → run that single docket only
+    """
+    try:
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+        else:
+            data = request.args.to_dict()
+
+        docket_number = data.get("docket_number", "").strip()
+        no_proxy = str(data.get("no_proxy", "false")).lower() == "true"
+        test_mode = str(data.get("test_mode", "false")).lower() == "true"
+        save_json = str(data.get("save_json", "false")).lower() == "true"
+
+        if not docket_number:
+            # Run all active dockets from fcc_ecfs_dockets.json
+            logger.info(
+                f"Starting FCC ECFS scraper (all dockets from config), test_mode={test_mode}"
+            )
+            result = scrape_all_fcc_ecfs(
+                use_proxy=not no_proxy,
+                test_mode=test_mode,
+                save_json=save_json,
+            )
+        else:
+            # Run a single specific docket — look up its rss_url from config
+            from docket_engine.fcc_ecfs_scraper import load_dockets_config, FCC_ECFS_DOCKETS_FILE
+            try:
+                dockets = load_dockets_config(FCC_ECFS_DOCKETS_FILE)
+            except FileNotFoundError as e:
+                return jsonify({"success": False, "error": str(e)}), 404
+
+            match = next(
+                (d for d in dockets if d.get("docket_number") == docket_number),
+                None,
+            )
+            if not match:
+                return jsonify({
+                    "success": False,
+                    "error": (
+                        f"Docket '{docket_number}' not found in fcc_ecfs_dockets.json. "
+                        "Add it first or omit docket_number to run all active dockets."
+                    ),
+                }), 400
+
+            logger.info(
+                f"Starting FCC ECFS scraper for docket_number={docket_number}, "
+                f"test_mode={test_mode}"
+            )
+            result = scrape_fcc_ecfs(
+                rss_url=match["rss_url"],
+                docket_number=docket_number,
+                use_proxy=not no_proxy,
+                test_mode=test_mode,
+                save_json=save_json,
+            )
+
+        return jsonify(result), 200 if result.get("success") else 500
+
+    except Exception as e:
+        logger.error(f"Error in FCC ECFS scraper endpoint: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 

@@ -34,6 +34,7 @@ Other flags (apply to both modes):
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import os
@@ -52,7 +53,9 @@ if _PROJECT_ROOT not in sys.path:
 
 import requests
 import urllib3
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from playwright.async_api import async_playwright
 from pymongo import MongoClient
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -60,8 +63,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from docket_engine.intake_analyzer import generate_intake_note
 from docket_engine.email_renderer import render_intake_card, render_email_html
 from docket_engine.docket_email_service import send_docket_email
+from n8n_email_service import send_direct_email
 from log_utils import ensure_script_logger, refresh_script_log
 from error_email_service import send_error_email
+
+TEST_MODE_EMAIL_RECIPIENT = "avshesh.savani@teqnodux.com"
 
 load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 
@@ -93,6 +99,10 @@ DEFAULT_PROXY_PORT = 46885
 DEFAULT_PROXY_USER = "GSenAgrfKhuNWkd"
 DEFAULT_PROXY_PASS = "8lmVa5yl0pKp9MI"
 
+# System Chrome is required to pass the FCC ECFS API's TLS/JA3 fingerprint check.
+# Playwright's bundled Chromium has a different fingerprint that gets blocked.
+_CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
 
 def _build_proxy_dict(use_proxy: bool) -> Optional[Dict[str, str]]:
     if not use_proxy:
@@ -103,6 +113,247 @@ def _build_proxy_dict(use_proxy: bool) -> Optional[Dict[str, str]]:
     pwd = os.getenv("FCC_PROXY_PASS", DEFAULT_PROXY_PASS)
     proxy_url = f"http://{user}:{pwd}@{host}:{port}"
     return {"http": proxy_url, "https": proxy_url}
+
+
+def _build_playwright_proxy(use_proxy: bool) -> Optional[Dict[str, str]]:
+    if not use_proxy:
+        return None
+    host = os.getenv("FCC_PROXY_HOST", DEFAULT_PROXY_HOST)
+    port = os.getenv("FCC_PROXY_PORT", str(DEFAULT_PROXY_PORT))
+    user = os.getenv("FCC_PROXY_USER", DEFAULT_PROXY_USER)
+    pwd = os.getenv("FCC_PROXY_PASS", DEFAULT_PROXY_PASS)
+    return {
+        "server": f"http://{host}:{port}",
+        "username": user,
+        "password": pwd,
+    }
+
+
+async def _fetch_url_chrome_async(
+    url: str,
+    use_proxy: bool,
+    wait_for_selector: Optional[str] = None,
+    wait_until: str = "domcontentloaded",
+    use_page_content: bool = False,
+) -> Optional[str]:
+    """
+    Fetch a URL using system Chrome via Playwright.
+
+    The FCC ECFS API uses TLS/JA3 fingerprint detection (Akamai WAF) that
+    silently drops connections from Python requests and curl. System Chrome
+    presents an identical TLS fingerprint to the user's browser and passes.
+
+    Args:
+        wait_for_selector: CSS selector to wait for before capturing HTML.
+                           Required for React pages (filing detail).
+        wait_until:        Playwright navigation event to wait for.
+        use_page_content:  If True, return page.content() (fully rendered DOM for
+                           React apps). If False (default), return resp.text()
+                           (raw HTTP response — needed for XML/RSS feeds).
+    """
+    proxy = _build_playwright_proxy(use_proxy)
+    chrome_exe = _CHROME_PATH if os.path.isfile(_CHROME_PATH) else None
+    launch_kwargs: Dict[str, Any] = {
+        "headless": True,
+        "args": ["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+    }
+    if chrome_exe:
+        # macOS: use system Chrome for authentic TLS fingerprint
+        launch_kwargs["executable_path"] = chrome_exe
+        launch_kwargs["channel"] = "chrome"
+    # On Linux server: no channel set — Playwright uses its bundled Chromium
+    if proxy:
+        launch_kwargs["proxy"] = proxy
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(**launch_kwargs)
+            context = await browser.new_context(
+                ignore_https_errors=True,
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+            )
+            await context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+            page = await context.new_page()
+            resp = await page.goto(url, wait_until=wait_until, timeout=30_000)
+            if resp is None or not resp.ok:
+                status = resp.status if resp else "no response"
+                logger.error(f"Chrome fetch failed for {url}: HTTP {status}")
+                await browser.close()
+                return None
+            if wait_for_selector:
+                try:
+                    await page.wait_for_selector(wait_for_selector, timeout=15_000)
+                except Exception:
+                    logger.warning(
+                        f"  Selector '{wait_for_selector}' not found in {url} — "
+                        "page may not have fully rendered."
+                    )
+            # use_page_content=True → fully rendered DOM (React apps)
+            # use_page_content=False → raw HTTP response (XML/RSS feeds)
+            body = await page.content() if use_page_content else await resp.text()
+            await browser.close()
+            return body
+    except Exception as e:
+        logger.error(f"Chrome fetch error for {url}: {e}")
+        return None
+
+
+def _fetch_url_chrome(
+    url: str,
+    use_proxy: bool = False,
+    wait_for_selector: Optional[str] = None,
+    wait_until: str = "domcontentloaded",
+    use_page_content: bool = False,
+) -> Optional[str]:
+    """Sync wrapper around _fetch_url_chrome_async."""
+    return asyncio.run(
+        _fetch_url_chrome_async(
+            url, use_proxy,
+            wait_for_selector=wait_for_selector,
+            wait_until=wait_until,
+            use_page_content=use_page_content,
+        )
+    )
+
+
+async def _download_bytes_chrome_async(url: str, use_proxy: bool) -> Optional[bytes]:
+    """
+    Download binary content (PDF etc.) via Chrome to bypass Akamai WAF.
+
+    Strategy 1: Playwright request API (context.request.get) — uses Chrome's TLS
+    fingerprint without launching a full page, ideal for direct file URLs.
+
+    Strategy 2: page.goto + download event listener — for ECFS document URLs
+    (www.fcc.gov/ecfs/document/<id>/<n>) that serve via JS-triggered downloads.
+
+    Returns None if response is HTML (not a real document).
+    """
+    proxy = _build_playwright_proxy(use_proxy)
+    chrome_exe = _CHROME_PATH if os.path.isfile(_CHROME_PATH) else None
+    launch_kwargs: Dict[str, Any] = {
+        "headless": True,
+        "args": ["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+    }
+    if chrome_exe:
+        # macOS: use system Chrome for authentic TLS fingerprint
+        launch_kwargs["executable_path"] = chrome_exe
+        launch_kwargs["channel"] = "chrome"
+    # On Linux server: no channel set — Playwright uses its bundled Chromium
+    if proxy:
+        launch_kwargs["proxy"] = proxy
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(**launch_kwargs)
+            context = await browser.new_context(
+                ignore_https_errors=True,
+                accept_downloads=True,
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+            )
+            await context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+
+            # Strategy 1: request API — fastest, works for direct file URLs
+            try:
+                api_resp = await context.request.get(url, timeout=60_000)
+                if api_resp.ok:
+                    ct = api_resp.headers.get("content-type", "").lower()
+                    body = await api_resp.body()
+                    is_pdf = body and body.lstrip()[:5].startswith(b"%PDF")
+                    is_doc = "application/pdf" in ct or "octet-stream" in ct or is_pdf
+                    if is_doc and body:
+                        logger.info(f"  Downloaded {len(body):,} bytes via request API from {url}.")
+                        await browser.close()
+                        return body
+                    if "html" in ct:
+                        logger.info(f"  Request API returned HTML for {url} — trying page download.")
+            except Exception as e:
+                logger.debug(f"  Request API failed for {url}: {e}")
+
+            # Strategy 2: page.goto + response interception + download event
+            page = await context.new_page()
+            captured: List[bytes] = []
+
+            async def on_response(response) -> None:
+                if captured:
+                    return
+                if not response.ok:
+                    return
+                ct = response.headers.get("content-type", "").lower()
+                if "pdf" in ct or "octet-stream" in ct or "download" in ct:
+                    try:
+                        body = await response.body()
+                        if body and body.lstrip()[:5].startswith(b"%PDF"):
+                            captured.append(body)
+                            logger.info(f"  Response intercept: {len(body):,} bytes.")
+                    except Exception:
+                        pass
+
+            async def on_download(download) -> None:
+                if captured:
+                    return
+                try:
+                    path = await download.path()
+                    if path:
+                        with open(path, "rb") as fh:
+                            data = fh.read()
+                        if data:
+                            captured.append(data)
+                            logger.info(f"  Download event: {len(data):,} bytes.")
+                except Exception as dl_err:
+                    if "canceled" not in str(dl_err).lower():
+                        logger.warning(f"  Download event read error: {dl_err}")
+
+            page.on("response", on_response)
+            page.on("download", on_download)
+
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            except Exception as e:
+                logger.debug(f"  page.goto failed for {url}: {e}")
+
+            # Allow async responses / download events to settle
+            await page.wait_for_timeout(3_000)
+
+            if not captured:
+                # Fallback: fetch the current URL from within the browser context
+                # (inherits session cookies) — works when the doc loads via JS redirect
+                try:
+                    arr = await page.evaluate(
+                        "() => fetch(window.location.href)"
+                        ".then(r => r.arrayBuffer())"
+                        ".then(b => Array.from(new Uint8Array(b)))"
+                    )
+                    if arr:
+                        data = bytes(arr)
+                        if data.lstrip()[:5].startswith(b"%PDF"):
+                            captured.append(data)
+                            logger.info(f"  JS fetch fallback: {len(data):,} bytes.")
+                except Exception as e:
+                    logger.debug(f"  JS fetch fallback failed: {e}")
+
+            await browser.close()
+            return captured[0] if captured else None
+
+    except Exception as e:
+        logger.warning(f"  Chrome download error for {url}: {e}")
+        return None
+
+
+def _download_bytes_chrome(url: str, use_proxy: bool = False) -> Optional[bytes]:
+    """Sync wrapper around _download_bytes_chrome_async."""
+    return asyncio.run(_download_bytes_chrome_async(url, use_proxy))
 
 
 # ---------------------------------------------------------------------------
@@ -195,25 +446,55 @@ def _get_mongo_collection() -> Tuple[Any, Any]:
     return db[COLLECTION_NAME], client
 
 
-def _batch_filter_existing(collection, filing_urls: List[str]) -> List[str]:
-    """Return subset of filing_urls that are NOT yet in MongoDB."""
-    if not filing_urls:
+def _batch_filter_existing(collection, ids: List[str]) -> List[str]:
+    """
+    Level 1 dedup (RSS level): return IDs not yet in MongoDB.
+    Checks metadata.document_id — catches brief comment filings (stored with
+    filing_url as document_id) and also works for any URL-keyed record.
+    """
+    if not ids:
         return []
     existing = set()
     try:
         cursor = collection.find(
-            {"metadata.document_id": {"$in": filing_urls}},
+            {"metadata.document_id": {"$in": ids}},
             {"metadata.document_id": 1},
         )
         for doc in cursor:
             existing.add(doc.get("metadata", {}).get("document_id", ""))
     except Exception as e:
-        logger.warning(f"MongoDB batch dedup failed: {e}")
-        return filing_urls
-    new_urls = [u for u in filing_urls if u not in existing]
-    skipped = len(filing_urls) - len(new_urls)
+        logger.warning(f"MongoDB batch dedup (Level 1) failed: {e}")
+        return ids
+    new_ids = [i for i in ids if i not in existing]
+    skipped = len(ids) - len(new_ids)
     if skipped:
-        logger.info(f"Dedup: {skipped} already in DB, {len(new_urls)} new.")
+        logger.info(f"Level 1 dedup: {skipped} filing(s) already in DB, {len(new_ids)} to process.")
+    return new_ids
+
+
+def _batch_filter_existing_docs(collection, doc_urls: List[str]) -> List[str]:
+    """
+    Level 2 dedup (document level): return doc_urls not yet in MongoDB.
+    Checks metadata.document_id — called after parsing document links from the
+    filing detail page to avoid re-downloading/re-analyzing existing PDFs.
+    """
+    if not doc_urls:
+        return []
+    existing = set()
+    try:
+        cursor = collection.find(
+            {"metadata.document_id": {"$in": doc_urls}},
+            {"metadata.document_id": 1},
+        )
+        for doc in cursor:
+            existing.add(doc.get("metadata", {}).get("document_id", ""))
+    except Exception as e:
+        logger.warning(f"MongoDB batch dedup (Level 2) failed: {e}")
+        return doc_urls
+    new_urls = [u for u in doc_urls if u not in existing]
+    skipped = len(doc_urls) - len(new_urls)
+    if skipped:
+        logger.info(f"Level 2 dedup: {skipped} document(s) already in DB, {len(new_urls)} new.")
     return new_urls
 
 
@@ -221,16 +502,35 @@ def _batch_filter_existing(collection, filing_urls: List[str]) -> List[str]:
 # RSS feed fetch and parse
 # ---------------------------------------------------------------------------
 
-def fetch_rss_feed(rss_url: str, session: requests.Session) -> Optional[str]:
-    """Fetch the ECFS RSS feed XML. Returns raw XML string or None on failure."""
-    try:
-        resp = session.get(rss_url, headers=_REQUEST_HEADERS, timeout=(5, 120), verify=False)
-        resp.raise_for_status()
-        logger.info(f"RSS feed fetched ({len(resp.text):,} chars).")
-        return resp.text
-    except Exception as e:
-        logger.error(f"Failed to fetch RSS feed: {e}")
-        return None
+def fetch_rss_feed(rss_url: str, use_proxy: bool = False) -> Optional[str]:
+    """
+    Fetch the ECFS RSS feed XML via system Chrome.
+
+    The FCC ECFS API requires a browser TLS fingerprint (Akamai WAF); Python
+    requests and curl are silently blocked. Returns raw XML string or None.
+    """
+    logger.info(f"Fetching RSS feed via Chrome: {rss_url}")
+    xml_content = _fetch_url_chrome(rss_url, use_proxy=use_proxy)
+    if xml_content:
+        logger.info(f"RSS feed fetched ({len(xml_content):,} chars).")
+    else:
+        logger.error("Failed to fetch RSS feed via Chrome.")
+    return xml_content
+
+
+def _extract_xml(html_or_xml: str) -> str:
+    """
+    Playwright wraps plain XML/RSS responses in <html><body><pre>...</pre></body></html>
+    when the server returns Content-Type: text/xml or application/rss+xml.
+    Extract the raw XML from the <pre> block if present, otherwise return as-is.
+    """
+    pre_match = re.search(r"<pre[^>]*>([\s\S]*?)</pre>", html_or_xml, re.IGNORECASE)
+    if pre_match:
+        return pre_match.group(1)
+    stripped = html_or_xml.strip()
+    if stripped.startswith("<?xml") or stripped.startswith("<rss"):
+        return stripped
+    return html_or_xml
 
 
 def parse_rss_items(xml_content: str) -> List[Dict[str, Any]]:
@@ -241,6 +541,7 @@ def parse_rss_items(xml_content: str) -> List[Dict[str, Any]]:
         filing_url, title, description, comment_type, filers, lawfirms,
         date_received, date_posted, dc_date
     """
+    xml_content = _extract_xml(xml_content)
     try:
         root = ET.fromstring(xml_content)
     except ET.ParseError as e:
@@ -307,75 +608,75 @@ def parse_rss_items(xml_content: str) -> List[Dict[str, Any]]:
 # FCC JSON API — filing detail and document list
 # ---------------------------------------------------------------------------
 
-def _get_filing_documents(filing_id: str, session: requests.Session) -> List[Dict[str, Any]]:
+def _fetch_filing_detail_html(filing_id: str, use_proxy: bool) -> Optional[str]:
     """
-    Fetch the document list for a filing via the FCC JSON API.
-    Falls back to sequential URL probing if the API returns no documents.
-
-    Returns list of dicts: [{"url": "...", "filename": "..."}]
+    Fetch the filing detail page via Chrome and return fully rendered HTML.
+    Waits for React to render the page content before capturing.
     """
-    api_url = f"{FCC_API_BASE}/filing/{filing_id}"
-    try:
-        resp = session.get(api_url, headers=_REQUEST_HEADERS, timeout=(5, 60), verify=False)
-        if resp.status_code == 200:
-            data = resp.json()
-            # The filing may be nested under "filing" key or at root level
-            filing_data = data.get("filing", data)
-            raw_docs = filing_data.get("documents", [])
-            if raw_docs:
-                docs = []
-                for i, doc in enumerate(raw_docs, 1):
-                    url = (
-                        doc.get("src")
-                        or doc.get("url")
-                        or f"{FCC_BASE}/ecfs/document/{filing_id}/{i}"
-                    )
-                    filename = doc.get("filename", f"document_{i}.pdf")
-                    docs.append({"url": url, "filename": filename, "index": i})
-                logger.info(f"  JSON API returned {len(docs)} document(s) for {filing_id}.")
-                return docs
-            # API succeeded but no documents listed — may be a text-only filing
-            logger.info(f"  JSON API returned 0 documents for {filing_id} (may be text-only).")
-            return []
-    except Exception as e:
-        logger.debug(f"  JSON API request failed for {filing_id}: {e}")
+    url = f"{FCC_BASE}/ecfs/filing/{filing_id}"
+    logger.info(f"  Fetching filing detail page: {url}")
+    return _fetch_url_chrome(
+        url,
+        use_proxy=use_proxy,
+        wait_for_selector="label#id_submission",
+        wait_until="networkidle",
+        use_page_content=True,
+    )
 
-    # Fallback: probe sequential document URLs until 404
-    logger.info(f"  Probing sequential document URLs for {filing_id}...")
-    docs = []
-    for i in range(1, 21):
-        url = f"{FCC_BASE}/ecfs/document/{filing_id}/{i}"
-        try:
-            resp = session.head(url, headers=_REQUEST_HEADERS, timeout=(5, 30), verify=False, allow_redirects=True)
-            if resp.status_code == 404:
-                break
-            if resp.status_code < 400:
-                docs.append({"url": url, "filename": f"document_{i}.pdf", "index": i})
-        except Exception:
-            break
-    logger.info(f"  Found {len(docs)} document(s) via URL probing for {filing_id}.")
+
+def _parse_document_links(html: str) -> List[Dict[str, Any]]:
+    """
+    Parse document download links from the "Document Download" card in
+    the filing detail page HTML. Works for any document host domain.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    docs: List[Dict[str, Any]] = []
+    seen_urls: set = set()
+
+    for header in soup.find_all("div", class_="card-header"):
+        if "Document Download" not in header.get_text():
+            continue
+        parent = header.find_parent()
+        if not parent:
+            continue
+        list_group = parent.find("div", class_="list-group")
+        if not list_group:
+            continue
+        for link in list_group.find_all("a", href=True):
+            href = link.get("href", "").strip()
+            if not href or href in seen_urls:
+                continue
+            seen_urls.add(href)
+            aria = link.get("aria-label", "")
+            filename = (
+                aria.replace("Download ", "").strip()
+                or link.get_text(strip=True)
+                or href.split("/")[-1]
+                or "document.pdf"
+            )
+            docs.append({"url": href, "filename": filename, "index": len(docs) + 1})
+        break  # Only process the first Document Download card
+
     return docs
 
 
-def _get_brief_comment_from_api(filing_id: str, session: requests.Session) -> str:
+def _parse_brief_comment(html: str) -> str:
     """
-    Attempt to retrieve the brief comment text for a text-only filing
-    from the FCC JSON API.
+    Parse the Brief Comment field from the filing detail page HTML.
+    Only present on text-only filings with no document attachments.
     """
-    api_url = f"{FCC_API_BASE}/filing/{filing_id}"
-    try:
-        resp = session.get(api_url, headers=_REQUEST_HEADERS, timeout=(5, 60), verify=False)
-        if resp.status_code == 200:
-            data = resp.json()
-            filing_data = data.get("filing", data)
-            # Try common field names for brief comment / inline text
-            for field in ("text_data", "brief_comment", "comment", "description_of_filing"):
-                val = filing_data.get(field, "")
-                if val and isinstance(val, str) and len(val.strip()) > 5:
-                    logger.info(f"  Brief comment found in API field '{field}' ({len(val)} chars).")
-                    return val.strip()
-    except Exception as e:
-        logger.debug(f"  Could not retrieve brief comment from API for {filing_id}: {e}")
+    soup = BeautifulSoup(html, "html.parser")
+    comment_label = soup.find("label", {"id": "comment"})
+    if not comment_label:
+        return ""
+    parent_div = comment_label.find_parent("div", class_=lambda x: x and "form-group" in x)
+    if parent_div:
+        brief_label = parent_div.find("label", string=re.compile(r"Brief Comment", re.I))
+        if brief_label:
+            text = comment_label.get_text(strip=True)
+            if text:
+                logger.info(f"  Brief Comment found ({len(text)} chars).")
+                return text
     return ""
 
 
@@ -383,21 +684,20 @@ def _get_brief_comment_from_api(filing_id: str, session: requests.Session) -> st
 # Document download and text extraction
 # ---------------------------------------------------------------------------
 
-def _download_document(url: str, session: requests.Session) -> Optional[bytes]:
-    """Download a document by URL and return raw bytes."""
-    try:
-        resp = session.get(url, headers=_REQUEST_HEADERS, timeout=(5, 120), verify=False)
-        resp.raise_for_status()
-        content = resp.content
-        content_type = resp.headers.get("Content-Type", "")
-        if "html" in content_type.lower() and b"%PDF" not in content[:10]:
-            logger.warning(f"  Got HTML instead of document for {url}. Skipping.")
-            return None
+def _download_document(url: str, use_proxy: bool = False) -> Optional[bytes]:
+    """
+    Download a document by URL and return raw bytes via Chrome.
+
+    FCC document URLs (www.fcc.gov and docs.fcc.gov) are behind the same
+    Akamai WAF as the API — requests/curl hang indefinitely. Chrome is used
+    directly as the primary downloader.
+    """
+    content = _download_bytes_chrome(url, use_proxy=use_proxy)
+    if content:
         logger.info(f"  Downloaded {len(content):,} bytes from {url}.")
-        return content
-    except Exception as e:
-        logger.warning(f"  Download failed for {url}: {e}")
-        return None
+    else:
+        logger.warning(f"  Chrome download returned nothing for {url}.")
+    return content
 
 
 def _extract_text_from_pdf(pdf_bytes: bytes) -> str:
@@ -481,6 +781,124 @@ def _upload_to_s3(pdf_bytes: bytes, filing_id: str, filename: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Per-record analysis helper (shared by document loop and brief comment path)
+# ---------------------------------------------------------------------------
+
+def _process_single_record(
+    doc_number: str,
+    full_text: str,
+    metadata: Dict[str, Any],
+    filing_id: str,
+    filers: str,
+    comment_type: str,
+    date_received: str,
+    docket_number: str,
+    s3_url: str,
+    filing_ctx: Dict[str, Any],
+    processed: List[Dict[str, Any]],
+    test_mode: bool,
+    analyze_docket_entry,
+) -> None:
+    """
+    Run tier1/2/3 analysis for one record (a single document or a brief comment)
+    and append the result to `processed`.
+
+    MongoDB is always written (test_mode=False passed to analyze_docket_entry).
+    In test_mode: email is sent to TEST_MODE_EMAIL_RECIPIENT only (not production routing).
+    In production: email is sent via send_docket_email (org-aware routing).
+    S3 upload is handled by the caller; not repeated here.
+    """
+    logger.info(f"  Analyzing — type={comment_type} filers={filers[:60]}")
+    try:
+        # Always save to MongoDB regardless of test_mode
+        result = analyze_docket_entry(
+            doc_number=doc_number,
+            full_text=full_text,
+            metadata=metadata,
+            test_mode=False,
+        )
+        status = result.get("status", "unknown")
+
+        if result.get("error"):
+            msg = f"Docket analysis error for {doc_number}: {result['error']}"
+            logger.warning(f"  {msg}")
+            processed.append({
+                "filing_id": filing_id,
+                "doc_number": doc_number,
+                "status": "analysis_error",
+                "error": result["error"],
+            })
+            return
+
+        logger.info(f"  → status={status}")
+
+        intake_note = None
+        email_html = None
+        if status == "new_analysis":
+            comprehensive_summary = result.get("comprehensive_summary") or ""
+            intake_note = generate_intake_note(comprehensive_summary)
+
+            if intake_note is None:
+                logger.warning(f"  Intake note generation failed for {doc_number}")
+            else:
+                document_url = metadata.get("url") or doc_number
+                base_html = render_intake_card(intake_note, document_url)
+                email_html = render_email_html(
+                    tier2_response=((result.get("tier2_analysis") or {}).get("response") or ""),
+                    tier3_response=((result.get("tier3_risk_assessment") or {}).get("response") or ""),
+                    base_html=base_html,
+                    metadata=metadata,
+                )
+                logger.info("  Email HTML rendered.")
+
+                target_company_name = (result.get("metadata") or {}).get("target_company_name", "")
+                subject = (
+                    f"{target_company_name} : FCC {docket_number}"
+                    f": {filers[:60]} - {comment_type}"
+                )
+
+                if test_mode:
+                    # Test mode: send to personal email only
+                    logger.info(f"  test_mode=True — sending to {TEST_MODE_EMAIL_RECIPIENT} only.")
+                    send_direct_email(
+                        recipients=[TEST_MODE_EMAIL_RECIPIENT],
+                        payload={"subject": f"[TEST] {subject}", "html": email_html},
+                    )
+                else:
+                    # Production: org-aware routing
+                    send_docket_email(
+                        subject=subject,
+                        email_html=email_html,
+                        doc_id=filing_id,
+                        docket_number=docket_number,
+                        docket_type=DOCKET_TYPE,
+                        deal_id=result.get("deal_id"),
+                    )
+        else:
+            logger.info(f"  Skipping intake note and email — status={status}")
+
+        processed.append({
+            "filing_id": filing_id,
+            "doc_number": doc_number,
+            "comment_type": comment_type,
+            "filers": filers,
+            "date": date_received,
+            "status": status,
+            "s3_url": s3_url,
+        })
+
+    except Exception as e:
+        msg = f"Docket analysis exception for {doc_number}: {e}"
+        logger.error(f"  {msg}")
+        processed.append({
+            "filing_id": filing_id,
+            "doc_number": doc_number,
+            "status": "analysis_error",
+            "error": str(e),
+        })
+
+
+# ---------------------------------------------------------------------------
 # Single-docket scraper
 # ---------------------------------------------------------------------------
 
@@ -490,6 +908,7 @@ def scrape_fcc_ecfs(
     use_proxy: bool = True,
     test_mode: bool = False,
     save_json: bool = False,
+    local_doc_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Scrape one FCC ECFS docket: fetch RSS → dedup → download docs →
@@ -501,6 +920,8 @@ def scrape_fcc_ecfs(
         use_proxy:      Route requests through residential proxy
         test_mode:      Analyze but do NOT write to MongoDB or S3 or send emails
         save_json:      Save parsed filing list to JSON for debugging
+        local_doc_dir:  If set, save each downloaded document to
+                        <local_doc_dir>/<filing_id>/<filename> on disk.
 
     Returns:
         Dict with success, counts, and per-filing results.
@@ -526,30 +947,20 @@ def scrape_fcc_ecfs(
             context={**_run_ctx, **(extra_ctx or {})},
         )
 
-    # Step 1: MongoDB setup
+    # Step 1: MongoDB setup (always connect — writes happen in both test and production)
     collection = None
     mongo_client = None
-    if not test_mode:
-        try:
-            collection, mongo_client = _get_mongo_collection()
-            logger.info("MongoDB connection established.")
-        except Exception as e:
-            msg = f"MongoDB connection failed: {e}"
-            logger.error(msg)
-            _error_email(msg, {"step": "mongodb_connect"})
-            return {"success": False, "error": msg, "processed": []}
+    try:
+        collection, mongo_client = _get_mongo_collection()
+        logger.info("MongoDB connection established.")
+    except Exception as e:
+        msg = f"MongoDB connection failed: {e}"
+        logger.error(msg)
+        _error_email(msg, {"step": "mongodb_connect"})
+        return {"success": False, "error": msg, "processed": []}
 
-    # Shared requests session
-    session = requests.Session()
-    session.headers.update(_REQUEST_HEADERS)
-    session.verify = False
-    proxies = _build_proxy_dict(use_proxy)
-    if proxies:
-        session.proxies.update(proxies)
-        logger.info(f"Using proxy: {DEFAULT_PROXY_HOST}:{DEFAULT_PROXY_PORT}")
-
-    # Step 2: Fetch and parse RSS feed
-    xml_content = fetch_rss_feed(rss_url, session)
+    # Step 2: Fetch and parse RSS feed (uses Chrome to bypass TLS fingerprinting)
+    xml_content = fetch_rss_feed(rss_url, use_proxy=use_proxy)
     if not xml_content:
         msg = f"Could not fetch RSS feed for docket {docket_number}"
         logger.error(msg)
@@ -571,16 +982,18 @@ def scrape_fcc_ecfs(
             json.dump(filings, f, indent=2, ensure_ascii=False)
         logger.info(f"Saved filing list to {out_file}")
 
-    # Step 3: Dedup against MongoDB
-    all_urls = [f["filing_url"] for f in filings]
-    if collection is not None:
-        new_urls_set = set(_batch_filter_existing(collection, all_urls))
-    else:
-        new_urls_set = set(all_urls)
+    # Step 3: Level 1 dedup — filter filings by filing URL against metadata.document_id.
+    # This catches brief comment filings (stored with filing_url as document_id).
+    # Document filings are not caught here (their document_id = doc URL), so they
+    # proceed to Level 2 dedup after the detail page is fetched.
+    all_filing_urls = [f["filing_url"] for f in filings]
+    not_in_db = set(_batch_filter_existing(collection, all_filing_urls))
 
-    new_filings = [f for f in filings if f["filing_url"] in new_urls_set]
+    # A filing passes Level 1 if its filing_url is not yet a document_id in DB.
+    # Document filings always pass (filing_url != their stored doc_urls).
+    new_filings = [f for f in filings if f["filing_url"] in not_in_db]
     if not new_filings:
-        logger.info("All filings already in the database.")
+        logger.info("All filings already in the database (Level 1 dedup).")
         if mongo_client:
             mongo_client.close()
         return {
@@ -600,7 +1013,10 @@ def scrape_fcc_ecfs(
 
     # Step 4: Process each new filing
     processed = []
+    abort_run = False  # set True to stop all further filings on document failure
     for i, filing in enumerate(new_filings):
+        if abort_run:
+            break
         filing_url = filing["filing_url"]
         filing_id = filing["filing_id"]
         comment_type = filing["comment_type"] or "FILING"
@@ -622,172 +1038,179 @@ def scrape_fcc_ecfs(
             "filers": filers[:120],
         }
 
-        # 4a: Get document list from FCC JSON API
-        doc_list = _get_filing_documents(filing_id, session)
+        # 4a: Fetch filing detail page via Chrome (React app — waits for full render)
+        detail_html = _fetch_filing_detail_html(filing_id, use_proxy=use_proxy)
 
-        # 4b: Download and extract text from each document
-        full_text = ""
-        primary_bytes: Optional[bytes] = None
-        primary_filename = ""
+        # 4b: Parse document download links from the detail page
+        doc_list = _parse_document_links(detail_html) if detail_html else []
+        logger.info(f"  Found {len(doc_list)} document link(s) on detail page.")
 
-        for doc_info in doc_list:
-            doc_url = doc_info["url"]
-            doc_bytes = _download_document(doc_url, session)
-            if not doc_bytes:
+        # 4c: Per-document processing — each document is its own MongoDB record
+        if doc_list:
+            # Level 2 dedup — filter doc URLs already in MongoDB
+            all_doc_urls = [d["url"] for d in doc_list]
+            new_doc_urls = set(_batch_filter_existing_docs(collection, all_doc_urls))
+            new_doc_list = [d for d in doc_list if d["url"] in new_doc_urls]
+            if not new_doc_list:
+                logger.info(f"  All {len(doc_list)} document(s) already in DB — skipping filing.")
                 continue
-            doc_text = _extract_text_from_bytes(doc_bytes, doc_url)
-            if doc_text:
-                if full_text:
-                    full_text += f"\n\n--- {doc_info['filename']} ---\n{doc_text}"
-                else:
-                    full_text = doc_text
-                    primary_bytes = doc_bytes
-                    primary_filename = doc_info["filename"]
-                logger.info(
-                    f"  Extracted {len(doc_text):,} chars from {doc_info['filename']}."
+
+            for doc_info in new_doc_list:
+                doc_url = doc_info["url"]
+                doc_filename = doc_info["filename"]
+                logger.info(f"  [{doc_info['index']}/{len(doc_list)}] {doc_filename}")
+
+                doc_bytes = _download_document(doc_url, use_proxy=use_proxy)
+                if not doc_bytes:
+                    msg = (
+                        f"Document download failed for '{doc_filename}' "
+                        f"in filing {filing_id} — aborting entire run."
+                    )
+                    logger.warning(f"  {msg}")
+                    _error_email(msg, {**_filing_ctx, "step": "download_document", "doc_url": doc_url})
+                    processed.append({
+                        "filing_id": filing_id,
+                        "doc_url": doc_url,
+                        "filename": doc_filename,
+                        "status": "run_aborted_download_failed",
+                    })
+                    abort_run = True
+                    break  # stop remaining docs; outer loop will also break
+
+                # Save document locally if local_doc_dir is configured
+                if local_doc_dir:
+                    import re as _re
+                    from pathlib import Path as _Path
+                    filing_dir = _Path(local_doc_dir) / filing_id
+                    filing_dir.mkdir(parents=True, exist_ok=True)
+                    safe_name = _re.sub(r'[^\w\-_. ]', '_', doc_filename)[:120]
+                    local_path = filing_dir / safe_name
+                    local_path.write_bytes(doc_bytes)
+                    logger.info(f"  Saved locally: {local_path} ({len(doc_bytes):,} bytes)")
+                    doc_info["local_path"] = str(local_path)
+
+                doc_text = _extract_text_from_bytes(doc_bytes, doc_url)
+                if not doc_text.strip():
+                    msg = (
+                        f"Text extraction failed for '{doc_filename}' "
+                        f"in filing {filing_id} — aborting entire run."
+                    )
+                    logger.warning(f"  {msg}")
+                    _error_email(msg, {**_filing_ctx, "step": "extract_text", "doc_url": doc_url})
+                    processed.append({
+                        "filing_id": filing_id,
+                        "doc_url": doc_url,
+                        "filename": doc_filename,
+                        "status": "run_aborted_no_text",
+                    })
+                    abort_run = True
+                    break  # stop remaining docs; outer loop will also break
+
+                logger.info(f"  Extracted {len(doc_text):,} chars.")
+
+                # Upload to S3 (always — even in test_mode for debugging)
+                s3_url = _upload_to_s3(doc_bytes, filing_id, doc_filename)
+
+                # Build per-document metadata
+                metadata = {
+                    "docket_type": DOCKET_TYPE,
+                    "docket_number": docket_number,
+                    "date": date_received or date_posted,
+                    "document_type": comment_type,
+                    "on_behalf_of": filers,
+                    "additional_info": (proceeding or filing["title"])[:200],
+                    "url": s3_url or doc_url,
+                }
+
+                _process_single_record(
+                    doc_number=doc_url,
+                    full_text=doc_text,
+                    metadata=metadata,
+                    filing_id=filing_id,
+                    filers=filers,
+                    comment_type=comment_type,
+                    date_received=date_received,
+                    docket_number=docket_number,
+                    s3_url=s3_url,
+                    filing_ctx=_filing_ctx,
+                    processed=processed,
+                    test_mode=test_mode,
+                    analyze_docket_entry=analyze_docket_entry,
                 )
+                time.sleep(2)
 
-        # 4c: If no documents, try brief comment from JSON API
-        if not full_text.strip():
-            logger.info(f"  No documents found — checking JSON API for brief comment.")
-            full_text = _get_brief_comment_from_api(filing_id, session)
+        else:
+            # 4d: No documents — try brief comment (one record per filing)
+            brief_comment = _parse_brief_comment(detail_html) if detail_html else ""
 
-        # 4d: Skip if still no usable text (avoid wasting API tokens on metadata-only records)
-        if not full_text.strip():
-            logger.info(
-                f"  No PDF text or brief comment available for filing {filing_id} — skipping."
-            )
-            processed.append({
-                "filing_id": filing_id,
-                "filing_url": filing_url,
-                "comment_type": comment_type,
-                "filers": filers,
-                "date": date_received,
-                "status": "skipped_no_text",
-            })
-            time.sleep(1)
-            continue
-
-        # 4e: Upload primary document to S3
-        s3_url = ""
-        if primary_bytes and not test_mode:
-            s3_url = _upload_to_s3(primary_bytes, filing_id, primary_filename)
-
-        # 4f: Build metadata dict
-        metadata = {
-            "docket_type": DOCKET_TYPE,
-            "docket_number": docket_number,
-            "document_id": filing_url,
-            "date": date_received or date_posted,
-            "document_type": comment_type,
-            "on_behalf_of": filers,
-            "additional_info": (proceeding or filing["title"])[:200],
-            "url": s3_url or filing_url,
-        }
-
-        # 4g: Analyze (tier1/2/3 + MongoDB insert)
-        logger.info(
-            f"  Analyzing — type={comment_type} filers={filers[:60]}"
-        )
-        try:
-            result = analyze_docket_entry(
-                doc_number=filing_url,
-                full_text=full_text,
-                metadata=metadata,
-                test_mode=test_mode,
-            )
-            status = result.get("status", "unknown")
-
-            if result.get("error"):
-                msg = f"Docket analysis error for filing {filing_id}: {result['error']}"
-                logger.warning(f"  {msg}")
-                _error_email(msg, {**_filing_ctx, "step": "docket_analysis", "analysis_error": result["error"]})
+            if not brief_comment.strip():
+                logger.info(
+                    f"  No documents or brief comment for filing {filing_id} — skipping."
+                )
                 processed.append({
                     "filing_id": filing_id,
-                    "status": "analysis_error",
-                    "error": result["error"],
+                    "filing_url": filing_url,
+                    "comment_type": comment_type,
+                    "filers": filers,
+                    "date": date_received,
+                    "status": "skipped_no_text",
                 })
-                time.sleep(2)
+                time.sleep(1)
                 continue
 
-            logger.info(f"  → status={status}")
+            logger.info(f"  Using brief comment ({len(brief_comment)} chars).")
 
-            # 4h: Intake note + email (new analyses only, skipped in test_mode)
-            intake_note = None
-            email_html = None
-            if status == "new_analysis" and not test_mode:
-                comprehensive_summary = result.get("comprehensive_summary") or ""
-                intake_note = generate_intake_note(comprehensive_summary)
+            # Build metadata for brief comment record
+            metadata = {
+                "docket_type": DOCKET_TYPE,
+                "docket_number": docket_number,
+                "date": date_received or date_posted,
+                "document_type": comment_type,
+                "on_behalf_of": filers,
+                "additional_info": (proceeding or filing["title"])[:200],
+                "url": filing_url,
+            }
 
-                if intake_note is None:
-                    msg = f"Intake note generation failed for filing {filing_id}"
-                    logger.warning(f"  {msg}")
-                    _error_email(msg, {**_filing_ctx, "step": "gpt_intake_note"})
-                else:
-                    document_url = metadata.get("url") or filing_url
-                    base_html = render_intake_card(intake_note, document_url)
-                    email_html = render_email_html(
-                        tier2_response=((result.get("tier2_analysis") or {}).get("response") or ""),
-                        tier3_response=((result.get("tier3_risk_assessment") or {}).get("response") or ""),
-                        base_html=base_html,
-                        metadata=metadata,
-                    )
-                    logger.info("  Email HTML rendered.")
-
-                    target_company_name = (result.get("metadata") or {}).get("target_company_name", "")
-                    subject = (
-                        f"{target_company_name} : FCC {docket_number}"
-                        f": {filers[:60]} - {comment_type}"
-                    )
-                    send_docket_email(
-                        subject=subject,
-                        email_html=email_html,
-                        doc_id=filing_id,
-                        docket_number=docket_number,
-                        docket_type=DOCKET_TYPE,
-                        deal_id=result.get("deal_id"),
-                    )
-            elif status == "new_analysis" and test_mode:
-                logger.info("  test_mode=True — skipping intake note and email.")
-            else:
-                logger.info(f"  Skipping intake note and email — status={status}")
-
-            processed.append({
-                "filing_id": filing_id,
-                "filing_url": filing_url,
-                "comment_type": comment_type,
-                "filers": filers,
-                "date": date_received,
-                "status": status,
-                "s3_url": s3_url,
-                "intake_note": intake_note,
-                "email_html": email_html,
-            })
-
-        except Exception as e:
-            msg = f"Docket analysis exception for filing {filing_id}: {e}"
-            logger.error(f"  {msg}")
-            _error_email(msg, {**_filing_ctx, "step": "docket_analysis"})
-            processed.append({
-                "filing_id": filing_id,
-                "status": "analysis_error",
-                "error": str(e),
-            })
-
-        time.sleep(2)
+            _process_single_record(
+                doc_number=filing_url,
+                full_text=brief_comment,
+                metadata=metadata,
+                filing_id=filing_id,
+                filers=filers,
+                comment_type=comment_type,
+                date_received=date_received,
+                docket_number=docket_number,
+                s3_url="",
+                filing_ctx=_filing_ctx,
+                processed=processed,
+                test_mode=test_mode,
+                analyze_docket_entry=analyze_docket_entry,
+            )
+            time.sleep(2)
 
     if mongo_client:
         mongo_client.close()
 
-    success_count = sum(
-        1 for p in processed
-        if p.get("status") not in ("analysis_error", "skipped_no_text")
+    _failed_statuses = (
+        "analysis_error", "skipped_no_text", "download_failed",
+        "run_aborted_download_failed", "run_aborted_no_text",
     )
+    success_count = sum(1 for p in processed if p.get("status") not in _failed_statuses)
     skipped_count = sum(1 for p in processed if p.get("status") == "skipped_no_text")
-    logger.info(
-        f"Finished. {success_count}/{len(new_filings)} filing(s) analyzed, "
-        f"{skipped_count} skipped (no text)."
+    aborted_count = sum(
+        1 for p in processed
+        if p.get("status") in ("run_aborted_download_failed", "run_aborted_no_text")
     )
+    if abort_run:
+        logger.warning(
+            f"Run aborted early due to document failure. "
+            f"{success_count} record(s) analyzed before abort."
+        )
+    else:
+        logger.info(
+            f"Finished. {success_count} record(s) analyzed across {len(new_filings)} filing(s), "
+            f"{skipped_count} skipped (no text), {aborted_count} aborted (download/extract failure)."
+        )
 
     return {
         "success": True,
@@ -809,6 +1232,7 @@ def scrape_all_fcc_ecfs(
     use_proxy: bool = True,
     test_mode: bool = False,
     save_json: bool = False,
+    local_doc_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Read fcc_ecfs_dockets.json and run scrape_fcc_ecfs() for every active entry.
@@ -850,6 +1274,7 @@ def scrape_all_fcc_ecfs(
             use_proxy=use_proxy,
             test_mode=test_mode,
             save_json=save_json,
+            local_doc_dir=local_doc_dir,
         )
         all_results.append(result)
 
@@ -906,6 +1331,10 @@ def main() -> None:
         "--save-json", action="store_true", default=False,
         help="Save parsed filing list to JSON for debugging",
     )
+    parser.add_argument(
+        "--local-doc-dir", default=None, metavar="DIR",
+        help="Save each downloaded document to DIR/<filing_id>/<filename> on disk",
+    )
 
     args = parser.parse_args()
     use_proxy = not args.no_proxy
@@ -916,6 +1345,7 @@ def main() -> None:
             use_proxy=use_proxy,
             test_mode=args.test_mode,
             save_json=args.save_json,
+            local_doc_dir=args.local_doc_dir,
         )
     else:
         # Find the rss_url for the given docket_number from the config
@@ -942,6 +1372,7 @@ def main() -> None:
             use_proxy=use_proxy,
             test_mode=args.test_mode,
             save_json=args.save_json,
+            local_doc_dir=args.local_doc_dir,
         )
 
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
