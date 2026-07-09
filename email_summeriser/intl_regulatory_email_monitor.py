@@ -62,7 +62,6 @@ DEAL_STATE_FILE = Path(__file__).parent / "intl_deal_state.json"
 
 # Email patterns — match all Hyperion sender addresses
 SENDERS = [
-    'kaushal@hyperiontechnologies.ai',
     'info@hyperiontechnologies.ai',
     'alerts@hyperiontechnologies.ai'
 ]
