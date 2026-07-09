@@ -45,6 +45,12 @@ from dataclasses import replace
 from log_utils import today_ist_date_str
 import logging
 import os
+import sys
+
+# Make email_summeriser importable from this root context
+_EMAIL_SUMMARISER_DIR = os.path.join(os.path.dirname(__file__), 'email_summeriser')
+if _EMAIL_SUMMARISER_DIR not in sys.path:
+    sys.path.insert(0, _EMAIL_SUMMARISER_DIR)
 import asyncio
 import socket
 import subprocess
@@ -2389,6 +2395,75 @@ def fcc_ecfs_scraper_endpoint():
     except Exception as e:
         logger.error(f"Error in FCC ECFS scraper endpoint: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# International Regulatory Email Monitor
+# ---------------------------------------------------------------------------
+
+@app.route('/intl-reg-email-monitor', methods=['GET'])
+def intl_reg_email_monitor():
+    """
+    Trigger a single Gmail scan for international regulatory [FRMD] emails.
+
+    Checks for unprocessed emails, summarizes them via Claude (2-pass: Haiku
+    extraction + Opus summary), and sends formatted HTML summary emails to
+    configured recipients. Tracks deal state in intl_deal_state.json.
+    Process runs in background — returns immediately.
+
+    Query parameters:
+        mode: "catchup" (default) — scan last 30 days for unprocessed emails
+              "live"               — only scan emails newer than the last run
+
+    Returns:
+        {"success": bool, "status": str, "message": str, "mode": str}
+    """
+    try:
+        from intl_regulatory_email_monitor import IntlRegulatoryMonitor
+    except ImportError as e:
+        logger.error(f"intl-reg-email-monitor import failed: {e}")
+        return jsonify({"success": False, "error": f"Module import failed: {e}"}), 500
+
+    mode = request.args.get('mode', 'catchup')
+    incremental = (mode == 'live')
+
+    def run_monitor():
+        try:
+            logger.info(f"intl-reg-email-monitor started (mode={mode})")
+            monitor = IntlRegulatoryMonitor()
+            mail = monitor.connect_to_gmail()
+            new_emails = monitor.check_for_new_emails(mail, incremental=incremental)
+            mail.logout()
+
+            if new_emails:
+                logger.info(f"intl-reg-email-monitor: {len(new_emails)} email(s) to process")
+                for email_data in new_emails:
+                    monitor.process_email(email_data)
+                logger.info(f"intl-reg-email-monitor: finished processing {len(new_emails)} email(s)")
+            else:
+                logger.info("intl-reg-email-monitor: no new emails found")
+        except Exception as e:
+            logger.error(f"intl-reg-email-monitor failed: {e}", exc_info=True)
+
+    submitted, msg = submit_unique_task("intl-reg-email-monitor", run_monitor)
+    if not submitted:
+        return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
+
+    return jsonify({
+        "success": True,
+        "message": msg,
+        "status": "running",
+        "mode": mode
+    }), 200
+
+
+@app.route('/intl-reg-email-monitor/status', methods=['GET'])
+def intl_reg_email_monitor_status():
+    """Check whether the intl-reg-email-monitor background task is currently running."""
+    with _running_lock:
+        future = _running_tasks.get("intl-reg-email-monitor")
+        is_running = future is not None and not future.done()
+    return jsonify({"running": is_running}), 200
 
 
 # ---------------------------------------------------------------------------

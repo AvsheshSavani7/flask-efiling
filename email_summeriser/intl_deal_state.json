@@ -1,0 +1,239 @@
+{
+  "08700.003036/2026-15": {
+    "deal_id": "",
+    "process_number": "08700.003036/2026-15",
+    "target": "Warner Bros. Discovery, Inc. (\"WBD\")",
+    "acquirer": "Paramount Skydance Corporation (\"PSKY\")",
+    "jurisdiction": "Brazil",
+    "regulatory_body": "Conselho Administrativo de Defesa Econômica (CADE) - Superintendência-Geral (SG)",
+    "deal_type": "Finalistic: Ordinary Concentration Act",
+    "registration_date": "31/03/2026",
+    "update_count": 22,
+    "first_seen": "2026-07-09T11:12:46+05:30",
+    "last_updated": "2026-07-09T11:12:46+05:30",
+    "current_status": "Approved Unconditionally",
+    "current_review_stage": "Decision",
+    "updates": [
+      {
+        "email_id": "",
+        "timestamp": "2026-03-31",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Merger notification filed by Paramount Skydance Corporation and Warner Bros. Discovery, Inc. Initial documents registered including notification, forms, powers of attorney, and contract.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-04-01",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Ordinary despachos (decisions 340 and 341) issued. Restricted access files created for CADE and the parties.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-04-06",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Edital 228 published for public comment period on the merger.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-04-08",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Publication of the merger notice in the Diário Oficial da União (DOU). Power of attorney filed for PRINCE SUB INC.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-04-14",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Certification issued. Ordinary despacho issued by the unit.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-04-23",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Petition filed by Feneec and Abraplex with supporting documents and power of attorney.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-04-29",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Petition filed by the requesting parties (Paramount and Warner).",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-05-07",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Administrative despacho (SG 587) issued.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-05-08",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Certification issued.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-05-14",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Administrative despacho (SG 610) issued.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-05-26",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Petition filed by Paramount and Warner. Technical Opinion 12 and Administrative despacho (SG 687) issued. Decision despacho 550 issued.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-05-29",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Meeting attendance list registered.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-06-03",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Competitor distributor questionnaire issued. Petition and email from The Walt Disney Company and another petition filed.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-06-08",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Questionnaires sent to film distributors (Downtown/Freespirit, H2O, Paris Filmes, and Imagem Filmes).",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-06-10",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Petition filed by Paramount and Warner with two annexes.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-06-14",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Questionnaires sent to Disney, Sony/Columbia Tristar, and other film distributors.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-06-16",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Questionnaire sent to Diamond Films do Brasil.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-06-17",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Two petitions filed with power of attorney.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-06-22",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Certification issued. Petition and questionnaire filed.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-07-01",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Petition filed by Paramount Skydance Corporation with supporting annexes.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "",
+        "timestamp": "2026-07-08",
+        "email_subject": "",
+        "L1_headline": "",
+        "action_taken": "Technical Opinion 6 and Administrative despacho (SG 899) signed and issued.",
+        "review_stage": "",
+        "approval_status": "",
+        "source": "backfill"
+      },
+      {
+        "email_id": "<CAAZgwEApyz-TOUYPaPvPuegRZN=rrtDWO1B_WTOJ5_g9Q1L4gg@mail.gmail.com>",
+        "timestamp": "2026-07-09T11:12:46+05:30",
+        "email_subject": "Fwd: WBD/PSKY: CADE Brazil - Regulatory Update - [FRMD]",
+        "L1_headline": "+ WBD – CADE unconditionally approves PSKY acquisition of WBD. | 07/08/26",
+        "action_taken": "Issued unconditional clearance decision (Aprovação sem Restrições) via Despacho SG 899 and integrated Parecer 6/2026/CGAA1/SGA1/SG/CADE",
+        "review_stage": "Decision",
+        "approval_status": "Approved Unconditionally",
+        "significance": "critical"
+      }
+    ]
+  }
+}
