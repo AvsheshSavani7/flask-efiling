@@ -69,7 +69,7 @@ SENDERS = [
 
 # Recipients for summary emails (in addition to self)
 SUMMARY_RECIPIENTS = [
-    'avshesh.savani@teqnodux.com',
+    'josh@hyperiontechnologies.ai',
 ]
 # Exclude 8-K emails (handled by the 8-K monitor)
 EXCLUDE_PATTERN = re.compile(r'SEC Filing.*8-K', re.IGNORECASE)
