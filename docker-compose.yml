@@ -12,6 +12,7 @@ services:
     volumes:
     # Pipeline log files — persisted on host so logs survive container rebuilds.
       - /opt/apps/logs/flask:/var/data/logs
+      - /opt/apps/flask-app/email_summeriser:/app/email_summeriser
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.flask-app.rule=Host(`flask.arbintel.cloud`)"
