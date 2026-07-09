@@ -64,13 +64,12 @@ DEAL_STATE_FILE = Path(__file__).parent / "intl_deal_state.json"
 SENDERS = [
     'kaushal@hyperiontechnologies.ai',
     'info@hyperiontechnologies.ai',
-    'alerts@hyperiontechnologies.ai',
-    "avshesh.savani@teqnodux.com"
+    'alerts@hyperiontechnologies.ai'
 ]
 
 # Recipients for summary emails (in addition to self)
 SUMMARY_RECIPIENTS = [
-    'kaushal@hyperiontechnologies.ai',
+    'avshesh.savani@teqnodux.com',
 ]
 # Exclude 8-K emails (handled by the 8-K monitor)
 EXCLUDE_PATTERN = re.compile(r'SEC Filing.*8-K', re.IGNORECASE)
