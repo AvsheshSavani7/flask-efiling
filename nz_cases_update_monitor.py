@@ -348,6 +348,13 @@ def detect_changes(
     for field in ("title", "description", "outcome", "tag", "status"):
         old_val = _normalize_value(old_case.get(field))
         new_val = _normalize_value(current_info.get(field))
+        # Skip description if scrape returned empty but old value exists —
+        # likely a partial page load, not a real removal.
+        if field == "description" and old_val is not None and new_val is None:
+            logger.warning(
+                "description empty on scrape but old record has a value — skipping (possible partial page load)"
+            )
+            continue
         if old_val != new_val:
             change_type = "new" if old_val is None and new_val is not None else (
                 "removed" if old_val is not None and new_val is None else "updated")
@@ -357,17 +364,25 @@ def detect_changes(
     # Case details (key-value): emit per-field so email can mark only changed rows
     old_details = old_case.get("case_details") or {}
     new_details = current_info.get("case_details") or {}
-    all_keys = set(old_details.keys()) | set(new_details.keys())
-    for key in sorted(all_keys):
-        old_val = _normalize_value(old_details.get(key))
-        new_val = _normalize_value(new_details.get(key))
-        if old_val is None and new_val is not None:
-            changes.append((f"Case details: {key}", None, new_val, "new"))
-        elif old_val is not None and new_val is None:
-            changes.append((f"Case details: {key}", old_val, None, "removed"))
-        elif old_val != new_val:
-            changes.append(
-                (f"Case details: {key}", old_val, new_val, "updated"))
+    if not new_details and old_details:
+        # Scrape returned empty case_details but old record has data — likely a
+        # partial page load. Skip to avoid false "removed" alerts.
+        logger.warning(
+            "case_details empty on scrape but old record has %d key(s) — skipping comparison",
+            len(old_details),
+        )
+    else:
+        all_keys = set(old_details.keys()) | set(new_details.keys())
+        for key in sorted(all_keys):
+            old_val = _normalize_value(old_details.get(key))
+            new_val = _normalize_value(new_details.get(key))
+            if old_val is None and new_val is not None:
+                changes.append((f"Case details: {key}", None, new_val, "new"))
+            elif old_val is not None and new_val is None:
+                changes.append((f"Case details: {key}", old_val, None, "removed"))
+            elif old_val != new_val:
+                changes.append(
+                    (f"Case details: {key}", old_val, new_val, "updated"))
 
     # Timeline: treat title tweaks on same date as updates, not new rows
     old_timeline = old_case.get("timeline") or []
@@ -882,6 +897,30 @@ def run():
                         logger.info(f"[STEP 2.5] case_doc: {case_doc}")
                         changes = detect_changes(case_doc, current_info)
                         logger.info(f"[STEP 2.6] changes: {changes}")
+
+                        # Report scrape anomalies to the error summary so the
+                        # team is aware even though no false alert was sent.
+                        _old_details = case_doc.get("case_details") or {}
+                        _new_details = current_info.get("case_details") or {}
+                        if not _new_details and _old_details:
+                            collect_error(
+                                error_items,
+                                "case_details came back empty — possible partial page load, comparison skipped",
+                                step="scrape_anomaly_case_details",
+                                case_number=case_number or None,
+                                context={"detail_url": detail_url},
+                            )
+                        _old_desc = _normalize_value(case_doc.get("description"))
+                        _new_desc = _normalize_value(current_info.get("description"))
+                        if _old_desc is not None and _new_desc is None:
+                            collect_error(
+                                error_items,
+                                "description came back empty — possible partial page load, comparison skipped",
+                                step="scrape_anomaly_description",
+                                case_number=case_number or None,
+                                context={"detail_url": detail_url},
+                            )
+
                         if not changes:
                             logger.info("[STEP 2.7] No changes detected")
                             continue
