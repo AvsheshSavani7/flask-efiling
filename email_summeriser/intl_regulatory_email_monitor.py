@@ -73,17 +73,10 @@ SUMMARY_RECIPIENTS = [
 # Exclude 8-K emails (handled by the 8-K monitor)
 EXCLUDE_PATTERN = re.compile(r'SEC Filing.*8-K', re.IGNORECASE)
 # Subject-only pattern for international regulatory content.
-# Matches the [FRMD] tag (foreign regulatory monitoring) or
-# "TICKER: Agency - Regulatory Update" format from Hyperion.
-INTL_SUBJECT_PATTERN = re.compile(
-    r'\[FRMD\]|Regulatory Update.*\[FRMD\]|'
-    r'CADE Brazil|Bundeskartellamt|ACCC.*(?:Case|Regulatory)|'
-    r'CMA.*(?:Case|Regulatory)|EU Commission.*(?:Case|Regulatory)|'
-    r'SAMR.*(?:Case|Regulatory)|COFECE.*(?:Case|Regulatory)|'
-    r'KFTC.*(?:Case|Regulatory)|JFTC.*(?:Case|Regulatory)|'
-    r'CNMC.*(?:Case|Regulatory)|Autorit[eé] de la concurrence.*(?:Case|Regulatory)',
-    re.IGNORECASE
-)
+# Requires the [FRMD] tag (foreign regulatory monitoring). The agency name
+# alone is NOT sufficient — a subject must carry [FRMD] to be processed, so
+# mistagged emails (e.g. [FRUD]) or untagged agency mentions are rejected.
+INTL_SUBJECT_PATTERN = re.compile(r'\[FRMD\]', re.IGNORECASE)
 
 # URLs to filter out (noise)
 NOISE_URL_PATTERNS = re.compile(
