@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from mn_doc_scraper import parse_mn_documents
 from mn_scraper import scrape_mn_documents
@@ -37,6 +37,14 @@ from docket_engine.nj_bpu_scraper import scrape_nj_bpu, scrape_all_nj_bpu
 from docket_engine.fcc_ecfs_scraper import scrape_fcc_ecfs, scrape_all_fcc_ecfs
 from under_review_scraper import run_under_review_scraper
 from cci_scraper_runtime import run_cci_datatable_scraper
+from ohio_puc_service import (
+    CDP_URL,
+    chrome_status,
+    fetch_doc_record_html,
+    fetch_ohio_puc_pdf,
+    pdf_result_to_api_dict,
+    start_chrome_cdp,
+)
 from orders_section31_scraper import CONFIG as CCI_SECTION31_CONFIG
 from orders_section43a_44_scraper import CONFIG as CCI_SECTION43A_44_CONFIG
 from orders_approved_with_modification_scraper import CONFIG as CCI_APPROVED_MOD_CONFIG
@@ -2610,6 +2618,146 @@ def get_log_content():
             "content": "".join(lines),
         }), 200
     except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/ohio-puc/chrome/status', methods=['GET'])
+def ohio_puc_chrome_status():
+    """Check whether real Chrome CDP is reachable for native reCAPTCHA. Test-only; no email/DB."""
+    try:
+        cdp_url = request.args.get('cdp_url', '').strip() or None
+        status = chrome_status(cdp_url) if cdp_url else chrome_status()
+        return jsonify({"success": True, **status}), 200
+    except Exception as e:
+        logger.error(f"Ohio PUC chrome status error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/ohio-puc/chrome/start', methods=['POST'])
+def ohio_puc_chrome_start():
+    """
+    Launch real Chrome with --remote-debugging-port for native reCAPTCHA.
+    Test-only; no email or background tasks.
+
+    Request body (optional):
+    {
+        "cdp_port": 9222
+    }
+    """
+    try:
+        data = request.get_json() or {}
+        cdp_port = int(data.get('cdp_port', 9222))
+        result = start_chrome_cdp(cdp_port=cdp_port)
+        return jsonify({"success": True, **result}), 200
+    except Exception as e:
+        logger.error(f"Ohio PUC chrome start error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/ohio-puc/fetch-doc-record', methods=['POST'])
+def ohio_puc_fetch_doc_record():
+    """
+    Fetch Ohio PUC DocumentRecord HTML via WAF-safe proxy navigation.
+    Test-only; returns HTML in response only (no email/DB).
+
+    Request body:
+    {
+        "case_no": "26-0435",
+        "doc_id": "4ea27e26-2aaf-4fc1-ac9e-5389c0df039a",
+        "cmid": "optional",
+        "max_waf_retries": 15
+    }
+    """
+    try:
+        data = request.get_json() or {}
+        case_no = (data.get('case_no') or '').strip()
+        doc_id = (data.get('doc_id') or '').strip()
+        if not case_no or not doc_id:
+            return jsonify({
+                "success": False,
+                "error": "case_no and doc_id are required",
+            }), 400
+
+        result = fetch_doc_record_html(
+            case_no=case_no,
+            doc_id=doc_id,
+            cmid=(data.get('cmid') or '').strip(),
+            max_waf_retries=int(data.get('max_waf_retries', 15)),
+        )
+        return jsonify(result), 200
+    except Exception as e:
+        logger.error(f"Ohio PUC fetch-doc-record error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/ohio-puc/fetch-pdf', methods=['POST'])
+def ohio_puc_fetch_pdf():
+    """
+    Fetch Ohio PUC PDF via WAF proxy navigation + native reCAPTCHA in real Chrome (CDP).
+    Test-only; returns PDF/base64 in response only (no email/DB/background jobs).
+
+    Phase 1: Playwright + residential proxy reaches DocumentRecord (WAF bypass).
+    Phase 2: Real Chrome (CDP) loads ViewImage; page calls grecaptcha.enterprise.execute()
+             and submits the form on its own. No solver tokens injected.
+
+  Request body:
+    {
+        "case_no": "26-0435",
+        "doc_id": "4ea27e26-2aaf-4fc1-ac9e-5389c0df039a",
+        "cmid": "A1001001A26G09B40003I00844",
+        "view_url": "optional override",
+        "cdp_url": "http://127.0.0.1:9222",
+        "timeout_seconds": 120,
+        "max_waf_retries": 15,
+        "auto_start_chrome": true,
+        "mode": "cdp_full" | "hybrid",
+        "return_format": "base64" | "pdf"
+    }
+
+    return_format=pdf returns raw application/pdf bytes.
+    """
+    try:
+        data = request.get_json() or {}
+        case_no = (data.get('case_no') or '').strip()
+        doc_id = (data.get('doc_id') or '').strip()
+        if not case_no or not doc_id:
+            return jsonify({
+                "success": False,
+                "error": "case_no and doc_id are required",
+            }), 400
+
+        return_format = (data.get('return_format') or 'base64').strip().lower()
+        result = fetch_ohio_puc_pdf(
+            case_no=case_no,
+            doc_id=doc_id,
+            cmid=(data.get('cmid') or '').strip(),
+            view_url=(data.get('view_url') or '').strip(),
+            cdp_url=(data.get('cdp_url') or '').strip() or CDP_URL,
+            timeout_sec=int(data.get('timeout_seconds', 120)),
+            max_waf_retries=int(data.get('max_waf_retries', 15)),
+            auto_start_chrome=bool(data.get('auto_start_chrome', True)),
+            mode=(data.get('mode') or 'cdp_full').strip().lower(),
+        )
+
+        if return_format == 'pdf' and result.success and result.pdf_bytes:
+            filename = f"ohio_puc_{result.cmid or doc_id}.pdf"
+            return Response(
+                result.pdf_bytes,
+                mimetype='application/pdf',
+                headers={
+                    'Content-Disposition': f'attachment; filename="{filename}"',
+                    'X-Ohio-PUC-CMID': result.cmid,
+                    'X-Ohio-PUC-View-URL': result.view_url,
+                },
+            )
+
+        payload = pdf_result_to_api_dict(result, as_base64=(return_format != 'none'))
+        status = 200 if result.success else 502
+        return jsonify(payload), status
+
+    except Exception as e:
+        logger.error(f"Ohio PUC fetch-pdf error: {e}")
+        logger.error(traceback.format_exc())
         return jsonify({"success": False, "error": str(e)}), 500
 
 
