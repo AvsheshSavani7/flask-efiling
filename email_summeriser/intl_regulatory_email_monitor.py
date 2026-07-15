@@ -736,7 +736,7 @@ Return ONLY the JSON array, no markdown fences or explanation."""
                     continue
 
                 # Passed all filters — now fetch full body
-                _, full_data = mail.uid('FETCH', str(uid), '(RFC822)')
+                _, full_data = mail.uid('FETCH', str(uid), '(BODY.PEEK[])')
                 email_body = full_data[0][1]
                 email_message = email.message_from_bytes(email_body)
 
