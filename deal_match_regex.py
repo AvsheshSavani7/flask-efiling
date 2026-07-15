@@ -78,6 +78,13 @@ SAMR_SUFFIXES = re.compile(
     re.IGNORECASE,
 )
 
+TURKEY_SUFFIXES = re.compile(
+    r"\b(a\.?ş|anonim|şirketi|limited|ltd|inc|incorporated|corp|corporation|"
+    r"plc|llc|lp|l\.p|holdings|group|co|company|nv|ag|se|gmbh|sa|s\.a|"
+    r"trust|fund|partners|foundation|pbc|pty)\b",
+    re.IGNORECASE,
+)
+
 # ---------------------------------------------------------------------------
 # Title separators (split-orient wrappers)
 # ---------------------------------------------------------------------------
@@ -375,6 +382,14 @@ def regex_match_samr_deal(
 ) -> Optional[str]:
     """SAMR public notice: English translation of notice title (flat scan)."""
     return regex_match_flat_scan(title_en, deals, suffixes=SAMR_SUFFIXES)
+
+
+def regex_match_turkey_deal(
+    text_en: str,
+    deals: List[Dict[str, Any]],
+) -> Optional[str]:
+    """Turkey Rekabet Kurumu: combined English title + description (flat scan)."""
+    return regex_match_flat_scan(text_en, deals, suffixes=TURKEY_SUFFIXES)
 
 
 # Aliases for test scripts

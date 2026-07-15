@@ -27,6 +27,7 @@ from cade_cases_update_monitor import process_brazil_cases_updates
 from accc_cases_update_monitor import process_accc_cases_updates
 from ftc_cases_scraper import run_ftc_cases_scraper
 from nz_comcom_case_register_to_db import run as nz_comcom_case_register_to_db_run
+from turkey_rekabet_cases_to_db import run as turkey_rekabet_cases_run
 from canada_cases_register import run_canada_cases_register
 from canada_cases_update_monitor import process_canada_cases_updates
 from nz_cases_update_monitor import run as nz_cases_update_monitor_run
@@ -2062,6 +2063,44 @@ def new_nz_comcom_case_register_to_db_endpoint():
         }), 500
 
 
+@app.route('/new-turkey-rekabet-cases-register', methods=['GET'])
+def new_turkey_rekabet_cases_register_endpoint():
+    """
+    Scrape Turkey Rekabet Kurumu (rekabet.gov.tr) M&A decisions and save new
+    records into the 'turkey_cases' MongoDB collection (dedupe by detail_url).
+    Translates Turkish → English, runs LLM + regex deal matching, sends
+    email alerts. Process runs in background.
+    """
+    try:
+        def run_register():
+            try:
+                logger.info(
+                    "Starting Turkey Rekabet cases register in background")
+                turkey_rekabet_cases_run()
+                logger.info(
+                    "✅ Turkey Rekabet cases register completed successfully")
+            except Exception as e:
+                logger.exception("Error in Turkey Rekabet cases register")
+
+        submitted, msg = submit_unique_task(
+            "turkey-rekabet-cases-register", run_register)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting Turkey Rekabet cases register: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 @app.route('/new-nz-cases-update-monitor', methods=['GET'])
 def new_nz_cases_update_monitor_endpoint():
     """
@@ -2507,7 +2546,8 @@ KNOWN_LOG_SCRIPTS = {
     "cci_section43a_44",
     "cci_approved_with_modification",
     "nj_bpu_scraper",
-    "fcc_ecfs_scraper"
+    "fcc_ecfs_scraper",
+    "turkey_rekabet_cases",
 }
 
 
