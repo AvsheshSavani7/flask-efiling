@@ -648,6 +648,11 @@ Return ONLY the JSON array, no markdown fences or explanation."""
             logger.error(f"Failed to connect to Gmail: {e}")
             raise
 
+    @staticmethod
+    def _open_inbox(mail: imaplib.IMAP4_SSL):
+        """Open inbox read-only — SEARCH/FETCH work the same but flags cannot change."""
+        mail.examine('inbox')
+
     def check_for_new_emails(self, mail: imaplib.IMAP4_SSL, incremental: bool = False) -> List[Dict]:
         """Check for new international regulatory emails.
 
@@ -657,7 +662,7 @@ Return ONLY the JSON array, no markdown fences or explanation."""
                          (much lighter on Gmail API quota). If False, scan all
                          messages from last 30 days (full catchup mode).
         """
-        mail.select('inbox')
+        self._open_inbox(mail)
 
         if incremental and hasattr(self, '_last_uid') and self._last_uid:
             # Only fetch messages newer than our high-water mark
@@ -705,9 +710,9 @@ Return ONLY the JSON array, no markdown fences or explanation."""
 
         for uid in sorted_uids:
             try:
-                # Fetch only headers first (lightweight)
+                # PEEK: fetch headers without setting the \Seen flag
                 _, msg_data = mail.uid('FETCH', str(uid),
-                                       '(BODY[HEADER.FIELDS (MESSAGE-ID SUBJECT DATE)])')
+                                       '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT DATE)])')
                 if not msg_data or not msg_data[0] or msg_data[0] == b')':
                     continue
                 header_bytes = msg_data[0][1] if isinstance(
@@ -1343,7 +1348,7 @@ Full JSON saved locally. Not sent to distribution list.
         """
         try:
             mail = self.connect_to_gmail()
-            mail.select('inbox')
+            self._open_inbox(mail)
 
             # Get the highest UID from any Hyperion sender in the last 30 days
             thirty_days_ago = (
