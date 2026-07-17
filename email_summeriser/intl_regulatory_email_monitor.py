@@ -73,17 +73,10 @@ SUMMARY_RECIPIENTS = [
 # Exclude 8-K emails (handled by the 8-K monitor)
 EXCLUDE_PATTERN = re.compile(r'SEC Filing.*8-K', re.IGNORECASE)
 # Subject-only pattern for international regulatory content.
-# Matches the [FRMD] tag (foreign regulatory monitoring) OR known agency names
-# directly, so emails without the tag are still captured.
-INTL_SUBJECT_PATTERN = re.compile(
-    r'\[FRMD\]|Regulatory Update.*\[FRMD\]|'
-    r'CADE Brazil|Bundeskartellamt|ACCC.*(?:Case|Regulatory)|'
-    r'CMA.*(?:Case|Regulatory)|EU Commission.*(?:Case|Regulatory)|'
-    r'SAMR.*(?:Case|Regulatory)|COFECE.*(?:Case|Regulatory)|'
-    r'KFTC.*(?:Case|Regulatory)|JFTC.*(?:Case|Regulatory)|'
-    r'CNMC.*(?:Case|Regulatory)|Autorit[eé] de la concurrence.*(?:Case|Regulatory)',
-    re.IGNORECASE
-)
+# Requires the [FRMD] tag (foreign regulatory monitoring). The agency name
+# alone is NOT sufficient — a subject must carry [FRMD] to be processed, so
+# mistagged emails (e.g. [FRUD]) or untagged agency mentions are rejected.
+INTL_SUBJECT_PATTERN = re.compile(r'\[FRMD\]', re.IGNORECASE)
 
 # URLs to filter out (noise)
 NOISE_URL_PATTERNS = re.compile(
@@ -842,7 +835,8 @@ Return ONLY the JSON array, no markdown fences or explanation."""
         - Response is 403/503 (bot-protected sites)
         - 200 response yields < 50 words (JS-rendered SPA pages)
         """
-        headers = {"User-Agent": "MergerArbDashboard/1.0 (merger-arb-research@outlook.com)"}
+        headers = {
+            "User-Agent": "MergerArbDashboard/1.0 (merger-arb-research@outlook.com)"}
         try:
             resp = requests.get(url, headers=headers, timeout=30)
             resp.raise_for_status()
@@ -863,11 +857,13 @@ Return ONLY the JSON array, no markdown fences or explanation."""
 
             # Detect JS-rendered pages: 200 OK but near-empty after parsing
             if len(words) < self._THIN_RESPONSE_THRESHOLD:
-                logger.info(f"   Thin response ({len(words)} words) from {url} — likely JS-rendered")
+                logger.info(
+                    f"   Thin response ({len(words)} words) from {url} — likely JS-rendered")
                 rendered = self._fetch_with_playwright(url)
                 if rendered:
                     return rendered
-                logger.info(f"   Playwright unavailable — trying Jina Reader...")
+                logger.info(
+                    f"   Playwright unavailable — trying Jina Reader...")
                 return self._fetch_with_jina(url, headers)
 
             if len(words) > 10000:
@@ -876,11 +872,13 @@ Return ONLY the JSON array, no markdown fences or explanation."""
 
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code in (403, 503):
-                logger.info(f"   Got {e.response.status_code} for {url} — trying Playwright...")
+                logger.info(
+                    f"   Got {e.response.status_code} for {url} — trying Playwright...")
                 rendered = self._fetch_with_playwright(url)
                 if rendered:
                     return rendered
-                logger.info(f"   Playwright unavailable — trying Jina Reader...")
+                logger.info(
+                    f"   Playwright unavailable — trying Jina Reader...")
                 return self._fetch_with_jina(url, headers)
             else:
                 logger.warning(f"   Failed to fetch {url}: {e}")
@@ -916,10 +914,12 @@ Return ONLY the JSON array, no markdown fences or explanation."""
 
             words = text.split()
             if len(words) < self._THIN_RESPONSE_THRESHOLD:
-                logger.warning(f"   Playwright also returned thin content ({len(words)} words) for {url}")
+                logger.warning(
+                    f"   Playwright also returned thin content ({len(words)} words) for {url}")
                 return None
 
-            logger.info(f"   Playwright rendered {len(words)} words from {url}")
+            logger.info(
+                f"   Playwright rendered {len(words)} words from {url}")
             if len(words) > 10000:
                 text = " ".join(words[:10000])
             return text
@@ -935,7 +935,8 @@ Return ONLY the JSON array, no markdown fences or explanation."""
             resp.raise_for_status()
             text = resp.text
             words = text.split()
-            logger.info(f"   Jina Reader returned {len(words)} words for {url}")
+            logger.info(
+                f"   Jina Reader returned {len(words)} words for {url}")
             return text
         except Exception as jina_e:
             logger.warning(f"   Jina Reader also failed for {url}: {jina_e}")
