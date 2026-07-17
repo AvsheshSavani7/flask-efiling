@@ -73,10 +73,17 @@ SUMMARY_RECIPIENTS = [
 # Exclude 8-K emails (handled by the 8-K monitor)
 EXCLUDE_PATTERN = re.compile(r'SEC Filing.*8-K', re.IGNORECASE)
 # Subject-only pattern for international regulatory content.
-# Requires the [FRMD] tag (foreign regulatory monitoring). The agency name
-# alone is NOT sufficient — a subject must carry [FRMD] to be processed, so
-# mistagged emails (e.g. [FRUD]) or untagged agency mentions are rejected.
-INTL_SUBJECT_PATTERN = re.compile(r'\[FRMD\]', re.IGNORECASE)
+# Matches the [FRMD] tag (foreign regulatory monitoring) OR known agency names
+# directly, so emails without the tag are still captured.
+INTL_SUBJECT_PATTERN = re.compile(
+    r'\[FRMD\]|Regulatory Update.*\[FRMD\]|'
+    r'CADE Brazil|Bundeskartellamt|ACCC.*(?:Case|Regulatory)|'
+    r'CMA.*(?:Case|Regulatory)|EU Commission.*(?:Case|Regulatory)|'
+    r'SAMR.*(?:Case|Regulatory)|COFECE.*(?:Case|Regulatory)|'
+    r'KFTC.*(?:Case|Regulatory)|JFTC.*(?:Case|Regulatory)|'
+    r'CNMC.*(?:Case|Regulatory)|Autorit[eé] de la concurrence.*(?:Case|Regulatory)',
+    re.IGNORECASE
+)
 
 # URLs to filter out (noise)
 NOISE_URL_PATTERNS = re.compile(
@@ -87,7 +94,7 @@ NOISE_URL_PATTERNS = re.compile(
 )
 
 # Claude API settings
-CLAUDE_MODEL = "claude-opus-4-6"
+CLAUDE_MODEL = "claude-opus-4-8"
 
 # Import the summarizer's prompt and schema
 
@@ -648,11 +655,6 @@ Return ONLY the JSON array, no markdown fences or explanation."""
             logger.error(f"Failed to connect to Gmail: {e}")
             raise
 
-    @staticmethod
-    def _open_inbox(mail: imaplib.IMAP4_SSL):
-        """Open inbox read-only — SEARCH/FETCH work the same but flags cannot change."""
-        mail.examine('inbox')
-
     def check_for_new_emails(self, mail: imaplib.IMAP4_SSL, incremental: bool = False) -> List[Dict]:
         """Check for new international regulatory emails.
 
@@ -662,7 +664,7 @@ Return ONLY the JSON array, no markdown fences or explanation."""
                          (much lighter on Gmail API quota). If False, scan all
                          messages from last 30 days (full catchup mode).
         """
-        self._open_inbox(mail)
+        mail.select('inbox')
 
         if incremental and hasattr(self, '_last_uid') and self._last_uid:
             # Only fetch messages newer than our high-water mark
@@ -710,9 +712,9 @@ Return ONLY the JSON array, no markdown fences or explanation."""
 
         for uid in sorted_uids:
             try:
-                # PEEK: fetch headers without setting the \Seen flag
+                # Fetch only headers first (lightweight)
                 _, msg_data = mail.uid('FETCH', str(uid),
-                                       '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT DATE)])')
+                                       '(BODY[HEADER.FIELDS (MESSAGE-ID SUBJECT DATE)])')
                 if not msg_data or not msg_data[0] or msg_data[0] == b')':
                     continue
                 header_bytes = msg_data[0][1] if isinstance(
@@ -741,7 +743,7 @@ Return ONLY the JSON array, no markdown fences or explanation."""
                     continue
 
                 # Passed all filters — now fetch full body
-                _, full_data = mail.uid('FETCH', str(uid), '(BODY.PEEK[])')
+                _, full_data = mail.uid('FETCH', str(uid), '(RFC822)')
                 email_body = full_data[0][1]
                 email_message = email.message_from_bytes(email_body)
 
@@ -830,20 +832,23 @@ Return ONLY the JSON array, no markdown fences or explanation."""
 
         return clean_urls
 
+    # Minimum words expected from a real page; below this → likely JS-rendered
+    _THIN_RESPONSE_THRESHOLD = 50
+
     def _fetch_url_text(self, url: str) -> str:
         """Fetch and extract text from a URL.
 
-        Falls back to Jina Reader for 403/503 responses (bot-protected gov sites).
+        Falls back to Playwright (headless browser) or Jina Reader when:
+        - Response is 403/503 (bot-protected sites)
+        - 200 response yields < 50 words (JS-rendered SPA pages)
         """
-        headers = {
-            "User-Agent": "MergerArbDashboard/1.0 (merger-arb-research@outlook.com)"}
+        headers = {"User-Agent": "MergerArbDashboard/1.0 (merger-arb-research@outlook.com)"}
         try:
             resp = requests.get(url, headers=headers, timeout=30)
             resp.raise_for_status()
 
             content_type = resp.headers.get("Content-Type", "")
             if "application/pdf" in content_type or url.lower().endswith(".pdf"):
-                # Use fetch_utils for PDF handling
                 from fetch_utils import fetch_text
                 return fetch_text(url, word_limit=10000)
 
@@ -855,28 +860,85 @@ Return ONLY the JSON array, no markdown fences or explanation."""
             text = re.sub(r" {2,}", " ", text)
 
             words = text.split()
+
+            # Detect JS-rendered pages: 200 OK but near-empty after parsing
+            if len(words) < self._THIN_RESPONSE_THRESHOLD:
+                logger.info(f"   Thin response ({len(words)} words) from {url} — likely JS-rendered")
+                rendered = self._fetch_with_playwright(url)
+                if rendered:
+                    return rendered
+                logger.info(f"   Playwright unavailable — trying Jina Reader...")
+                return self._fetch_with_jina(url, headers)
+
             if len(words) > 10000:
                 text = " ".join(words[:10000])
             return text
 
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code in (403, 503):
-                logger.info(
-                    f"   Got {e.response.status_code} for {url} — trying Jina Reader...")
-                try:
-                    jina_url = f"https://r.jina.ai/{url}"
-                    resp = requests.get(jina_url, headers=headers, timeout=60)
-                    resp.raise_for_status()
-                    return resp.text
-                except Exception as jina_e:
-                    logger.warning(
-                        f"   Jina Reader also failed for {url}: {jina_e}")
-                    return ""
+                logger.info(f"   Got {e.response.status_code} for {url} — trying Playwright...")
+                rendered = self._fetch_with_playwright(url)
+                if rendered:
+                    return rendered
+                logger.info(f"   Playwright unavailable — trying Jina Reader...")
+                return self._fetch_with_jina(url, headers)
             else:
                 logger.warning(f"   Failed to fetch {url}: {e}")
                 return ""
         except Exception as e:
             logger.warning(f"   Failed to fetch {url}: {e}")
+            return ""
+
+    def _fetch_with_playwright(self, url: str) -> str | None:
+        """Render a JS-heavy page with Playwright headless Chromium.
+
+        Returns extracted text, or None if Playwright is not installed.
+        """
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return None
+
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.goto(url, wait_until="networkidle", timeout=30000)
+                html = page.content()
+                browser.close()
+
+            soup = BeautifulSoup(html, "html.parser")
+            for tag in soup(["script", "style", "meta", "link", "nav", "footer"]):
+                tag.decompose()
+            text = soup.get_text(separator="\n", strip=True)
+            text = re.sub(r"\n{3,}", "\n\n", text)
+            text = re.sub(r" {2,}", " ", text)
+
+            words = text.split()
+            if len(words) < self._THIN_RESPONSE_THRESHOLD:
+                logger.warning(f"   Playwright also returned thin content ({len(words)} words) for {url}")
+                return None
+
+            logger.info(f"   Playwright rendered {len(words)} words from {url}")
+            if len(words) > 10000:
+                text = " ".join(words[:10000])
+            return text
+        except Exception as e:
+            logger.warning(f"   Playwright failed for {url}: {e}")
+            return None
+
+    def _fetch_with_jina(self, url: str, headers: dict) -> str:
+        """Fetch URL content via Jina Reader as last-resort fallback."""
+        try:
+            jina_url = f"https://r.jina.ai/{url}"
+            resp = requests.get(jina_url, headers=headers, timeout=60)
+            resp.raise_for_status()
+            text = resp.text
+            words = text.split()
+            logger.info(f"   Jina Reader returned {len(words)} words for {url}")
+            return text
+        except Exception as jina_e:
+            logger.warning(f"   Jina Reader also failed for {url}: {jina_e}")
             return ""
 
     def build_combined_text(self, email_content: Dict) -> str:
@@ -1348,7 +1410,7 @@ Full JSON saved locally. Not sent to distribution list.
         """
         try:
             mail = self.connect_to_gmail()
-            self._open_inbox(mail)
+            mail.select('inbox')
 
             # Get the highest UID from any Hyperion sender in the last 30 days
             thirty_days_ago = (

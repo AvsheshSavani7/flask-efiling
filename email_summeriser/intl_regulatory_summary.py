@@ -7,20 +7,21 @@ international competition/antitrust authorities. Extracts structured fields
 for jurisdiction, process numbers, review stage, approval status, etc.
 """
 
+import anthropic
+import re
+import json
+import sys
+import os
 from pathlib import Path
 from _naming import filing_uid
 
 # ──── PASTE YOUR REGULATORY FILING URL HERE ────
 FILING_URL = ""
 # ──── OUTPUT FOLDER ────
-OUTPUT_DIR = Path.home() / "Downloads" / "Course+Materials" / "Merger Scraper" / "8K Test" / "Output Summaries"
+OUTPUT_DIR = Path.home() / "Downloads" / "Course+Materials" / \
+    "Merger Scraper" / "8K Test" / "Output Summaries"
 # ─────────────────────────────────
 
-import os
-import sys
-import json
-import re
-import anthropic
 
 try:
     import requests
@@ -41,7 +42,8 @@ except ImportError:
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 # Load API key from .env
-ENV_PATH = Path.home() / "Downloads" / "Course+Materials" / "Merger Scraper" / ".env"
+ENV_PATH = Path.home() / "Downloads" / "Course+Materials" / \
+    "Merger Scraper" / ".env"
 load_dotenv(ENV_PATH)
 
 if not os.getenv("ANTHROPIC_API_KEY_TEST"):
@@ -158,9 +160,11 @@ def fetch_filing_text(source: str) -> str:
             full_text = fetch_text(source, word_limit=0)
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code in (403, 503):
-                print(f"   Got {e.response.status_code} — trying Jina Reader fallback...")
+                print(
+                    f"   Got {e.response.status_code} — trying Jina Reader fallback...")
                 jina_url = f"https://r.jina.ai/{source}"
-                headers = {"User-Agent": "MergerArbDashboard/1.0 (merger-arb-research@outlook.com)"}
+                headers = {
+                    "User-Agent": "MergerArbDashboard/1.0 (merger-arb-research@outlook.com)"}
                 resp = requests.get(jina_url, headers=headers, timeout=60)
                 resp.raise_for_status()
                 full_text = resp.text
@@ -172,7 +176,7 @@ def fetch_filing_text(source: str) -> str:
     return extract_relevant_sections(full_text, EXTRACTION_GUIDANCE)
 
 
-def summarize(text: str, model: str = "claude-opus-4-6") -> dict:
+def summarize(text: str, model: str = "claude-opus-4-8") -> dict:
     """Call Claude API to produce multi-level summary."""
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY_TEST"))
 
@@ -259,7 +263,8 @@ def print_summary(s: dict):
                 label = k.replace("_", " ").title()
                 print(f"     - {label}: {v}")
     if d.get("deal_implications_for_us_investors"):
-        print(f"   Deal Implications: {d['deal_implications_for_us_investors']}")
+        print(
+            f"   Deal Implications: {d['deal_implications_for_us_investors']}")
     if d.get("related_proceedings"):
         print(f"   Related Proceedings:")
         for r in d["related_proceedings"]:
@@ -293,7 +298,8 @@ def export_docx(s: dict, filepath: str = None):
     style.font.name = "Arial"
     style.font.size = Pt(11)
 
-    title = doc.add_heading(f"Regulatory Filing: {jurisdiction} — {authority}", level=0)
+    title = doc.add_heading(
+        f"Regulatory Filing: {jurisdiction} — {authority}", level=0)
     title.runs[0].font.size = Pt(18)
 
     # Metadata
@@ -305,7 +311,8 @@ def export_docx(s: dict, filepath: str = None):
     meta2 = doc.add_paragraph()
     add_field(meta2, "Date: ", date, newline=False)
     meta2.add_run("    ")
-    add_field(meta2, "Original Language: ", s.get("original_language"), newline=False)
+    add_field(meta2, "Original Language: ", s.get(
+        "original_language"), newline=False)
 
     meta3 = doc.add_paragraph()
     add_field(meta3, "Acquirer: ", parties.get("acquirer"), newline=False)
@@ -313,7 +320,8 @@ def export_docx(s: dict, filepath: str = None):
     add_field(meta3, "Target: ", parties.get("target"), newline=False)
     if parties.get("tickers"):
         meta3.add_run("    ")
-        add_field(meta3, "Tickers: ", ", ".join(parties["tickers"]), newline=False)
+        add_field(meta3, "Tickers: ", ", ".join(
+            parties["tickers"]), newline=False)
 
     # L1
     doc.add_heading("L1 — Headline", level=1)
@@ -336,9 +344,12 @@ def export_docx(s: dict, filepath: str = None):
         doc.add_paragraph(d["action_taken"])
 
     status_para = doc.add_paragraph()
-    add_field(status_para, "Review Stage: ", d.get("review_stage"), newline=True)
-    add_field(status_para, "Approval Status: ", d.get("approval_status"), newline=True)
-    add_field(status_para, "Decision Authority: ", d.get("decision_authority"), newline=True)
+    add_field(status_para, "Review Stage: ",
+              d.get("review_stage"), newline=True)
+    add_field(status_para, "Approval Status: ",
+              d.get("approval_status"), newline=True)
+    add_field(status_para, "Decision Authority: ",
+              d.get("decision_authority"), newline=True)
 
     items = d.get("relevant_markets")
     if has_content(items):
@@ -421,7 +432,8 @@ def main():
     # Save JSON
     jurisdiction = result.get("jurisdiction", "INTL")
     safe_jurisdiction = re.sub(r'[^\w\-\.]', '_', jurisdiction)
-    uid = filing_uid(FILING_URL) if "sec.gov" in str(FILING_URL) else re.sub(r'[^\w]', '', str(FILING_URL))[-8:]
+    uid = filing_uid(FILING_URL) if "sec.gov" in str(
+        FILING_URL) else re.sub(r'[^\w]', '', str(FILING_URL))[-8:]
     out_path = OUTPUT_DIR / f"intl_reg_summary_{safe_jurisdiction}_{uid}.json"
     out_path.write_text(json.dumps(result, indent=2))
     print(f"\nRaw JSON saved to: {out_path}")
