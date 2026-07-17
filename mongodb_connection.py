@@ -35,42 +35,42 @@ def _load_env_file(env_path: str = ".env") -> None:
 def init_mongodb_connection(env_path: str = ".env") -> Tuple[bool, str]:
     """
     Initialize global MongoDB connection.
-    
+
     Args:
         env_path: Path to .env file
-    
+
     Returns:
         Tuple of (success: bool, message: str)
     """
     global _mongo_client, _db, _deals_collection, _mergers_collection
-    
+
     try:
         _load_env_file(env_path)
-        
+
         mongodb_uri = os.environ.get("MONGODB_CONNECTION_STRING")
         if not mongodb_uri:
             return False, "MongoDB connection string not found in environment variables"
-        
+
         # Create connection with timeouts
         _mongo_client = MongoClient(
             mongodb_uri,
             serverSelectionTimeoutMS=5000,  # 5 second timeout for server selection/DNS
             connectTimeoutMS=5000,  # 5 second timeout for connection
-            socketTimeoutMS=10000,  # 10 second timeout for socket operations
+            socketTimeoutMS=30000,  # 30 second timeout for socket operations
             retryWrites=True,
             retryReads=True
         )
-        
+
         # Test connection
         _mongo_client.admin.command('ping')
-        
+
         # Get database and collections
         _db = _mongo_client.get_database()
         _deals_collection = _db["deals"]
         _mergers_collection = _db["mergers"]
-        
+
         return True, "MongoDB connection established successfully"
-        
+
     except Exception as e:
         error_msg = str(e)
         if "DNS" in error_msg or "timeout" in error_msg.lower() or "resolution" in error_msg.lower():
@@ -102,13 +102,13 @@ def get_mergers_collection():
 def close_mongodb_connection():
     """Close the global MongoDB connection."""
     global _mongo_client, _db, _deals_collection, _mergers_collection
-    
+
     if _mongo_client:
         try:
             _mongo_client.close()
         except:
             pass
-    
+
     _mongo_client = None
     _db = None
     _deals_collection = None

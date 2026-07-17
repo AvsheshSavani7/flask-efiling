@@ -37,6 +37,7 @@ AGENCY_NAMES: dict[str, str] = {
     "samr_public":        "SAMR China Public Notice",
     "cci":                "CCI India",
     "turkey_rekabet":     "Turkey Rekabet Kurumu",
+    "mexico_cna":         "Mexico CNA",
 }
 
 # ---------------------------------------------------------------------------

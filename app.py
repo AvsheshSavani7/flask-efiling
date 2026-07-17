@@ -1,3 +1,12 @@
+from threading import Lock
+from concurrent.futures import ThreadPoolExecutor
+import traceback
+import atexit
+import datetime
+import platform
+import subprocess
+import socket
+import asyncio
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from mn_doc_scraper import parse_mn_documents
@@ -28,6 +37,8 @@ from accc_cases_update_monitor import process_accc_cases_updates
 from ftc_cases_scraper import run_ftc_cases_scraper
 from nz_comcom_case_register_to_db import run as nz_comcom_case_register_to_db_run
 from turkey_rekabet_cases_to_db import run as turkey_rekabet_cases_run
+from mexico_cna_scraper import run_mexico_cna_scraper
+from mexico_cna_update_monitor import run_mexico_cna_update_monitor
 from canada_cases_register import run_canada_cases_register
 from canada_cases_update_monitor import process_canada_cases_updates
 from nz_cases_update_monitor import run as nz_cases_update_monitor_run
@@ -57,18 +68,10 @@ import os
 import sys
 
 # Make email_summeriser importable from this root context
-_EMAIL_SUMMARISER_DIR = os.path.join(os.path.dirname(__file__), 'email_summeriser')
+_EMAIL_SUMMARISER_DIR = os.path.join(
+    os.path.dirname(__file__), 'email_summeriser')
 if _EMAIL_SUMMARISER_DIR not in sys.path:
     sys.path.insert(0, _EMAIL_SUMMARISER_DIR)
-import asyncio
-import socket
-import subprocess
-import platform
-import datetime
-import atexit
-import traceback
-from concurrent.futures import ThreadPoolExecutor
-from threading import Lock
 
 # Configure logging
 logging.basicConfig(
@@ -2479,14 +2482,17 @@ def intl_reg_email_monitor():
             logger.info(f"intl-reg-email-monitor started (mode={mode})")
             monitor = IntlRegulatoryMonitor()
             mail = monitor.connect_to_gmail()
-            new_emails = monitor.check_for_new_emails(mail, incremental=incremental)
+            new_emails = monitor.check_for_new_emails(
+                mail, incremental=incremental)
             mail.logout()
 
             if new_emails:
-                logger.info(f"intl-reg-email-monitor: {len(new_emails)} email(s) to process")
+                logger.info(
+                    f"intl-reg-email-monitor: {len(new_emails)} email(s) to process")
                 for email_data in new_emails:
                     monitor.process_email(email_data)
-                logger.info(f"intl-reg-email-monitor: finished processing {len(new_emails)} email(s)")
+                logger.info(
+                    f"intl-reg-email-monitor: finished processing {len(new_emails)} email(s)")
             else:
                 logger.info("intl-reg-email-monitor: no new emails found")
         except Exception as e:
@@ -2548,6 +2554,8 @@ KNOWN_LOG_SCRIPTS = {
     "nj_bpu_scraper",
     "fcc_ecfs_scraper",
     "turkey_rekabet_cases",
+    "mexico_cna_scraper",
+    "mexico_cna_update_monitor",
 }
 
 
@@ -2791,7 +2799,8 @@ def ohio_puc_fetch_pdf():
                 },
             )
 
-        payload = pdf_result_to_api_dict(result, as_base64=(return_format != 'none'))
+        payload = pdf_result_to_api_dict(
+            result, as_base64=(return_format != 'none'))
         status = 200 if result.success else 502
         return jsonify(payload), status
 
@@ -2799,6 +2808,108 @@ def ohio_puc_fetch_pdf():
         logger.error(f"Ohio PUC fetch-pdf error: {e}")
         logger.error(traceback.format_exc())
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/mexico-cna-update-monitor', methods=['GET'])
+def mexico_cna_update_monitor_endpoint():
+    """
+    Check Mexico CNA resolution portal for decisions on all is_open=True records.
+    Updates DB and sends emails when a decision is found.
+    Process runs in background - returns immediately.
+
+    Query parameters:
+        max_workers: int (optional, default: 3) — parallel portal lookups
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        max_workers = int(request.args.get('max_workers', '3'))
+
+        def run_monitor():
+            try:
+                logger.info(
+                    f"Starting Mexico CNA update monitor in background (max_workers={max_workers})")
+                run_mexico_cna_update_monitor(max_workers=max_workers)
+                logger.info(
+                    "Mexico CNA update monitor completed successfully.")
+            except Exception as e:
+                logger.exception(
+                    "Error in background Mexico CNA update monitor")
+
+        submitted, msg = submit_unique_task(
+            "mexico-cna-update-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running",
+            "max_workers": max_workers,
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting Mexico CNA update monitor: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/mexico-cna-scraper', methods=['GET'])
+def mexico_cna_scraper_endpoint():
+    """
+    Scrape Mexico CNA plenary session agendas, match cases with deals,
+    and store results in the 'mexico_cna_cases' collection.
+    Process runs in background - returns immediately.
+
+    Query parameters:
+        backfill: string (optional, "true" or "false", default: "false")
+                  When true, fetches up to 5 pages instead of 1.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        backfill = request.args.get(
+            'backfill', 'false').lower() in ('true', '1', 'yes')
+
+        def run_scraper():
+            try:
+                logger.info(
+                    f"Starting Mexico CNA scraper in background (backfill={backfill})")
+                run_mexico_cna_scraper(backfill=backfill)
+                logger.info("Mexico CNA scraper completed successfully.")
+            except Exception as e:
+                logger.exception("Error in background Mexico CNA scraper")
+
+        task_name = "mexico-cna-scraper-backfill" if backfill else "mexico-cna-scraper"
+        submitted, msg = submit_unique_task(task_name, run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running",
+            "backfill": backfill,
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting Mexico CNA scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 
 if __name__ == '__main__':
