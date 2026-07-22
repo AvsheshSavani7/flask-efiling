@@ -5,6 +5,18 @@
       "docket_number": "26-134",
       "description": "Globalstar/Amazon — Applications for Consent to Assign and Transfer Control",
       "active": true
+    },
+    {
+      "rss_url": "https://ecfsapi.fcc.gov/filings?q=%28proceedings.name%3A%28%2226-56%22%29%29&limit=25&sort=date_disseminated,DESC&type=rss",
+      "docket_number": "26-56",
+      "description": "",
+      "active": true
+    },
+    {
+      "rss_url": "https://ecfsapi.fcc.gov/filings?q=%28proceedings.name%3A%28%2226-40%22%29%29&limit=25&sort=date_disseminated,DESC&type=rss",
+      "docket_number": "26-40",
+      "description": "",
+      "active": true
     }
   ]
 }
