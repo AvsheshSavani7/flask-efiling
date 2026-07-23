@@ -392,6 +392,14 @@ def regex_match_turkey_deal(
     return regex_match_flat_scan(text_en, deals, suffixes=TURKEY_SUFFIXES)
 
 
+def regex_match_comesa_deal(
+    case_parties: str,
+    deals: List[Dict[str, Any]],
+) -> Optional[str]:
+    """COMESA: case parties string (flat scan)."""
+    return regex_match_flat_scan(case_parties, deals, suffixes=DEFAULT_SUFFIXES)
+
+
 # Aliases for test scripts
 _normalise_accc = lambda t: normalise_company_name(t, ACCC_SUFFIXES)
 _normalise_cade = lambda t: normalise_company_name(t, CADE_SUFFIXES)

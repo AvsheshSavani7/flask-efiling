@@ -41,6 +41,8 @@ from mexico_cna_scraper import run_mexico_cna_scraper
 from mexico_cna_update_monitor import run_mexico_cna_update_monitor
 from canada_cases_register import run_canada_cases_register
 from canada_cases_update_monitor import process_canada_cases_updates
+from comesa_cases_register import run_comesa_cases_register
+from comesa_cases_update_monitor import process_comesa_cases_updates
 from nz_cases_update_monitor import run as nz_cases_update_monitor_run
 from mt_psc_scraper import scrape_mt_psc
 from ne_psc_scraper import scrape_ne_psc
@@ -207,6 +209,8 @@ def home():
             "/nz-cases-update-monitor": "GET - Monitor nz_cases collection for updates, match to deals, and send emails",
             "/new-canada-cases-register": "GET - Register new Canada Competition Bureau cases into canada_cases collection",
             "/new-canada-cases-update-monitor": "GET - Monitor canada_cases collection for updates and send email notifications",
+            "/new-comesa-cases-register": "GET - Register new COMESA Competition Commission cases into comesa_cases collection (query: bootstrap)",
+            "/new-comesa-cases-update-monitor": "GET - Monitor comesa_cases collection for status/outcome changes and send email notifications",
             "/nj-bpu-scraper": "GET/POST - Scrape NJ BPU docket documents, download PDFs, run tier1/2/3 analysis. Omit case_id to run all dockets from docket_engine/nj_bpu_dockets.json (params: case_id, docket_number, headless, no_proxy, test_mode, save_json)",
             "/fcc-ecfs-scraper": "GET/POST - Scrape FCC ECFS docket filings, download PDFs, run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/fcc_ecfs_dockets.json (params: docket_number, no_proxy, test_mode, save_json)",
             "/system-check": "GET - Check system dependencies for document extraction",
@@ -1764,6 +1768,101 @@ def canada_cases_update_monitor():
         }), 500
 
 
+@app.route('/new-comesa-cases-register', methods=['GET'])
+def comesa_cases_register():
+    """
+    Register new COMESA Competition Commission cases into comesa_cases collection.
+    Scrapes the COMESA case registry table, dedupes by detail_url, matches with
+    deals via LLM/regex, checks USA-relation for unmatched cases, and sends email
+    notifications for matched and USA-related cases.
+
+    Query params:
+        bootstrap (bool): if true, insert all rows with no deal match / USA / email.
+    Process runs in background - returns immediately.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        bootstrap_str = request.args.get('bootstrap', 'false')
+        bootstrap = bootstrap_str.lower() in ('true', '1', 'yes')
+
+        def run_register():
+            try:
+                logger.info("Starting COMESA cases register in background")
+                run_comesa_cases_register(bootstrap=bootstrap)
+                logger.info("✅ COMESA cases register completed successfully")
+            except Exception as e:
+                logger.exception("Error in COMESA cases register")
+
+        submitted, msg = submit_unique_task(
+            "comesa-cases-register", run_register)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting COMESA cases register: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/new-comesa-cases-update-monitor', methods=['GET'])
+def comesa_cases_update_monitor():
+    """
+    Monitor comesa_cases collection (hf_tax_case_status="current-cases") for
+    changes in hf_tax_case_status / tax_case_outcome. Fetches fresh registry
+    data, compares with stored cases, attempts deal matching for cases without
+    deal_id, and sends rich HTML emails.
+    Process runs in background - returns immediately.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        def run_monitor():
+            try:
+                logger.info(
+                    "Starting COMESA cases update monitor in background")
+                process_comesa_cases_updates()
+                logger.info("✅ COMESA cases update monitor completed")
+            except Exception as e:
+                logger.exception("Error in COMESA cases update monitor")
+
+        submitted, msg = submit_unique_task(
+            "comesa-cases-update-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting COMESA cases update monitor: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 @app.route('/new-accc-cases-register', methods=['GET'])
 def accc_cases_register_endpoint():
     """
@@ -2556,6 +2655,8 @@ KNOWN_LOG_SCRIPTS = {
     "turkey_rekabet_cases",
     "mexico_cna_scraper",
     "mexico_cna_update_monitor",
+    "comesa_cases_register",
+    "comesa_cases_update_monitor",
 }
 
 
