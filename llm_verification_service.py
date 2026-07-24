@@ -10,12 +10,10 @@ import json
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 from openai import OpenAI
-import logging
 
 # Load OpenAI API Key
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-logger = logging.getLogger(__name__)
 
 
 def verify_country_relation(
@@ -565,24 +563,18 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
                 ],
             )
             result = response.choices[0].message.content.strip().lower()
-            logger.info(
-                "[BWB Austria] USA relation LLM raw response: %s",
-                result,
-            )
 
             if result == "true":
                 return True
             elif result == "false":
                 return False
             else:
-                logger.warning(
-                    "[BWB Austria] USA relation LLM unexpected response: %s — defaulting to False",
-                    result,
-                )
+                print(
+                    f"⚠️ LLM returned unexpected result: '{result}', defaulting to False")
                 return False
 
         except Exception as e:
-            logger.exception("[BWB Austria] USA relation LLM verification error: %s", e)
+            print(f"⚠️ LLM Verification Error: {e}")
             return False
 
     elif case_type.upper() == "CANADA":

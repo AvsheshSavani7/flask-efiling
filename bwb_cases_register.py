@@ -11,7 +11,6 @@ import json
 import logging
 import os
 import sys
-from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from html import escape as escape_html
 from logging.handlers import RotatingFileHandler
@@ -28,7 +27,6 @@ from bwb_cases_common import (
     fetch_listing_page_html,
     fetch_page_html,
     get_bwb_cases_collection,
-    attach_shared_module_loggers,
     listing_url,
     parse_detail_page,
     parse_listing_table,
@@ -106,7 +104,6 @@ if not logger.handlers:
 
 logger.propagate = False
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
-attach_shared_module_loggers(logger, "deal_match_llm", "llm_verification_service")
 
 
 def case_exists(collection, file_number: str) -> bool:
@@ -125,18 +122,8 @@ def match_case_to_deal(
     file_number: str,
     status_en: str,
     deals: Optional[List[Dict[str, Any]]] = None,
-    *,
-    flow: str = "register",
 ) -> Optional[str]:
-    logger.info(
-        "[%s] [%s] LLM deal match — parties_en=%.150s | status_en=%s | open_deals=%d",
-        file_number,
-        flow,
-        parties_en,
-        status_en,
-        len(deals or []),
-    )
-    matched_deal_id = llm_match_deal_id(
+    return llm_match_deal_id(
         regulator_name="Austrian Federal Competition Authority (BWB)",
         case_sections={
             "FILE NUMBER": file_number,
@@ -145,160 +132,6 @@ def match_case_to_deal(
         },
         source_label="the BWB merger parties and status",
         deals=deals,
-    )
-    if matched_deal_id:
-        logger.info(
-            "[%s] [%s] LLM deal match SUCCESS — deal_id=%s (%s)",
-            file_number,
-            flow,
-            matched_deal_id,
-            _deal_label(matched_deal_id, deals),
-        )
-    else:
-        logger.info("[%s] [%s] LLM deal match: no match", file_number, flow)
-    return matched_deal_id
-
-
-def _deal_label(
-    deal_id: Optional[str],
-    deals: Optional[List[Dict[str, Any]]],
-) -> str:
-    if not deal_id or not deals:
-        return "deal not in open_deals list"
-    for deal in deals:
-        if str(deal.get("_id")) == str(deal_id):
-            acquirer = deal.get("acquirer") or deal.get("acquire_name", "?")
-            target = deal.get("target") or deal.get("target_name", "?")
-            return f"acquirer={acquirer} | target={target}"
-    return "deal not in open_deals list"
-
-
-@dataclass
-class BwbDealMatchResult:
-    deal_id: Optional[str] = None
-    matched_by_regex: bool = False
-    match_method: str = "none"  # llm | regex | none
-
-
-def run_bwb_deal_match_pipeline(
-    *,
-    file_number: str,
-    parties_en: str,
-    status_en: str,
-    open_deals: Optional[List[Dict[str, Any]]],
-    flow: str,
-) -> BwbDealMatchResult:
-    """Run LLM deal match, then regex fallback, with structured logging."""
-    logger.info(
-        "[%s] [%s] Starting deal match pipeline — open_deals=%d",
-        file_number,
-        flow,
-        len(open_deals or []),
-    )
-
-    try:
-        matched_deal_id = match_case_to_deal(
-            parties_en,
-            file_number,
-            status_en,
-            deals=open_deals,
-            flow=flow,
-        )
-    except Exception:
-        logger.exception(
-            "[%s] [%s] LLM deal match raised an exception",
-            file_number,
-            flow,
-        )
-        raise
-
-    if matched_deal_id:
-        return BwbDealMatchResult(
-            deal_id=matched_deal_id,
-            matched_by_regex=False,
-            match_method="llm",
-        )
-
-    logger.info(
-        "[%s] [%s] Trying regex fallback on parties_en=%.150s",
-        file_number,
-        flow,
-        parties_en,
-    )
-    regex_deal_id = regex_match_bwb_deal(parties_en, open_deals or [])
-    if regex_deal_id:
-        logger.info(
-            "[%s] [%s] Regex deal match SUCCESS — deal_id=%s (%s)",
-            file_number,
-            flow,
-            regex_deal_id,
-            _deal_label(regex_deal_id, open_deals),
-        )
-        return BwbDealMatchResult(
-            deal_id=regex_deal_id,
-            matched_by_regex=True,
-            match_method="regex",
-        )
-
-    logger.info(
-        "[%s] [%s] Deal match pipeline complete — no match (LLM + regex)",
-        file_number,
-        flow,
-    )
-    return BwbDealMatchResult()
-
-
-def run_bwb_usa_relation_check(
-    *,
-    file_number: str,
-    details_for_llm: str,
-    flow: str,
-) -> bool:
-    """Run USA relation LLM check with audit-friendly logging."""
-    logger.info(
-        "[%s] [%s] USA relation check starting (case_type=BWB Austria)",
-        file_number,
-        flow,
-    )
-    logger.info(
-        "[%s] [%s] USA check input (first 800 chars): %s",
-        file_number,
-        flow,
-        details_for_llm[:800],
-    )
-    is_usa = bool(
-        verify_usa_relation(
-            company_details=details_for_llm,
-            case_type="BWB Austria",
-        )
-    )
-    logger.info(
-        "[%s] [%s] USA relation check result: %s",
-        file_number,
-        flow,
-        is_usa,
-    )
-    return is_usa
-
-
-def log_bwb_notification_decision(
-    *,
-    file_number: str,
-    flow: str,
-    match_method: str,
-    deal_id: Optional[str],
-    usa_related: bool,
-    email_action: str,
-) -> None:
-    logger.info(
-        "[%s] [%s] Notification decision — match_method=%s | deal_id=%s | "
-        "usa_related=%s | email=%s",
-        file_number,
-        flow,
-        match_method,
-        deal_id or "None",
-        usa_related,
-        email_action,
     )
 
 
@@ -375,24 +208,12 @@ def send_email_via_webhook(
     html_content: str,
     case_info: Dict[str, Any],
     deal_id: Optional[str] = None,
-    *,
-    email_kind: str = "new_case",
-    flow: str = "register",
 ) -> bool:
-    file_number = case_info.get("file_number", "N/A")
-    logger.info(
-        "[%s] [%s] Sending email — kind=%s | subject=%s | deal_id=%s",
-        file_number,
-        flow,
-        email_kind,
-        subject,
-        deal_id or "None",
-    )
     try:
         payload = {
             "subject": subject,
             "html": html_content,
-            "file_number": file_number,
+            "file_number": case_info.get("file_number", "N/A"),
             "parties": case_info.get("parties_en") or case_info.get("parties", "N/A"),
             "merger_date": case_info.get("merger_date", "N/A"),
             "status": case_info.get("status_en") or case_info.get("status", "N/A"),
@@ -401,24 +222,9 @@ def send_email_via_webhook(
             "is_new_case": True,
             "source": "bwb_austria",
         }
-        sent = post_email_payload(payload, subject=subject)
-        if sent:
-            logger.info(
-                "[%s] [%s] Email sent successfully — kind=%s",
-                file_number,
-                flow,
-                email_kind,
-            )
-        else:
-            logger.warning(
-                "[%s] [%s] Email webhook returned failure — kind=%s",
-                file_number,
-                flow,
-                email_kind,
-            )
-        return sent
+        return post_email_payload(payload, subject=subject)
     except Exception as e:
-        logger.warning("[%s] [%s] Error sending email: %s", file_number, flow, e)
+        logger.warning("Error sending email: %s", e)
         return False
 
 
@@ -484,22 +290,11 @@ def run_bwb_cases_register(
         ensure_bwb_cases_indexes(collection)
 
         open_deals = None if bootstrap else fetch_open_deals()
-        if not bootstrap:
-            logger.info(
-                "Loaded %d open deals for LLM/regex matching",
-                len(open_deals or []),
-            )
 
         with playwright_page(headless=headless) as page:
             listing_html = fetch_listing_page_html(page, url)
             all_rows = parse_listing_table(listing_html, year=year)
             parsed_count = len(all_rows)
-            logger.info(
-                "Listing parse complete — year=%s | rows=%d | url=%s",
-                year,
-                parsed_count,
-                url,
-            )
             if not all_rows:
                 logger.warning("No listing rows parsed. Exiting.")
                 return
@@ -573,13 +368,6 @@ def run_bwb_cases_register(
                         "updated_at": now_iso,
                     }
 
-                    logger.info(
-                        "[%s] [register] Translation complete — status_en=%s | is_open=%s",
-                        file_number,
-                        status_en,
-                        determine_is_open(status),
-                    )
-
                     if bootstrap:
                         inserted_id = insert_case(collection, case_info)
                         if inserted_id:
@@ -598,37 +386,36 @@ def run_bwb_cases_register(
                             )
                         continue
 
-                    match_result = BwbDealMatchResult()
                     try:
-                        match_result = run_bwb_deal_match_pipeline(
-                            file_number=file_number,
-                            parties_en=parties_en,
-                            status_en=status_en,
-                            open_deals=open_deals,
-                            flow="register",
+                        matched_deal_id = match_case_to_deal(
+                            parties_en,
+                            file_number,
+                            status_en,
+                            deals=open_deals,
                         )
                     except Exception as e:
-                        logger.exception(
-                            "[%s] [register] Deal matching error: %s",
-                            file_number,
-                            e,
-                        )
+                        logger.exception("Deal matching error: %s", e)
                         collect_error(
                             error_items,
                             str(e),
                             step="match_case_to_deal",
                             context={"file_number": file_number},
                         )
+                        matched_deal_id = None
 
-                    matched_deal_id = match_result.deal_id
-                    matched_by_regex = match_result.matched_by_regex
-                    if match_result.match_method == "llm":
+                    matched_by_regex = False
+                    if matched_deal_id:
                         llm_match_count += 1
-                    elif match_result.match_method == "regex":
-                        regex_match_count += 1
-
-                    is_usa = False
-                    email_action = "none"
+                    else:
+                        matched_deal_id = regex_match_bwb_deal(
+                            parties_en, open_deals or []
+                        )
+                        if matched_deal_id:
+                            matched_by_regex = True
+                            regex_match_count += 1
+                            logger.info(
+                                "Regex fallback matched deal_id=%s", matched_deal_id
+                            )
 
                     if matched_deal_id:
                         case_info["deal_id"] = matched_deal_id
@@ -641,14 +428,11 @@ def run_bwb_cases_register(
                             html_email = generate_matched_case_email_html(
                                 case_info, deal
                             )
-                            email_action = "matched_deal"
                             if not send_email_via_webhook(
                                 subject,
                                 html_email,
                                 case_info,
                                 deal_id=matched_deal_id,
-                                email_kind="matched_deal",
-                                flow="register",
                             ):
                                 collect_error(
                                     error_items,
@@ -669,7 +453,6 @@ def run_bwb_cases_register(
                                     "deal_id": matched_deal_id,
                                 },
                             )
-                            email_action = "matched_deal_missing_document"
                     else:
                         try:
                             details_for_llm = (
@@ -679,17 +462,14 @@ def run_bwb_cases_register(
                                 f"Merger Date: {row.get('merger_date', '')}\n"
                                 f"Detail: {detail_content_en[:2000]}"
                             )
-                            is_usa = run_bwb_usa_relation_check(
-                                file_number=file_number,
-                                details_for_llm=details_for_llm,
-                                flow="register",
+                            is_usa = bool(
+                                verify_usa_relation(
+                                    company_details=details_for_llm,
+                                    case_type="BWB Austria",
+                                )
                             )
                         except Exception as e:
-                            logger.exception(
-                                "[%s] [register] USA verification error: %s",
-                                file_number,
-                                e,
-                            )
+                            logger.exception("USA verification error: %s", e)
                             collect_error(
                                 error_items,
                                 str(e),
@@ -702,13 +482,8 @@ def run_bwb_cases_register(
                             subject = build_subject("bwb", "new")
                             html_email = generate_usa_related_email_html(
                                 case_info)
-                            email_action = "usa_related"
                             if not send_email_via_webhook(
-                                subject,
-                                html_email,
-                                case_info,
-                                email_kind="usa_related",
-                                flow="register",
+                                subject, html_email, case_info
                             ):
                                 collect_error(
                                     error_items,
@@ -717,20 +492,8 @@ def run_bwb_cases_register(
                                     context={"file_number": file_number},
                                 )
                         else:
-                            email_action = "silent_insert"
                             logger.info(
-                                "[%s] [register] Not matched and not USA-related; silent insert",
-                                file_number,
-                            )
-
-                    log_bwb_notification_decision(
-                        file_number=file_number,
-                        flow="register",
-                        match_method=match_result.match_method,
-                        deal_id=matched_deal_id,
-                        usa_related=is_usa,
-                        email_action=email_action,
-                    )
+                                "Not matched and not USA-related; silent insert")
 
                     inserted_id = insert_case(collection, case_info)
                     if inserted_id:
