@@ -2680,7 +2680,7 @@ def intl_reg_email_monitor():
 
     submitted, msg = submit_unique_task("intl-reg-email-monitor", run_monitor)
     if not submitted:
-        return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
+        return jsonify({"success": False, "error": msg, "status": "already_running"}), 200
 
     return jsonify({
         "success": True,
