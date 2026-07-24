@@ -39,6 +39,7 @@ AGENCY_NAMES: dict[str, str] = {
     "turkey_rekabet":     "Turkey Rekabet Kurumu",
     "mexico_cna":         "Mexico CNA",
     "comesa":             "COMESA Competition Commission",
+    "bwb":                "Austrian BWB",
 }
 
 # ---------------------------------------------------------------------------

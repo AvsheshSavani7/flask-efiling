@@ -400,6 +400,14 @@ def regex_match_comesa_deal(
     return regex_match_flat_scan(case_parties, deals, suffixes=DEFAULT_SUFFIXES)
 
 
+def regex_match_bwb_deal(
+    parties_en: str,
+    deals: List[Dict[str, Any]],
+) -> Optional[str]:
+    """BWB Austria: English translation of parties field (semicolon-separated)."""
+    return regex_match_flat_scan(parties_en, deals, suffixes=DEFAULT_SUFFIXES)
+
+
 # Aliases for test scripts
 _normalise_accc = lambda t: normalise_company_name(t, ACCC_SUFFIXES)
 _normalise_cade = lambda t: normalise_company_name(t, CADE_SUFFIXES)

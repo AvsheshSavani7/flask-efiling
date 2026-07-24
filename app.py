@@ -43,6 +43,8 @@ from canada_cases_register import run_canada_cases_register
 from canada_cases_update_monitor import process_canada_cases_updates
 from comesa_cases_register import run_comesa_cases_register
 from comesa_cases_update_monitor import process_comesa_cases_updates
+from bwb_cases_register import run_bwb_cases_register
+from bwb_cases_update_monitor import process_bwb_cases_updates
 from nz_cases_update_monitor import run as nz_cases_update_monitor_run
 from mt_psc_scraper import scrape_mt_psc
 from ne_psc_scraper import scrape_ne_psc
@@ -109,7 +111,7 @@ CORS(app, origins=["http://localhost:8080",
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
 
 # --- Memory-safe background task infrastructure ---
-scraper_pool = ThreadPoolExecutor(max_workers=20)
+scraper_pool = ThreadPoolExecutor(max_workers=25)
 _running_tasks = {}
 _running_lock = Lock()
 
@@ -211,6 +213,8 @@ def home():
             "/new-canada-cases-update-monitor": "GET - Monitor canada_cases collection for updates and send email notifications",
             "/new-comesa-cases-register": "GET - Register new COMESA Competition Commission cases into comesa_cases collection (query: bootstrap)",
             "/new-comesa-cases-update-monitor": "GET - Monitor comesa_cases collection for status/outcome changes and send email notifications",
+            "/bwb-cases-register": "GET - Register new Austrian BWB merger filings into bwb_cases collection (current year)",
+            "/bwb-cases-update-monitor": "GET - Monitor open bwb_cases for listing/detail changes and send email notifications",
             "/nj-bpu-scraper": "GET/POST - Scrape NJ BPU docket documents, download PDFs, run tier1/2/3 analysis. Omit case_id to run all dockets from docket_engine/nj_bpu_dockets.json (params: case_id, docket_number, headless, no_proxy, test_mode, save_json)",
             "/fcc-ecfs-scraper": "GET/POST - Scrape FCC ECFS docket filings, download PDFs, run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/fcc_ecfs_dockets.json (params: docket_number, no_proxy, test_mode, save_json)",
             "/system-check": "GET - Check system dependencies for document extraction",
@@ -1863,6 +1867,83 @@ def comesa_cases_update_monitor():
         }), 500
 
 
+@app.route('/bwb-cases-register', methods=['GET'])
+def bwb_cases_register_endpoint():
+    """
+    Register new Austrian BWB merger filings into bwb_cases collection.
+    Scrapes the current-year listing, fetches each new detail page once,
+    stores German and English fields, and runs deal match / USA checks.
+    Process runs in background - returns immediately.
+    """
+    try:
+        headless_str = request.args.get('headless', 'true')
+        headless = headless_str.lower() in ('true', '1', 'yes')
+
+        def run_register():
+            try:
+                logger.info("Starting BWB cases register in background")
+                run_bwb_cases_register(headless=headless)
+                logger.info("✅ BWB cases register completed successfully")
+            except Exception as e:
+                logger.exception("Error in BWB cases register")
+
+        submitted, msg = submit_unique_task("bwb-cases-register", run_register)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting BWB cases register: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/bwb-cases-update-monitor', methods=['GET'])
+def bwb_cases_update_monitor_endpoint():
+    """
+    Monitor bwb_cases collection (is_open=True) for listing status and
+    detail content changes. Compares German fields, translates changes to
+    English, and sends update emails.
+    Process runs in background - returns immediately.
+    """
+    try:
+        headless_str = request.args.get('headless', 'true')
+        headless = headless_str.lower() in ('true', '1', 'yes')
+
+        def run_monitor():
+            try:
+                logger.info("Starting BWB cases update monitor in background")
+                process_bwb_cases_updates(headless=headless)
+                logger.info("✅ BWB cases update monitor completed")
+            except Exception as e:
+                logger.exception("Error in BWB cases update monitor")
+
+        submitted, msg = submit_unique_task(
+            "bwb-cases-update-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting BWB cases update monitor: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 @app.route('/new-accc-cases-register', methods=['GET'])
 def accc_cases_register_endpoint():
     """
@@ -2657,6 +2738,8 @@ KNOWN_LOG_SCRIPTS = {
     "mexico_cna_update_monitor",
     "comesa_cases_register",
     "comesa_cases_update_monitor",
+    "bwb_cases_register",
+    "bwb_cases_update_monitor",
 }
 
 
