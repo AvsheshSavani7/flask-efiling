@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from bwb_cases_common import (
     BwbWorkflowError,
     COLLECTION_NAME,
+    attach_shared_module_loggers,
     build_listing_lookup,
     determine_is_open,
     ensure_bwb_cases_indexes,
@@ -37,11 +38,15 @@ from bwb_cases_common import (
     translate_to_english_required,
     utc_now_iso,
 )
-from bwb_cases_register import match_case_to_deal
+from bwb_cases_register import (
+    BwbDealMatchResult,
+    log_bwb_notification_decision,
+    run_bwb_deal_match_pipeline,
+    run_bwb_usa_relation_check,
+)
 from deal_match_llm import fetch_open_deals
-from deal_match_regex import apply_regex_match_subject, regex_match_bwb_deal
+from deal_match_regex import apply_regex_match_subject
 from email_subject_builder import build_subject
-from llm_verification_service import verify_usa_relation
 from log_utils import cleanup_old_logs, refresh_log_file
 from mongodb_connection import (
     get_deals_collection,
@@ -124,6 +129,7 @@ if not logger.handlers:
 
 logger.propagate = False
 cleanup_old_logs(os.path.dirname(LOG_FILE), LOG_RETENTION_DAYS)
+attach_shared_module_loggers(logger, "deal_match_llm", "llm_verification_service")
 
 
 def detect_changes(
@@ -275,7 +281,23 @@ def send_update_email(
         if usa_related and not deal:
             payload["usa_related"] = True
 
-        return post_email_payload(payload, subject=subject)
+        logger.info(
+            "[%s] [update] Sending email — kind=%s | subject=%s | deal_id=%s | "
+            "changed_fields=%s | matched_by_regex=%s | usa_related=%s",
+            file_number,
+            "matched_deal" if deal else ("usa_related" if usa_related else "update"),
+            subject,
+            deal_id or "None",
+            [f for f, _, _ in changes],
+            matched_by_regex,
+            usa_related,
+        )
+        sent = post_email_payload(payload, subject=subject)
+        if sent:
+            logger.info("[%s] [update] Email sent successfully", file_number)
+        else:
+            logger.warning("[%s] [update] Email webhook returned failure", file_number)
+        return sent
     except Exception as e:
         logger.warning("Error sending update email: %s", e)
         return False
@@ -325,6 +347,12 @@ def build_update_fields(
 
     for field, en_field in TRANSLATABLE_FIELDS.items():
         if field in update_fields and update_fields[field]:
+            logger.info(
+                "[%s] [update] Translating changed field %s → %s",
+                file_number,
+                field,
+                en_field,
+            )
             update_fields[en_field] = translate_to_english_required(
                 str(update_fields[field]),
                 field=en_field,
@@ -387,6 +415,10 @@ def process_bwb_cases_updates(headless: Optional[bool] = None) -> None:
 
         deals_collection = get_deals_collection()
         open_deals = fetch_open_deals()
+        logger.info(
+            "Loaded %d open deals for LLM/regex matching",
+            len(open_deals or []),
+        )
 
         open_cases = list(collection.find({"is_open": True}))
         if not open_cases:
@@ -476,6 +508,12 @@ def process_bwb_cases_updates(headless: Optional[bool] = None) -> None:
                     deal = None
 
                     if deal_id:
+                        logger.info(
+                            "[%s] [update] Case already linked to deal_id=%s — "
+                            "sending update email without re-matching",
+                            file_number,
+                            deal_id,
+                        )
                         if deals_collection is not None:
                             try:
                                 deal = deals_collection.find_one(
@@ -514,41 +552,57 @@ def process_bwb_cases_updates(headless: Optional[bool] = None) -> None:
                                     "deal_id": deal_id,
                                 },
                             )
+                        log_bwb_notification_decision(
+                            file_number=file_number,
+                            flow="update",
+                            match_method="linked_deal",
+                            deal_id=str(deal_id),
+                            usa_related=False,
+                            email_action="linked_deal_update",
+                        )
                     else:
                         parties_en = merged.get("parties_en") or merged.get("parties", "")
                         status_en = merged.get("status_en") or merged.get("status", "")
+                        logger.info(
+                            "[%s] [update] No linked deal_id — running match pipeline",
+                            file_number,
+                        )
 
+                        match_result = BwbDealMatchResult()
                         try:
-                            matched_deal_id = match_case_to_deal(
-                                parties_en,
-                                file_number,
-                                status_en,
-                                deals=open_deals,
+                            match_result = run_bwb_deal_match_pipeline(
+                                file_number=file_number,
+                                parties_en=parties_en,
+                                status_en=status_en,
+                                open_deals=open_deals,
+                                flow="update",
                             )
                         except Exception as e:
-                            logger.exception("Deal matching error: %s", e)
+                            logger.exception(
+                                "[%s] [update] Deal matching error: %s",
+                                file_number,
+                                e,
+                            )
                             collect_error(
                                 error_items,
                                 str(e),
                                 step="match_case_to_deal",
                                 context={"file_number": file_number},
                             )
-                            matched_deal_id = None
 
-                        matched_by_regex = False
-                        if matched_deal_id:
+                        matched_deal_id = match_result.deal_id
+                        matched_by_regex = match_result.matched_by_regex
+                        if match_result.match_method == "llm":
                             llm_match_count += 1
-                        else:
-                            matched_deal_id = regex_match_bwb_deal(
-                                parties_en, open_deals
-                            )
-                            if matched_deal_id:
-                                matched_by_regex = True
-                                regex_match_count += 1
-                                update_fields["deal_id"] = matched_deal_id
-                                merged["deal_id"] = matched_deal_id
+                        elif match_result.match_method == "regex":
+                            regex_match_count += 1
+
+                        is_usa = False
+                        email_action = "db_only"
 
                         if matched_deal_id:
+                            update_fields["deal_id"] = matched_deal_id
+                            merged["deal_id"] = matched_deal_id
                             if deals_collection is not None:
                                 try:
                                     deal = deals_collection.find_one(
@@ -556,8 +610,11 @@ def process_bwb_cases_updates(headless: Optional[bool] = None) -> None:
                                     )
                                 except Exception as e:
                                     logger.exception(
-                                        "Could not fetch matched deal: %s", e
+                                        "[%s] [update] Could not fetch matched deal: %s",
+                                        file_number,
+                                        e,
                                     )
+                            email_action = "matched_deal_update"
                             if not send_update_email(
                                 case_doc,
                                 merged,
@@ -582,17 +639,21 @@ def process_bwb_cases_updates(headless: Optional[bool] = None) -> None:
                                     f"Status: {status_en}\n"
                                     f"Detail: {(merged.get('detail_content_en') or '')[:2000]}"
                                 )
-                                is_usa = bool(
-                                    verify_usa_relation(
-                                        company_details=details_for_llm,
-                                        case_type="BWB Austria",
-                                    )
+                                is_usa = run_bwb_usa_relation_check(
+                                    file_number=file_number,
+                                    details_for_llm=details_for_llm,
+                                    flow="update",
                                 )
                             except Exception as e:
-                                logger.exception("USA relation check error: %s", e)
+                                logger.exception(
+                                    "[%s] [update] USA relation check error: %s",
+                                    file_number,
+                                    e,
+                                )
                                 is_usa = False
 
                             if is_usa:
+                                email_action = "usa_related_update"
                                 if not send_update_email(
                                     case_doc,
                                     merged,
@@ -607,7 +668,19 @@ def process_bwb_cases_updates(headless: Optional[bool] = None) -> None:
                                         context={"file_number": file_number},
                                     )
                             else:
-                                logger.info("Not USA-related; updating DB only")
+                                logger.info(
+                                    "[%s] [update] Not USA-related; updating DB only",
+                                    file_number,
+                                )
+
+                        log_bwb_notification_decision(
+                            file_number=file_number,
+                            flow="update",
+                            match_method=match_result.match_method,
+                            deal_id=matched_deal_id,
+                            usa_related=is_usa,
+                            email_action=email_action,
+                        )
 
                     if not update_case_document(collection, case_doc, update_fields):
                         collect_error(

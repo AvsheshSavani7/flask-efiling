@@ -452,6 +452,20 @@ def fetch_listing_page_html(
     return page.content()
 
 
+def attach_shared_module_loggers(
+    parent_logger: logging.Logger,
+    *module_names: str,
+) -> None:
+    """Mirror shared LLM module logs into a BWB script log file."""
+    for name in module_names:
+        child = logging.getLogger(name)
+        child.setLevel(parent_logger.level)
+        for handler in parent_logger.handlers:
+            if handler not in child.handlers:
+                child.addHandler(handler)
+        child.propagate = False
+
+
 def get_bwb_cases_collection():
     from mongodb_connection import get_database
 
