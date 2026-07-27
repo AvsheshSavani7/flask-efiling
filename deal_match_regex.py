@@ -3,7 +3,7 @@ deal_match_regex.py — Shared regex fallback deal-matching engine.
 
 Two matching strategies:
 
-  1. regex_match_split_orient — titles with a left/right separator (ACCC, FTC, UK CMA)
+  1. regex_match_split_orient — titles with a left/right separator (ACCC, FTC, UK CMA, SA CompCom)
   2. regex_match_flat_scan   — flat party lists with no reliable split (CADE, BKA, Canada, NZ, EC, FS, SAMR)
 
 Regulator wrappers handle title parsing; core logic lives here.
@@ -34,6 +34,13 @@ DEFAULT_SUFFIXES = re.compile(
 ACCC_SUFFIXES = re.compile(
     r"\b(pty|ltd|limited|inc|incorporated|corp|corporation|"
     r"plc|llc|holdings|group|co|company|aust|australia|nv|sa|ag|se|gmbh)\b",
+    re.IGNORECASE,
+)
+
+SA_SUFFIXES = re.compile(
+    r"\b(pty|proprietary|ltd|limited|inc|incorporated|corp|corporation|"
+    r"plc|llc|holdings|group|co|company|nv|sa|ag|se|gmbh|trust|fund|"
+    r"partners|rf|soc|npc)\b",
     re.IGNORECASE,
 )
 
@@ -323,6 +330,20 @@ def regex_match_uk_cma_deal(
     return regex_match_split_orient(left, right, deals, suffixes=DEFAULT_SUFFIXES)
 
 
+def regex_match_sa_compcom_deal(
+    acquiring_firm: str,
+    target_firm: str,
+    deals: List[Dict[str, Any]],
+) -> Optional[str]:
+    """South Africa CompCom: separate Primary Acquiring / Primary Target columns."""
+    if not acquiring_firm or not target_firm or not deals:
+        return None
+
+    left = normalise_company_name(acquiring_firm.strip(), SA_SUFFIXES)
+    right = normalise_company_name(target_firm.strip(), SA_SUFFIXES)
+    return regex_match_split_orient(left, right, deals, suffixes=SA_SUFFIXES)
+
+
 # ---------------------------------------------------------------------------
 # Regulator wrappers — flat scan
 # ---------------------------------------------------------------------------
@@ -415,3 +436,4 @@ _normalise_nz = lambda t: normalise_company_name(t, NZ_SUFFIXES)
 _normalise_ec = lambda t: normalise_company_name(t, EC_SUFFIXES)
 _normalise_fs = lambda t: normalise_company_name(t, EC_SUFFIXES)
 _normalise_samr = lambda t: normalise_company_name(t, SAMR_SUFFIXES)
+_normalise_sa = lambda t: normalise_company_name(t, SA_SUFFIXES)

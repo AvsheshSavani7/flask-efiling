@@ -43,6 +43,7 @@ from canada_cases_register import run_canada_cases_register
 from canada_cases_update_monitor import process_canada_cases_updates
 from comesa_cases_register import run_comesa_cases_register
 from comesa_cases_update_monitor import process_comesa_cases_updates
+from sa_compcom_cases_register import run_sa_compcom_cases_register
 from bwb_cases_register import run_bwb_cases_register
 from bwb_cases_update_monitor import process_bwb_cases_updates
 from nz_cases_update_monitor import run as nz_cases_update_monitor_run
@@ -213,6 +214,7 @@ def home():
             "/new-canada-cases-update-monitor": "GET - Monitor canada_cases collection for updates and send email notifications",
             "/new-comesa-cases-register": "GET - Register new COMESA Competition Commission cases into comesa_cases collection (query: bootstrap)",
             "/new-comesa-cases-update-monitor": "GET - Monitor comesa_cases collection for status/outcome changes and send email notifications",
+            "/new-sa-compcom-cases-register": "GET - Register South Africa CompCom weekly MA cases into sa_compcom_cases (query: bootstrap, headless)",
             "/bwb-cases-register": "GET - Register new Austrian BWB merger filings into bwb_cases collection (current year)",
             "/bwb-cases-update-monitor": "GET - Monitor open bwb_cases for listing/detail changes and send email notifications",
             "/nj-bpu-scraper": "GET/POST - Scrape NJ BPU docket documents, download PDFs, run tier1/2/3 analysis. Omit case_id to run all dockets from docket_engine/nj_bpu_dockets.json (params: case_id, docket_number, headless, no_proxy, test_mode, save_json)",
@@ -1867,6 +1869,57 @@ def comesa_cases_update_monitor():
         }), 500
 
 
+@app.route('/new-sa-compcom-cases-register', methods=['GET'])
+def sa_compcom_cases_register():
+    """
+    Register South Africa CompCom MA weekly case-list filings into
+    sa_compcom_cases. Downloads the latest weekly XLSX (or all weeks when
+    bootstrap=true), dedupes by case_number, matches deals via LLM/regex,
+    checks USA relation for unmatched cases, and silently marks Pending DB
+    cases missing from the latest list as 'removed from pending list'.
+    Normal runs skip entirely if the latest XLSX URL already exists on any
+    DB record (source_xlsx_url).
+
+    Query params:
+        bootstrap (bool): if true, insert all rows with no deal match / USA / email.
+        headless (bool): Playwright headless mode (default true).
+    Process runs in background - returns immediately.
+    """
+    try:
+        bootstrap_str = request.args.get('bootstrap', 'false')
+        bootstrap = bootstrap_str.lower() in ('true', '1', 'yes')
+        headless_str = request.args.get('headless', 'true')
+        headless = headless_str.lower() in ('true', '1', 'yes')
+
+        def run_register():
+            try:
+                logger.info("Starting SA CompCom cases register in background")
+                run_sa_compcom_cases_register(
+                    bootstrap=bootstrap, headless=headless
+                )
+                logger.info("✅ SA CompCom cases register completed successfully")
+            except Exception as e:
+                logger.exception("Error in SA CompCom cases register")
+
+        submitted, msg = submit_unique_task(
+            "sa-compcom-cases-register", run_register)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting SA CompCom cases register: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 @app.route('/bwb-cases-register', methods=['GET'])
 def bwb_cases_register_endpoint():
     """
@@ -2738,6 +2791,7 @@ KNOWN_LOG_SCRIPTS = {
     "mexico_cna_update_monitor",
     "comesa_cases_register",
     "comesa_cases_update_monitor",
+    "sa_compcom_cases_register",
     "bwb_cases_register",
     "bwb_cases_update_monitor",
 }
