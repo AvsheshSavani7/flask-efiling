@@ -486,7 +486,7 @@ def analyze_docket_entry(
     doc_number: str,
     full_text: str,
     metadata: Optional[Dict[str, str]] = None,
-    test_mode: bool = True
+    test_mode: bool = False
 ) -> Dict[str, Any]:
     """
     Analyze a docket entry by document number and full text.
