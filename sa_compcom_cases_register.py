@@ -315,6 +315,9 @@ def parse_xlsx_rows(
             continue
 
         record["case_number"] = case_number
+        # Empty Status column from the sheet → treat as Pending
+        if not (record.get("status") or "").strip():
+            record["status"] = PENDING_STATUS
         record["source_xlsx_url"] = source_xlsx_url
         record["list_week_date"] = list_week_date
         record["list_page_url"] = LIST_PAGE_URL
@@ -520,8 +523,9 @@ def reconcile_pending_removals(
     source_xlsx_url: str,
 ) -> int:
     """
-    Silently mark DB cases with status Pending that are absent from the
-    current weekly XLSX as 'removed from pending list' and set removed_at.
+    Silently mark DB cases with status Pending (or empty) that are absent
+    from the current weekly XLSX as 'removed from pending list' and set removed_at.
+    Does not touch completed / already-removed / other statuses.
     """
     if not current_case_numbers:
         logger.warning(
@@ -530,7 +534,11 @@ def reconcile_pending_removals(
 
     now_iso = utc_now_iso()
     query = {
-        "status": {"$regex": r"^pending$", "$options": "i"},
+        "$or": [
+            {"status": {"$regex": r"^pending$", "$options": "i"}},
+            {"status": {"$in": ["", None]}},
+            {"status": {"$exists": False}},
+        ],
         "case_number": {"$nin": list(current_case_numbers)},
     }
     update = {
