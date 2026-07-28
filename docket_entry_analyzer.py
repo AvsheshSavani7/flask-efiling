@@ -29,7 +29,7 @@ COMPREHENSIVE_SUMMARY_MODEL = "gpt-5-mini-2025-08-07"
 # Model for Assistants API (must support file_search)
 ASSISTANTS_API_MODEL = "gpt-4o-mini"
 TIER1_MODEL = "claude-haiku-4-5-20251001"
-TIER2_MODEL = "claude-haiku-4-5-20251001"
+TIER2_MODEL = "claude-sonnet-5"
 TIER3_MODEL = "claude-sonnet-4-6"
 
 
