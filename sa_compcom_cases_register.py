@@ -152,12 +152,14 @@ def fetch_list_page_html(url: str = LIST_PAGE_URL, headless: bool = True) -> Opt
                 page.goto(url, wait_until="domcontentloaded", timeout=60000)
                 page.wait_for_timeout(1500)
                 html = page.content()
-                logger.info("Fetched HTML via Playwright (%s bytes)", len(html))
+                logger.info(
+                    "Fetched HTML via Playwright (%s bytes)", len(html))
                 return html
             finally:
                 browser.close()
     except Exception as e:
-        logger.warning("Playwright fetch failed (%s); falling back to requests", e)
+        logger.warning(
+            "Playwright fetch failed (%s); falling back to requests", e)
 
     headers = {
         "User-Agent": (
@@ -325,7 +327,8 @@ def parse_xlsx_rows(
 def case_exists(collection, case_number: str) -> bool:
     try:
         return (
-            collection.count_documents({"case_number": case_number}, limit=1) > 0
+            collection.count_documents(
+                {"case_number": case_number}, limit=1) > 0
         )
     except Exception as e:
         logger.exception("Error checking existing case: %s", e)
@@ -521,7 +524,8 @@ def reconcile_pending_removals(
     current weekly XLSX as 'removed from pending list' and set removed_at.
     """
     if not current_case_numbers:
-        logger.warning("No current case numbers; skipping pending reconciliation")
+        logger.warning(
+            "No current case numbers; skipping pending reconciliation")
         return 0
 
     now_iso = utc_now_iso()
@@ -917,7 +921,8 @@ def run_sa_compcom_cases_register(
                 logger.warning("Error writing backup JSON: %s", e)
 
     except Exception as e:
-        logger.exception("Unhandled error in run_sa_compcom_cases_register: %s", e)
+        logger.exception(
+            "Unhandled error in run_sa_compcom_cases_register: %s", e)
         collect_error(
             error_items,
             f"Unhandled error: {e}",
@@ -934,8 +939,10 @@ def run_sa_compcom_cases_register(
         logger.info("  Inserted                     : %s", inserted_count)
         if not bootstrap:
             logger.info("  LLM deal matches             : %s", llm_match_count)
-            logger.info("  Regex fallback matches       : %s", regex_match_count)
-        logger.info("  Pending → removed (silent)   : %s", removed_pending_count)
+            logger.info("  Regex fallback matches       : %s",
+                        regex_match_count)
+        logger.info("  Pending → removed (silent)   : %s",
+                    removed_pending_count)
         logger.info("  Errors encountered           : %s", len(error_items))
         logger.info("  Total time                   : %ss", elapsed)
         logger.info("=" * 60)

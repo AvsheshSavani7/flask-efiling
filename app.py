@@ -44,6 +44,7 @@ from canada_cases_update_monitor import process_canada_cases_updates
 from comesa_cases_register import run_comesa_cases_register
 from comesa_cases_update_monitor import process_comesa_cases_updates
 from sa_compcom_cases_register import run_sa_compcom_cases_register
+from sa_compcom_press_release_monitor import run_sa_compcom_press_release_monitor
 from bwb_cases_register import run_bwb_cases_register
 from bwb_cases_update_monitor import process_bwb_cases_updates
 from nz_cases_update_monitor import run as nz_cases_update_monitor_run
@@ -215,6 +216,7 @@ def home():
             "/new-comesa-cases-register": "GET - Register new COMESA Competition Commission cases into comesa_cases collection (query: bootstrap)",
             "/new-comesa-cases-update-monitor": "GET - Monitor comesa_cases collection for status/outcome changes and send email notifications",
             "/new-sa-compcom-cases-register": "GET - Register South Africa CompCom weekly MA cases into sa_compcom_cases (query: bootstrap, headless)",
+            "/new-sa-compcom-press-release-monitor": "GET - Monitor CompCom media-release decision PDFs and update sa_compcom_cases (query: headless)",
             "/bwb-cases-register": "GET - Register new Austrian BWB merger filings into bwb_cases collection (current year)",
             "/bwb-cases-update-monitor": "GET - Monitor open bwb_cases for listing/detail changes and send email notifications",
             "/nj-bpu-scraper": "GET/POST - Scrape NJ BPU docket documents, download PDFs, run tier1/2/3 analysis. Omit case_id to run all dockets from docket_engine/nj_bpu_dockets.json (params: case_id, docket_number, headless, no_proxy, test_mode, save_json)",
@@ -1920,6 +1922,56 @@ def sa_compcom_cases_register():
         }), 500
 
 
+@app.route('/new-sa-compcom-press-release-monitor', methods=['GET'])
+def sa_compcom_press_release_monitor():
+    """
+    Monitor CompCom media releases for "Statement on the latest decisions..."
+    PDFs. Dedupes by pdf_url in sa_compcom_press_releases, extracts merger
+    decisions via OpenAI, matches to sa_compcom_cases with status
+    "removed from pending list", updates title/description/decision_status,
+    sets status=completed, and emails one message per matched case.
+
+    Query params:
+        headless (bool): Playwright headless mode (default true).
+    Process runs in background - returns immediately.
+    """
+    try:
+        headless_str = request.args.get('headless', 'true')
+        headless = headless_str.lower() in ('true', '1', 'yes')
+
+        def run_monitor():
+            try:
+                logger.info(
+                    "Starting SA CompCom press release monitor in background"
+                )
+                run_sa_compcom_press_release_monitor(headless=headless)
+                logger.info(
+                    "✅ SA CompCom press release monitor completed successfully"
+                )
+            except Exception as e:
+                logger.exception("Error in SA CompCom press release monitor")
+
+        submitted, msg = submit_unique_task(
+            "sa-compcom-press-release-monitor", run_monitor)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running"
+        }), 200
+
+    except Exception as e:
+        logger.error(
+            f"Error starting SA CompCom press release monitor: {str(e)}"
+        )
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 @app.route('/bwb-cases-register', methods=['GET'])
 def bwb_cases_register_endpoint():
     """
@@ -2792,6 +2844,7 @@ KNOWN_LOG_SCRIPTS = {
     "comesa_cases_register",
     "comesa_cases_update_monitor",
     "sa_compcom_cases_register",
+    "sa_compcom_press_release_monitor",
     "bwb_cases_register",
     "bwb_cases_update_monitor",
 }
