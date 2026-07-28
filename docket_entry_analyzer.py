@@ -497,6 +497,7 @@ def analyze_docket_entry(
         metadata: Optional metadata dict with keys: date, document_type, 
                  additional_info, on_behalf_of, docket_number
         test_mode: Whether to run in test mode
+        test_mode:
     Returns:
         Dictionary containing analysis results with tier1, tier2 and tier3 responses
     """
