@@ -395,7 +395,7 @@ Target length: 1000-2000 words depending on complexity.""",
         )
 
         # Wait for completion
-        max_wait_time = 300  # 5 minutes max
+        max_wait_time = 600  # 5 minutes max
         start_time = time.time()
 
         while run.status in ['queued', 'in_progress']:
@@ -486,7 +486,7 @@ def analyze_docket_entry(
     doc_number: str,
     full_text: str,
     metadata: Optional[Dict[str, str]] = None,
-    test_mode: bool = False
+    test_mode: bool = True
 ) -> Dict[str, Any]:
     """
     Analyze a docket entry by document number and full text.
