@@ -4,7 +4,7 @@ South Africa CompCom Press Release Monitor
 Loads https://www.compcom.co.za/2026-media-releases/, filters "Statement on
 the latest decisions by the Competition Commission" PDFs, extracts merger
 decisions via OpenAI, and matches them to sa_compcom_cases with status
-"removed from pending list".
+"Pending" or "removed from pending list".
 
 Collections:
   sa_compcom_cases          — update matched cases (title/description/
@@ -22,7 +22,6 @@ import logging
 import os
 import re
 import sys
-import tempfile
 from datetime import datetime, timezone, timedelta
 from html import escape as escape_html
 from io import BytesIO
@@ -313,10 +312,14 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
     return text
 
 
-def extract_cases_from_pdf_text(pdf_text: str) -> List[Dict[str, str]]:
+def extract_cases_from_pdf_text(pdf_text: str) -> Optional[List[Dict[str, str]]]:
     """
     Ask OpenAI for merger/acquisition decisions as JSON:
       [{title, description, decision_status}, ...]
+
+    Returns:
+      list  — extraction succeeded (may be empty if no M&A items)
+      None  — extraction failed (caller must NOT mark PDF as processed)
     """
     if not pdf_text.strip():
         return []
@@ -365,8 +368,9 @@ PDF TEXT:
         cases = data.get("cases") if isinstance(data, dict) else data
         if not isinstance(cases, list):
             logger.warning(
-                "Unexpected JSON shape from PDF extraction: %s", type(cases))
-            return []
+                "Unexpected JSON shape from PDF extraction: %s", type(cases)
+            )
+            return None
 
         cleaned: List[Dict[str, str]] = []
         for item in cases:
@@ -387,12 +391,19 @@ PDF TEXT:
                 }
             )
         logger.info(
-            "OpenAI extracted %s merger decisions from PDF", len(cleaned))
-        logger.info("Extracted cases: %s", cleaned)
+            "OpenAI extracted %s merger decisions from PDF", len(cleaned)
+        )
+        for i, case in enumerate(cleaned, 1):
+            logger.info(
+                "  Extracted case %s: %s | decision_status=%s",
+                i,
+                (case.get("title") or "")[:120],
+                case.get("decision_status"),
+            )
         return cleaned
     except Exception as e:
         logger.exception("PDF case extraction failed: %s", e)
-        return []
+        return None
 
 
 def fetch_removed_pending_cases(cases_col) -> List[Dict[str, Any]]:
@@ -405,9 +416,9 @@ def fetch_removed_pending_cases(cases_col) -> List[Dict[str, Any]]:
     )
     rows = list(cursor)
     logger.info(
-        "Loaded %s sa_compcom_cases with status '%s'",
+        "Loaded %s sa_compcom_cases with status in "
+        "['Pending', 'removed from pending list']",
         len(rows),
-        REMOVED_STATUS,
     )
     return rows
 
@@ -423,6 +434,7 @@ def _candidate_summary(cases: List[Dict[str, Any]]) -> List[Dict[str, str]]:
                     doc.get("primary_acquiring_firm") or ""
                 ),
                 "primary_target_firm": str(doc.get("primary_target_firm") or ""),
+                "status": str(doc.get("status") or ""),
             }
         )
     return out
@@ -434,7 +446,7 @@ def match_case_title_to_record(
 ) -> Optional[str]:
     """
     Ask LLM whether the press-release case title matches any candidate
-    sa_compcom_cases row (already filtered to status "removed from pending list").
+    sa_compcom_cases row (Pending or removed from pending list).
 
     Returns Mongo _id only if BOTH primary_acquiring_firm and
     primary_target_firm of that row match the case title; else None.
@@ -448,7 +460,7 @@ def match_case_title_to_record(
 Press-release case title:
 {press_title}
 
-Candidate DB records (JSON) — all have status "removed from pending list":
+Candidate DB records (JSON) — status is "Pending" or "removed from pending list":
 {json.dumps(summary, ensure_ascii=False, indent=2)}
 
 Rules (strict):
@@ -466,7 +478,7 @@ Return ONLY JSON:
 """
     try:
         logger.info(
-            "Asking LLM to match title against %s removed-from-pending cases",
+            "Asking LLM to match title against %s candidate cases",
             len(summary),
         )
         response = openai_client.chat.completions.create(
@@ -498,7 +510,6 @@ Return ONLY JSON:
             )
             return None
         logger.info("LLM matched title → case id=%s", matched_str)
-        logger.info("LLM matched title → case id=%s", prompt[:500])
         return matched_str
     except Exception as e:
         logger.exception("Title→case match failed: %s", e)
@@ -979,6 +990,15 @@ def run_sa_compcom_press_release_monitor(
                 continue
 
             extracted_cases = extract_cases_from_pdf_text(pdf_text)
+            if extracted_cases is None:
+                collect_error(
+                    error_items,
+                    "PDF case extraction failed — PDF not marked processed",
+                    step="extract_cases_from_pdf_text",
+                    context={"pdf_url": pdf_url},
+                )
+                continue
+
             cases_extracted_total += len(extracted_cases)
             matched_in_pdf = 0
 
@@ -1009,6 +1029,7 @@ def run_sa_compcom_press_release_monitor(
                         },
                     )
 
+            # Only mark processed after a successful extract (list may be empty).
             insert_press_release_record(
                 press_col,
                 item,
