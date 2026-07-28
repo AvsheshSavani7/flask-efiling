@@ -1,0 +1,10 @@
+{
+  "dockets": [
+    {
+      "url": "https://apps.cpuc.ca.gov/apex/f?p=401:57:0::NO:RP,58,RIR:P5_PROCEEDING_SELECT:A2507016",
+      "docket_number": "A2507016",
+      "description": "Charter / Cox — Indirect Transfer of Control (CPUC)",
+      "active": true
+    }
+  ]
+}

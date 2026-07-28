@@ -53,6 +53,7 @@ from ne_psc_scraper import scrape_ne_psc
 from sd_puc_scraper import scrape_sd_puc
 from docket_engine.nj_bpu_scraper import scrape_nj_bpu, scrape_all_nj_bpu
 from docket_engine.fcc_ecfs_scraper import scrape_fcc_ecfs, scrape_all_fcc_ecfs
+from docket_engine.cpuc_scraper import scrape_cpuc, scrape_all_cpuc
 from under_review_scraper import run_under_review_scraper
 from cci_scraper_runtime import run_cci_datatable_scraper
 from ohio_puc_service import (
@@ -221,6 +222,7 @@ def home():
             "/bwb-cases-update-monitor": "GET - Monitor open bwb_cases for listing/detail changes and send email notifications",
             "/nj-bpu-scraper": "GET/POST - Scrape NJ BPU docket documents, download PDFs, run tier1/2/3 analysis. Omit case_id to run all dockets from docket_engine/nj_bpu_dockets.json (params: case_id, docket_number, headless, no_proxy, test_mode, save_json)",
             "/fcc-ecfs-scraper": "GET/POST - Scrape FCC ECFS docket filings, download PDFs, run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/fcc_ecfs_dockets.json (params: docket_number, no_proxy, test_mode, save_json)",
+            "/cpuc-scraper": "GET/POST - Scrape CPUC Documents table via Playwright, download PDFs, run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/cpuc_dockets.json (params: docket_number, headless, test_mode, save_json, cutoff_days)",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -2654,6 +2656,93 @@ def nj_bpu_scraper_endpoint():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route('/cpuc-scraper', methods=['GET', 'POST'])
+def cpuc_scraper_endpoint():
+    """
+    Scrape CPUC proceeding Documents table via Playwright, download PDFs,
+    and run tier1/2/3 analysis via docket_entry_analyzer.
+
+    GET params or POST JSON body:
+        docket_number:  CPUC docket number (optional, e.g. A2507016).
+                        Omit to run all active dockets from cpuc_dockets.json.
+        headless:       Run Playwright headless (default: true)
+        test_mode:      Analyze but skip MongoDB/S3 writes (default: false)
+        save_json:      Save scraped document list to JSON (default: false)
+        cutoff_days:    Only filings on/after today - N days (default: 15)
+
+    Modes:
+        - Omit docket_number → run all active dockets from docket_engine/cpuc_dockets.json
+        - Provide docket_number → run that single docket (URL loaded from config)
+    """
+    try:
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+        else:
+            data = request.args.to_dict()
+
+        docket_number = (data.get("docket_number") or "").strip()
+        headless = str(data.get("headless", "true")).lower() != "false"
+        test_mode = str(data.get("test_mode", "false")).lower() == "true"
+        save_json = str(data.get("save_json", "false")).lower() == "true"
+        try:
+            cutoff_days = int(data.get("cutoff_days", 15))
+        except (TypeError, ValueError):
+            cutoff_days = 15
+
+        if not docket_number:
+            logger.info(
+                f"Starting CPUC scraper (all dockets from config), "
+                f"test_mode={test_mode}, cutoff_days={cutoff_days}"
+            )
+            result = scrape_all_cpuc(
+                headless=headless,
+                test_mode=test_mode,
+                save_json=save_json,
+                cutoff_days=cutoff_days,
+            )
+        else:
+            from docket_engine.cpuc_scraper import (
+                load_dockets_config,
+                CPUC_DOCKETS_FILE,
+            )
+            dockets = load_dockets_config(CPUC_DOCKETS_FILE)
+            entry = next(
+                (
+                    d for d in dockets
+                    if (d.get("docket_number") or "").strip() == docket_number
+                ),
+                None,
+            )
+            if not entry:
+                return jsonify({
+                    "success": False,
+                    "error": (
+                        f"Docket '{docket_number}' not found in "
+                        "cpuc_dockets.json. Add it first or omit "
+                        "docket_number to run all active dockets."
+                    ),
+                }), 404
+
+            logger.info(
+                f"Starting CPUC scraper for docket_number={docket_number}, "
+                f"test_mode={test_mode}, cutoff_days={cutoff_days}"
+            )
+            result = scrape_cpuc(
+                url=(entry.get("url") or "").strip(),
+                docket_number=docket_number,
+                headless=headless,
+                test_mode=test_mode,
+                save_json=save_json,
+                cutoff_days=cutoff_days,
+            )
+
+        return jsonify(result), 200 if result.get("success") else 500
+
+    except Exception as e:
+        logger.error(f"Error in CPUC scraper: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route('/fcc-ecfs-scraper', methods=['GET', 'POST'])
 def fcc_ecfs_scraper_endpoint():
     """
@@ -2838,6 +2927,7 @@ KNOWN_LOG_SCRIPTS = {
     "cci_approved_with_modification",
     "nj_bpu_scraper",
     "fcc_ecfs_scraper",
+    "cpuc_scraper",
     "turkey_rekabet_cases",
     "mexico_cna_scraper",
     "mexico_cna_update_monitor",

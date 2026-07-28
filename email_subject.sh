@@ -204,3 +204,7 @@ Docket:
 
   SD_PUC:
   /sd-puc-scraper
+
+  CPUC:
+  /cpuc-scraper
+  /analyze-docket
