@@ -788,6 +788,7 @@ Be specific and cite entry numbers when referencing prior events."""
         tier2_message = client.messages.create(
             model=TIER2_MODEL,
             max_tokens=1000,
+            thinking={"type": "disabled"},
             messages=[{"role": "user", "content": tier2_prompt}]
         )
         logger.info("Tier2 prompt: %s", tier2_prompt)
@@ -951,6 +952,7 @@ Be specific and cite entry numbers when referencing prior events."""
             tier2_message = client.messages.create(
                 model=TIER2_MODEL,
                 max_tokens=1000,
+                thinking={"type": "disabled"},
                 messages=[{"role": "user", "content": tier2_prompt_fallback}]
             )
 
