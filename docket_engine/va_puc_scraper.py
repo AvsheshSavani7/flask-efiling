@@ -30,6 +30,14 @@ Other flags:
 """
 
 from __future__ import annotations
+from error_email_service import send_error_email
+from log_utils import ensure_script_logger, refresh_script_log
+from docket_engine.docket_email_service import send_docket_email
+from docket_engine.email_renderer import render_intake_card, render_email_html
+from docket_engine.intake_analyzer import generate_intake_note
+from pymongo import MongoClient
+from dotenv import load_dotenv
+import requests
 
 import argparse
 import json
@@ -47,15 +55,6 @@ _PROJECT_ROOT = os.path.dirname(_THIS_DIR)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-import requests
-from dotenv import load_dotenv
-from pymongo import MongoClient
-
-from docket_engine.intake_analyzer import generate_intake_note
-from docket_engine.email_renderer import render_intake_card, render_email_html
-from docket_engine.docket_email_service import send_docket_email
-from log_utils import ensure_script_logger, refresh_script_log
-from error_email_service import send_error_email
 
 load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 
@@ -403,7 +402,10 @@ def filter_by_cutoff(
     kept: List[Dict[str, Any]] = []
     dropped = unparseable = 0
     for doc in documents:
-        parsed = _parse_filing_date(doc.get("date_raw") or doc.get("date") or "")
+        logger.info(
+            f"document_id={doc.get('document_id')} date_raw={doc.get('date_raw')}")
+        parsed = _parse_filing_date(
+            doc.get("date_raw") or doc.get("date") or "")
         if parsed is None:
             unparseable += 1
             logger.warning(
@@ -528,7 +530,8 @@ def _download_pdf(
             )
             return None
 
-        logger.info(f"  Downloaded valid PDF {len(content):,} bytes for doc {doc_id}.")
+        logger.info(
+            f"  Downloaded valid PDF {len(content):,} bytes for doc {doc_id}.")
         return content
     except requests.Timeout as e:
         logger.warning(f"  Download TIMEOUT for doc {doc_id}: {e}")
@@ -599,7 +602,8 @@ def scrape_va_puc(
         return {"success": False, "error": msg, "processed": []}
 
     if cutoff_days < 0:
-        logger.warning(f"cutoff_days={cutoff_days} invalid; using {CUTOFF_DAYS}")
+        logger.warning(
+            f"cutoff_days={cutoff_days} invalid; using {CUTOFF_DAYS}")
         cutoff_days = CUTOFF_DAYS
 
     cutoff = _cutoff_date(cutoff_days)
@@ -696,7 +700,8 @@ def scrape_va_puc(
         }
 
     if save_json:
-        out_file = os.path.join(_THIS_DIR, f"va_puc_{matter_no}_documents.json")
+        out_file = os.path.join(
+            _THIS_DIR, f"va_puc_{matter_no}_documents.json")
         with open(out_file, "w", encoding="utf-8") as f:
             json.dump(documents, f, indent=2, ensure_ascii=False)
         logger.info(f"Saved document list to {out_file}")
@@ -763,7 +768,8 @@ def scrape_va_puc(
         if not pdf_bytes:
             msg = f"PDF download failed for doc_id={doc_id}"
             logger.warning(f"  {msg}")
-            _error_email(msg, {**_doc_ctx, "step": "download_pdf", "pdf_url": pdf_url})
+            _error_email(
+                msg, {**_doc_ctx, "step": "download_pdf", "pdf_url": pdf_url})
             processed.append({
                 "doc_id": doc_id,
                 "title": title,
@@ -849,7 +855,8 @@ def scrape_va_puc(
                             f"  Generating intake note "
                             f"(summary_chars={len(comprehensive_summary):,})"
                         )
-                        intake_note = generate_intake_note(comprehensive_summary)
+                        intake_note = generate_intake_note(
+                            comprehensive_summary)
                         if intake_note is None:
                             msg = (
                                 f"GPT intake note generation failed "
