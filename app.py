@@ -1901,7 +1901,8 @@ def sa_compcom_cases_register():
                 run_sa_compcom_cases_register(
                     bootstrap=bootstrap, headless=headless
                 )
-                logger.info("✅ SA CompCom cases register completed successfully")
+                logger.info(
+                    "✅ SA CompCom cases register completed successfully")
             except Exception as e:
                 logger.exception("Error in SA CompCom cases register")
 
@@ -2937,6 +2938,7 @@ KNOWN_LOG_SCRIPTS = {
     "sa_compcom_press_release_monitor",
     "bwb_cases_register",
     "bwb_cases_update_monitor",
+    "docket_entry_analyzer",
 }
 
 
