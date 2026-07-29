@@ -787,7 +787,7 @@ Be specific and cite entry numbers when referencing prior events."""
         logger.info("Attempting to generate tier2 analysis directly...")
         tier2_message = client.messages.create(
             model=TIER2_MODEL,
-            max_tokens=1000,
+            max_tokens=1500,
             thinking={"type": "disabled"},
             messages=[{"role": "user", "content": tier2_prompt}]
         )
@@ -951,7 +951,7 @@ Be specific and cite entry numbers when referencing prior events."""
                 "Generating tier2 analysis from comprehensive summary...")
             tier2_message = client.messages.create(
                 model=TIER2_MODEL,
-                max_tokens=1000,
+                max_tokens=1500,
                 thinking={"type": "disabled"},
                 messages=[{"role": "user", "content": tier2_prompt_fallback}]
             )
