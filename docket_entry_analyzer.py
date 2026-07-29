@@ -31,6 +31,8 @@ ASSISTANTS_API_MODEL = "gpt-4o-mini"
 TIER1_MODEL = "claude-haiku-4-5-20251001"
 TIER2_MODEL = "claude-sonnet-5"
 TIER3_MODEL = "claude-sonnet-4-6"
+# Haiku Tier1 is ~200k context; summarize via OpenAI file upload when estimate exceeds this.
+TIER1_MAX_ESTIMATED_TOKENS = 200_000
 
 
 def _load_env_file(env_path: str) -> None:
@@ -287,6 +289,23 @@ def convert_date_to_datetime(date_str: str) -> Optional[datetime]:
     return dt
 
 
+def _is_context_length_error(error: Exception) -> bool:
+    """True if the exception looks like an LLM context/token limit failure."""
+    error_str = str(error).lower()
+    markers = (
+        "prompt is too long",
+        "context_length_exceeded",
+        "tokens exceed",
+        "maximum context",
+        "context window",
+        "too many tokens",
+        "string too long",
+        "> 200000 maximum",
+        "200000 maximum",
+    )
+    return any(marker in error_str for marker in markers)
+
+
 def _generate_comprehensive_summary_with_file_upload(
     openai_client: OpenAI,
     full_text: str,
@@ -505,6 +524,9 @@ def analyze_docket_entry(
 
     LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
     _load_env_file(ENV_FILE)
+
+    logger.info("Analyzing docket entry: %s",
+                metadata.get("document_id", "N/A"))
 
     mongodb_uri = os.environ.get("MONGODB_CONNECTION_STRING")
     if not mongodb_uri:
@@ -1035,9 +1057,46 @@ CRITICAL: You must provide numerical scores (0-100) for both risks. Be decisive 
     tier3_cost = _estimate_cost(
         tier3_input_tokens, tier3_output_tokens, TIER3_MODEL)
 
+    # Tier1 uses Haiku (~200k). Tier2/Tier3 stay unchanged.
+    # Prefer an existing Tier2-fallback comprehensive summary when present.
+    # Otherwise, if estimated tokens exceed the limit, generate one via OpenAI
+    # file upload for Tier1 only — then store/return it as comprehensive_summary.
     content = content_for_tier2
+    if comprehensive_summary_data:
+        # Tier2 fallback already produced a summary — reuse for Tier1 (no re-upload).
+        content = comprehensive_summary_data["summary"]
+        logger.info(
+            "✓ Tier1 will reuse existing comprehensive summary from Tier2 path (%s chars)",
+            f"{len(content):,}",
+        )
+    elif estimated_tokens > TIER1_MAX_ESTIMATED_TOKENS:
+        logger.info(
+            "Tier1 content too large (%s est. tokens > %s); "
+            "generating OpenAI file-upload summary for Tier1...",
+            f"{estimated_tokens:,}",
+            f"{TIER1_MAX_ESTIMATED_TOKENS:,}",
+        )
+        comprehensive_summary_data = _generate_comprehensive_summary_with_file_upload(
+            openai_client=openai_client,
+            full_text=full_text,
+            entry_metadata=entry_metadata,
+            estimated_tokens=estimated_tokens,
+            next_entry_number=next_entry_number,
+        )
+        comprehensive_summary_data["reason"] = (
+            f"Tier1 gate: estimated tokens {estimated_tokens:,} > "
+            f"{TIER1_MAX_ESTIMATED_TOKENS:,}"
+        )
+        content = comprehensive_summary_data["summary"]
+        logger.info(
+            "✓ Tier1 will use comprehensive summary (%s chars)",
+            f"{len(content):,}",
+        )
 
-    tier1_prompt = f"""You are extracting key facts from a legal docket entry. Be concise and factual.
+    tier1_used_summary = bool(comprehensive_summary_data)
+
+    def _build_tier1_prompt(tier1_content: str) -> str:
+        return f"""You are extracting key facts from a legal docket entry. Be concise and factual.
 
 ENTRY METADATA:
 Entry Number: {next_entry_number}
@@ -1047,7 +1106,7 @@ Filed By: {entry_metadata['on_behalf_of']}
 Info: {entry_metadata['additional_info']}
 
 CONTENT:
-{content}
+{tier1_content}
 
 Extract the key facts in 3-5 bullet points (max 500 words total):
 - What type of filing is this?
@@ -1057,14 +1116,72 @@ Extract the key facts in 3-5 bullet points (max 500 words total):
 
 Be factual and concise. Focus on substantive content, not procedural details."""
 
-    tier1_message = client.messages.create(
-        model=TIER1_MODEL,
-        max_tokens=1000,
-        temperature=0.1,
-        messages=[{"role": "user", "content": tier1_prompt}]
-    )
-    logger.info("Tier1 message: %s", tier1_message)
-    logger.info("Tier1 prompt: %s", tier1_prompt)
+    def _call_tier1(tier1_content: str, used_summary: bool):
+        tier1_prompt = _build_tier1_prompt(tier1_content)
+        logger.info(
+            "Generating Tier1 summary (content_chars=%s, est_tokens=%s, used_summary=%s)",
+            f"{len(tier1_content):,}",
+            f"{estimated_tokens:,}",
+            used_summary,
+        )
+        message = client.messages.create(
+            model=TIER1_MODEL,
+            max_tokens=1000,
+            temperature=0.1,
+            messages=[{"role": "user", "content": tier1_prompt}]
+        )
+        logger.info("Tier1 message: %s", message)
+        return message
+
+    try:
+        tier1_message = _call_tier1(content, tier1_used_summary)
+    except Exception as tier1_error:
+        if not _is_context_length_error(tier1_error):
+            logger.error("Tier1 generation failed: %s", str(tier1_error))
+            raise
+
+        logger.warning(
+            "Tier1 failed due to context/token limit: %s",
+            str(tier1_error),
+        )
+
+        # Only upload+retry when the failed call still used full/large text.
+        # If we already sent a comprehensive_summary, do not retry the same blob.
+        if tier1_used_summary:
+            raise RuntimeError(
+                "Tier1 failed due to context/token limit even after using "
+                f"comprehensive_summary ({len(content):,} chars). "
+                f"Original error: {tier1_error}"
+            ) from tier1_error
+
+        logger.info(
+            "Failed Tier1 used full/large text; generating OpenAI file-upload "
+            "summary, then retrying Tier1 once..."
+        )
+        comprehensive_summary_data = _generate_comprehensive_summary_with_file_upload(
+            openai_client=openai_client,
+            full_text=full_text,
+            entry_metadata=entry_metadata,
+            estimated_tokens=estimated_tokens,
+            next_entry_number=next_entry_number,
+        )
+        comprehensive_summary_data["reason"] = (
+            f"Tier1 retry after context limit: {str(tier1_error)}"
+        )
+        content = comprehensive_summary_data["summary"]
+        tier1_used_summary = True
+        logger.info(
+            "✓ Retrying Tier1 with comprehensive summary (%s chars)",
+            f"{len(content):,}",
+        )
+        try:
+            tier1_message = _call_tier1(content, tier1_used_summary)
+        except Exception as tier1_retry_error:
+            logger.error(
+                "Tier1 retry after comprehensive summary also failed: %s",
+                str(tier1_retry_error),
+            )
+            raise
 
     tier1_summary = tier1_message.content[0].text.strip()
     tier1_input_tokens = tier1_message.usage.input_tokens
@@ -1112,9 +1229,10 @@ Be factual and concise. Focus on substantive content, not procedural details."""
         "updated_at": datetime.now().isoformat()
     }
 
-    # Add comprehensive summary field if generated
+    # Store comprehensive_summary only when it was generated (Tier1 size gate
+    # when est. tokens > 200k, or Tier2 fallback). Otherwise callers use full text.
     if comprehensive_summary_data:
-        new_entry["comprehensive_summary"] = comprehensive_summary_data["summary"] if comprehensive_summary_data else full_text
+        new_entry["comprehensive_summary"] = comprehensive_summary_data["summary"]
 
     inserted_id = None
     enrichment_scheduled = False
@@ -1138,6 +1256,13 @@ Be factual and concise. Focus on substantive content, not procedural details."""
     elif _should_schedule_enrichment(docket_type):
         _schedule_docket_enrichment_test(new_entry)
         enrichment_scheduled = True
+
+    # Return generated summary only when we created one; otherwise full text.
+    comprehensive_summary_out = (
+        comprehensive_summary_data["summary"]
+        if comprehensive_summary_data
+        else full_text
+    )
 
     result = {
         "doc_number": doc_number,
@@ -1168,7 +1293,7 @@ Be factual and concise. Focus on substantive content, not procedural details."""
             "cost": tier3_cost
         },
         "total_cost": total_cost,
-        "comprehensive_summary": comprehensive_summary_data["summary"] if comprehensive_summary_data else full_text,
+        "comprehensive_summary": comprehensive_summary_out,
         "timestamp": datetime.now().isoformat(),
         "database_updated": inserted_id is not None,
         # MongoDB native _id (string) for client reference only — not stored as a separate field
@@ -1176,10 +1301,6 @@ Be factual and concise. Focus on substantive content, not procedural details."""
         "enrichment_scheduled": enrichment_scheduled,
         "deal_id": deal_id,
     }
-
-    # Add comprehensive summary to result if generated
-    if comprehensive_summary_data:
-        result["comprehensive_summary"] = comprehensive_summary_data["summary"] if comprehensive_summary_data else full_text
 
     return result
 
@@ -1248,13 +1369,13 @@ if __name__ == "__main__":
     # }
 
     metadata = {
-        "date": "07/23/2026",
-        "document_type": "Filing",
-        "additional_info": "UNION PACIFIC CORPORATION AND UNION PACIFIC RAILROAD COMPANY&mdash;CONTROL&mdash;NORFOLK SOUTHERN CORPORATION AND NORFOLK SOUTHERN RAILWAY COMPANY",
-        "on_behalf_of": "Lindsay Williams",
+        "date": "07/27/2026",
+        "document_type": "Environmental Incoming",
+        "additional_info": "UNION PACIFIC CORPORATION AND UNION PACIFIC RAILROAD COMPANY&mdash;CONTROL&mdash;NORFOLK SOUTHERN CORPORATION AND NORFOLK SOUTHERN RAILWAY COMPANY | Comments: Updated Master Data Tables",
+        "on_behalf_of": "submitter: Thomas Brugato",
         "docket_number": "FD-36873",
-        "document_id": "https://dcms-external.s3.amazonaws.com/DCMS_External_PROD/1784898488020/311833.pdf",
-        "docket_type": "stb-document"
+        "document_id": "https://dcms-external.s3.amazonaws.com/DCMS_External_PROD/1785250537407/EI-34263.pdf",
+        "docket_type": "stb-environmentalComment"
     }
 
     result = analyze_docket_entry(doc_num, text, metadata)
