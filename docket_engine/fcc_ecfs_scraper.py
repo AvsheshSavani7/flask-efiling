@@ -448,16 +448,20 @@ def _get_mongo_collection() -> Tuple[Any, Any]:
 
 def _batch_filter_existing(collection, ids: List[str]) -> List[str]:
     """
-    Level 1 dedup (RSS level): return IDs not yet in MongoDB.
-    Checks metadata.document_id — catches brief comment filings (stored with
-    filing_url as document_id) and also works for any URL-keyed record.
+    Level 1 dedup (RSS level): return IDs not yet in MongoDB for this docket_type.
+    Checks metadata.docket_type + metadata.document_id — catches brief comment
+    filings (stored with filing_url as document_id) and also works for any
+    URL-keyed record.
     """
     if not ids:
         return []
     existing = set()
     try:
         cursor = collection.find(
-            {"metadata.document_id": {"$in": ids}},
+            {
+                "metadata.docket_type": DOCKET_TYPE,
+                "metadata.document_id": {"$in": ids},
+            },
             {"metadata.document_id": 1},
         )
         for doc in cursor:
@@ -468,22 +472,27 @@ def _batch_filter_existing(collection, ids: List[str]) -> List[str]:
     new_ids = [i for i in ids if i not in existing]
     skipped = len(ids) - len(new_ids)
     if skipped:
-        logger.info(f"Level 1 dedup: {skipped} filing(s) already in DB, {len(new_ids)} to process.")
+        logger.info(
+            f"Level 1 dedup ({DOCKET_TYPE}): {skipped} filing(s) already in DB, "
+            f"{len(new_ids)} to process."
+        )
     return new_ids
 
 
 def _batch_filter_existing_docs(collection, doc_urls: List[str]) -> List[str]:
     """
-    Level 2 dedup (document level): return doc_urls not yet in MongoDB.
-    Checks metadata.document_id — called after parsing document links from the
-    filing detail page to avoid re-downloading/re-analyzing existing PDFs.
+    Level 2 dedup (document level): return doc_urls not yet in MongoDB for this
+    docket_type. Checks metadata.docket_type + metadata.document_id.
     """
     if not doc_urls:
         return []
     existing = set()
     try:
         cursor = collection.find(
-            {"metadata.document_id": {"$in": doc_urls}},
+            {
+                "metadata.docket_type": DOCKET_TYPE,
+                "metadata.document_id": {"$in": doc_urls},
+            },
             {"metadata.document_id": 1},
         )
         for doc in cursor:
@@ -494,7 +503,10 @@ def _batch_filter_existing_docs(collection, doc_urls: List[str]) -> List[str]:
     new_urls = [u for u in doc_urls if u not in existing]
     skipped = len(doc_urls) - len(new_urls)
     if skipped:
-        logger.info(f"Level 2 dedup: {skipped} document(s) already in DB, {len(new_urls)} new.")
+        logger.info(
+            f"Level 2 dedup ({DOCKET_TYPE}): {skipped} document(s) already in DB, "
+            f"{len(new_urls)} new."
+        )
     return new_urls
 
 

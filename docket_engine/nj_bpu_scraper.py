@@ -179,13 +179,16 @@ def _get_mongo_collection() -> Tuple[Any, Any]:
 def _batch_filter_existing(
     collection, doc_ids: List[str]
 ) -> List[str]:
-    """Return subset of doc_ids that are NOT yet in MongoDB."""
+    """Return subset of doc_ids that are NOT yet in MongoDB for this docket_type."""
     if not doc_ids:
         return []
     existing = set()
     try:
         cursor = collection.find(
-            {"metadata.document_id": {"$in": doc_ids}},
+            {
+                "metadata.docket_type": DOCKET_TYPE,
+                "metadata.document_id": {"$in": doc_ids},
+            },
             {"metadata.document_id": 1},
         )
         for doc in cursor:
@@ -196,7 +199,9 @@ def _batch_filter_existing(
     new_ids = [d for d in doc_ids if d not in existing]
     skipped = len(doc_ids) - len(new_ids)
     if skipped:
-        logger.info(f"Dedup: {skipped} already in DB, {len(new_ids)} new.")
+        logger.info(
+            f"Dedup ({DOCKET_TYPE}): {skipped} already in DB, {len(new_ids)} new."
+        )
     return new_ids
 
 
