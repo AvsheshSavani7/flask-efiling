@@ -31,6 +31,15 @@ Other flags (apply to both modes):
 """
 
 from __future__ import annotations
+from error_email_service import send_error_email
+from log_utils import ensure_script_logger, refresh_script_log
+from docket_engine.docket_email_service import send_docket_email
+from docket_engine.email_renderer import render_intake_card, render_email_html
+from docket_engine.intake_analyzer import generate_intake_note
+from pymongo import MongoClient
+from dotenv import load_dotenv
+from bs4 import BeautifulSoup
+import requests
 
 import argparse
 import json
@@ -49,16 +58,6 @@ _PROJECT_ROOT = os.path.dirname(_THIS_DIR)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-import requests
-from bs4 import BeautifulSoup
-from dotenv import load_dotenv
-from pymongo import MongoClient
-
-from docket_engine.intake_analyzer import generate_intake_note
-from docket_engine.email_renderer import render_intake_card, render_email_html
-from docket_engine.docket_email_service import send_docket_email
-from log_utils import ensure_script_logger, refresh_script_log
-from error_email_service import send_error_email
 
 load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 
@@ -233,12 +232,15 @@ def _fetch_case_html_requests(
         resp.raise_for_status()
         html = resp.text
         if "gvDocuments" in html:
-            logger.info(f"Case page fetched via requests ({len(html):,} chars).")
+            logger.info(
+                f"Case page fetched via requests ({len(html):,} chars).")
             return html
-        logger.info("requests fetch succeeded but #gvDocuments missing — trying Playwright.")
+        logger.info(
+            "requests fetch succeeded but #gvDocuments missing — trying Playwright.")
         return None
     except Exception as e:
-        logger.info(f"requests fetch failed: {e} — falling back to Playwright.")
+        logger.info(
+            f"requests fetch failed: {e} — falling back to Playwright.")
         return None
 
 
@@ -293,10 +295,12 @@ def _fetch_case_html_playwright(
                 try:
                     page.wait_for_selector("#gvDocuments", timeout=15_000)
                 except PlaywrightTimeoutError:
-                    logger.warning("Playwright: #gvDocuments not found after wait.")
+                    logger.warning(
+                        "Playwright: #gvDocuments not found after wait.")
 
                 html = page.content()
-                logger.info(f"Case page fetched via Playwright ({len(html):,} chars).")
+                logger.info(
+                    f"Case page fetched via Playwright ({len(html):,} chars).")
                 return html
             except PlaywrightTimeoutError as e:
                 logger.error(f"Playwright timeout fetching case page: {e}")
@@ -339,7 +343,8 @@ def parse_documents(html: str) -> List[Dict[str, Any]]:
 
     documents: List[Dict[str, Any]] = []
     for row in table.find_all("tr"):
-        checkbox = row.find("input", {"name": "document_id", "type": "checkbox"})
+        checkbox = row.find(
+            "input", {"name": "document_id", "type": "checkbox"})
         if not checkbox:
             continue
         doc_id = checkbox.get("value", "").strip()
@@ -355,7 +360,8 @@ def parse_documents(html: str) -> List[Dict[str, Any]]:
 
         title_cell = cells[2]
         link_tag = title_cell.find("a")
-        title = link_tag.get_text(strip=True) if link_tag else title_cell.get_text(strip=True)
+        title = link_tag.get_text(
+            strip=True) if link_tag else title_cell.get_text(strip=True)
         doc_href = link_tag.get("href", "") if link_tag else ""
         if doc_href and not doc_href.startswith("http"):
             doc_href = f"{NJ_BPU_BASE}/{doc_href.lstrip('/')}"
@@ -407,7 +413,8 @@ def _extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
         doc.close()
         result = "\n".join(parts).strip()
         if result:
-            logger.info(f"  Text extracted via pymupdf ({len(result):,} chars).")
+            logger.info(
+                f"  Text extracted via pymupdf ({len(result):,} chars).")
             return result
     except Exception as e:
         logger.debug(f"pymupdf extraction failed: {e}")
@@ -532,7 +539,8 @@ def scrape_nj_bpu(
     if not html:
         msg = f"Could not fetch case page for case_id={case_id}"
         logger.error(msg)
-        _error_email(msg, {"step": "fetch_html", "url": f"{NJ_BPU_CASE_URL}?case_id={case_id}"})
+        _error_email(msg, {"step": "fetch_html",
+                     "url": f"{NJ_BPU_CASE_URL}?case_id={case_id}"})
         if mongo_client:
             mongo_client.close()
         return {"success": False, "error": msg, "processed": []}
@@ -603,15 +611,19 @@ def scrape_nj_bpu(
         )
 
         # Shared per-document context for error emails
-        _doc_ctx = {"doc_id": doc_id, "title": title[:120], "posted_date": posted_date}
+        _doc_ctx = {"doc_id": doc_id,
+                    "title": title[:120], "posted_date": posted_date}
 
         # 5a: Download PDF
-        pdf_bytes = _download_document(doc_id, use_proxy=use_proxy, session=download_session)
+        pdf_bytes = _download_document(
+            doc_id, use_proxy=use_proxy, session=download_session)
         if not pdf_bytes:
             msg = f"PDF download failed for doc_id={doc_id}"
             logger.warning(f"  {msg}")
-            _error_email(msg, {**_doc_ctx, "step": "download_pdf", "doc_url": doc_url})
-            processed.append({"doc_id": doc_id, "title": title, "status": "download_failed"})
+            _error_email(
+                msg, {**_doc_ctx, "step": "download_pdf", "doc_url": doc_url})
+            processed.append(
+                {"doc_id": doc_id, "title": title, "status": "download_failed"})
             continue
 
         # 5b: Extract text
@@ -620,7 +632,8 @@ def scrape_nj_bpu(
             msg = f"No text extracted from PDF for doc_id={doc_id}"
             logger.warning(f"  {msg}")
             _error_email(msg, {**_doc_ctx, "step": "extract_text"})
-            processed.append({"doc_id": doc_id, "title": title, "status": "no_text_extracted"})
+            processed.append({"doc_id": doc_id, "title": title,
+                             "status": "no_text_extracted"})
             continue
         logger.info(f"  Extracted {len(extracted_text):,} chars.")
 
@@ -642,7 +655,8 @@ def scrape_nj_bpu(
         }
 
         # 5e: Analyze (tier 1/2/3 + MongoDB insert)
-        logger.info(f"  Analyzing — folder={folder} uploaded_by={uploaded_by[:50]}")
+        logger.info(
+            f"  Analyzing — folder={folder} uploaded_by={uploaded_by[:50]}")
         try:
             result = analyze_docket_entry(
                 doc_number=doc_id,
@@ -655,8 +669,10 @@ def scrape_nj_bpu(
             if result.get("error"):
                 msg = f"Docket analysis error for doc_id={doc_id}: {result['error']}"
                 logger.warning(f"  {msg}")
-                _error_email(msg, {**_doc_ctx, "step": "docket_analysis", "analysis_error": result["error"]})
-                processed.append({"doc_id": doc_id, "title": title, "status": "analysis_error", "error": result["error"]})
+                _error_email(
+                    msg, {**_doc_ctx, "step": "docket_analysis", "analysis_error": result["error"]})
+                processed.append({"doc_id": doc_id, "title": title,
+                                 "status": "analysis_error", "error": result["error"]})
                 # Use a flag instead of continue so time.sleep(2) still runs
                 analysis_failed = True
             else:
@@ -668,31 +684,38 @@ def scrape_nj_bpu(
             email_html = None
             if not analysis_failed:
                 if status == "new_analysis":
-                    comprehensive_summary = result.get("comprehensive_summary") or ""
+                    comprehensive_summary = result.get(
+                        "comprehensive_summary") or ""
                     intake_note = generate_intake_note(comprehensive_summary)
 
                     if intake_note is None:
                         msg = f"GPT intake note generation failed for doc_id={doc_id}"
                         logger.warning(f"  {msg}")
-                        _error_email(msg, {**_doc_ctx, "step": "gpt_intake_note"})
+                        _error_email(
+                            msg, {**_doc_ctx, "step": "gpt_intake_note"})
                     else:
                         # 5g: Build HTML email from intake note + tier2/tier3 analysis
-                        document_url = metadata.get("url") or metadata.get("document_id") or ""
-                        base_html = render_intake_card(intake_note, document_url)
+                        document_url = metadata.get(
+                            "url") or metadata.get("document_id") or ""
+                        base_html = render_intake_card(
+                            intake_note, document_url)
                         email_html = render_email_html(
-                            tier2_response=((result.get("tier2_analysis") or {}).get("response") or ""),
-                            tier3_response=((result.get("tier3_risk_assessment") or {}).get("response") or ""),
+                            tier2_response=(
+                                (result.get("tier2_analysis") or {}).get("response") or ""),
+                            tier3_response=(
+                                (result.get("tier3_risk_assessment") or {}).get("response") or ""),
                             base_html=base_html,
                             metadata=metadata,
                         )
                         logger.info("  Email HTML rendered.")
 
                         # 5h: Send email via docket_email_service (org-aware routing)
-                        target_company_name = (result.get("metadata") or {}).get("target_company_name", "")
+                        target_company_name = (result.get("metadata") or {}).get(
+                            "target_company_name", "")
                         additional_info = metadata.get("additional_info", "")
                         document_type = metadata.get("document_type", "")
                         subject = (
-                            f"{target_company_name} : NJ - {doc_docket_number}"
+                            f"{target_company_name} : NJBPU - {doc_docket_number}"
                             f": {additional_info} - {document_type}"
                         )
                         send_docket_email(
@@ -704,7 +727,8 @@ def scrape_nj_bpu(
                             deal_id=result.get("deal_id"),
                         )
                 else:
-                    logger.info(f"  Skipping intake note and email HTML — status={status}")
+                    logger.info(
+                        f"  Skipping intake note and email HTML — status={status}")
 
                 processed.append({
                     "doc_id": doc_id,
@@ -719,7 +743,8 @@ def scrape_nj_bpu(
             msg = f"Docket analysis exception for doc_id={doc_id}: {e}"
             logger.error(f"  {msg}")
             _error_email(msg, {**_doc_ctx, "step": "docket_analysis"})
-            processed.append({"doc_id": doc_id, "title": title, "status": "analysis_error", "error": str(e)})
+            processed.append({"doc_id": doc_id, "title": title,
+                             "status": "analysis_error", "error": str(e)})
 
         time.sleep(2)
 
@@ -730,7 +755,8 @@ def scrape_nj_bpu(
         1 for p in processed
         if p["status"] not in ("download_failed", "no_text_extracted", "analysis_error")
     )
-    logger.info(f"Finished. {success_count}/{len(new_documents)} new document(s) analyzed.")
+    logger.info(
+        f"Finished. {success_count}/{len(new_documents)} new document(s) analyzed.")
 
     return {
         "success": True,
@@ -777,7 +803,8 @@ def scrape_all_nj_bpu(
         description = entry.get("description", "")
 
         if not case_id or not docket_number:
-            logger.warning(f"Skipping invalid config entry (missing case_id or docket_number): {entry}")
+            logger.warning(
+                f"Skipping invalid config entry (missing case_id or docket_number): {entry}")
             continue
 
         logger.info(

@@ -27,6 +27,15 @@ Other flags:
 """
 
 from __future__ import annotations
+from error_email_service import send_error_email
+from log_utils import ensure_script_logger, refresh_script_log
+from docket_engine.docket_email_service import send_docket_email
+from docket_engine.email_renderer import render_intake_card, render_email_html
+from docket_engine.intake_analyzer import generate_intake_note
+from pymongo import MongoClient
+from dotenv import load_dotenv
+from bs4 import BeautifulSoup
+import requests
 
 import argparse
 import json
@@ -44,16 +53,6 @@ _PROJECT_ROOT = os.path.dirname(_THIS_DIR)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-import requests
-from bs4 import BeautifulSoup
-from dotenv import load_dotenv
-from pymongo import MongoClient
-
-from docket_engine.intake_analyzer import generate_intake_note
-from docket_engine.email_renderer import render_intake_card, render_email_html
-from docket_engine.docket_email_service import send_docket_email
-from log_utils import ensure_script_logger, refresh_script_log
-from error_email_service import send_error_email
 
 load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 
@@ -360,7 +359,8 @@ def _extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
         doc.close()
         result = "\n".join(parts).strip()
         if result:
-            logger.info(f"  Text extracted via pymupdf ({len(result):,} chars).")
+            logger.info(
+                f"  Text extracted via pymupdf ({len(result):,} chars).")
             return result
     except Exception as e:
         logger.debug(f"pymupdf extraction failed: {e}")
@@ -517,7 +517,8 @@ def scrape_documents_table_with_playwright(
                         docs_tab.first.click()
                         page.wait_for_timeout(2500)
                         try:
-                            page.wait_for_load_state("networkidle", timeout=15_000)
+                            page.wait_for_load_state(
+                                "networkidle", timeout=15_000)
                         except PlaywrightTimeoutError:
                             pass
             except Exception as e:
@@ -541,7 +542,8 @@ def scrape_documents_table_with_playwright(
                     "table.a-IRR-table, table.tbl-body", timeout=20_000
                 )
             except PlaywrightTimeoutError:
-                logger.warning("Documents table selector not found after wait.")
+                logger.warning(
+                    "Documents table selector not found after wait.")
 
             page_num = 1
             while not stop:
@@ -733,7 +735,8 @@ def scrape_cpuc(
     else:
         new_ids_set = set(all_ids)
 
-    new_documents = [d for d in documents if d.get("document_id") in new_ids_set]
+    new_documents = [d for d in documents if d.get(
+        "document_id") in new_ids_set]
     if not new_documents:
         logger.info("All documents already in the database.")
         if mongo_client:
@@ -791,7 +794,8 @@ def scrape_cpuc(
         if tables is None:
             msg = f"Failed to fetch detail page for doc_id={doc_id}"
             logger.warning(f"  {msg}")
-            _error_email(msg, {**_doc_ctx, "step": "fetch_detail", "detail_url": detail_url})
+            _error_email(
+                msg, {**_doc_ctx, "step": "fetch_detail", "detail_url": detail_url})
             processed.append({
                 "doc_id": doc_id,
                 "document_type": document_type,
@@ -931,14 +935,16 @@ def scrape_cpuc(
                             f"for doc_id={doc_id}"
                         )
                         logger.warning(f"  {msg}")
-                        _error_email(msg, {**_doc_ctx, "step": "gpt_intake_note"})
+                        _error_email(
+                            msg, {**_doc_ctx, "step": "gpt_intake_note"})
                     else:
                         document_url = (
                             metadata.get("url")
                             or metadata.get("document_id")
                             or ""
                         )
-                        base_html = render_intake_card(intake_note, document_url)
+                        base_html = render_intake_card(
+                            intake_note, document_url)
                         email_html = render_email_html(
                             tier2_response=(
                                 (result.get("tier2_analysis") or {}).get(
@@ -963,7 +969,7 @@ def scrape_cpuc(
                         additional_info = metadata.get("additional_info", "")
                         doc_type_label = metadata.get("document_type", "")
                         subject = (
-                            f"{target_company_name} : CA - {docket_number}"
+                            f"{target_company_name} : CAPUC - {docket_number}"
                             f": {additional_info} - {doc_type_label}"
                         )
                         send_docket_email(
