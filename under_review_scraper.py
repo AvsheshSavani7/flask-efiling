@@ -34,6 +34,7 @@ from cci_common import (
     fetch_detail_pdf_url,
     get_cci_cases_collection,
     get_stage,
+    load_cci_list_page,
     log_cci_db_lookup,
     paginate_under_review_list,
     process_deal_match_and_email,
@@ -155,9 +156,7 @@ def run_under_review_scraper(
             )
             page = context.new_page()
 
-            logger.info("Loading list page: %s", LIST_URL)
-            page.goto(LIST_URL, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(3000)
+            load_cci_list_page(page, LIST_URL)
 
             rows = paginate_under_review_list(
                 page,

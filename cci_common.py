@@ -15,6 +15,7 @@ import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from openai import OpenAI
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from email_subject_builder import build_subject
 from n8n_email_service import post_email_payload
@@ -467,20 +468,103 @@ def page_all_older_than_cutoff(
     return True
 
 
-def wait_for_datatable_ready(page, timeout_ms: int = 15000) -> None:
-    page.wait_for_selector("#datatable_ajax tbody tr", timeout=timeout_ms)
-    try:
-        page.wait_for_function(
-            """() => {
-                const el = document.querySelector('#datatable_ajax_processing');
-                if (!el) return true;
-                const style = window.getComputedStyle(el);
-                return style.display === 'none' || el.style.display === 'none';
-            }""",
-            timeout=timeout_ms,
-        )
-    except Exception:
-        page.wait_for_timeout(1000)
+def goto_with_retries(
+    page,
+    url: str,
+    *,
+    max_retries: int = 3,
+    timeout_ms: int = 60000,
+    settle_ms: int = 3000,
+) -> None:
+    """Navigate to url; retry on Playwright timeouts (CCI is often slow)."""
+    last_err: Optional[BaseException] = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(
+                "Navigating (attempt %s/%s): %s", attempt, max_retries, url
+            )
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            page.wait_for_timeout(settle_ms)
+            return
+        except PlaywrightTimeoutError as exc:
+            last_err = exc
+            logger.warning(
+                "Navigation timed out (attempt %s/%s): %s",
+                attempt,
+                max_retries,
+                url,
+            )
+            if attempt < max_retries:
+                page.wait_for_timeout(5000)
+    assert last_err is not None
+    raise last_err
+
+
+def wait_for_datatable_ready(
+    page, timeout_ms: int = 30000, max_retries: int = 3
+) -> None:
+    """Wait for CCI DataTables rows; retry on timeout without reloading."""
+    last_err: Optional[BaseException] = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            page.wait_for_selector(
+                "#datatable_ajax tbody tr", timeout=timeout_ms
+            )
+            try:
+                page.wait_for_function(
+                    """() => {
+                        const el = document.querySelector('#datatable_ajax_processing');
+                        if (!el) return true;
+                        const style = window.getComputedStyle(el);
+                        return style.display === 'none' || el.style.display === 'none';
+                    }""",
+                    timeout=timeout_ms,
+                )
+            except Exception:
+                page.wait_for_timeout(1000)
+            return
+        except PlaywrightTimeoutError as exc:
+            last_err = exc
+            logger.warning(
+                "Datatable not ready (attempt %s/%s)", attempt, max_retries
+            )
+            if attempt < max_retries:
+                page.wait_for_timeout(2000)
+    assert last_err is not None
+    raise last_err
+
+
+def load_cci_list_page(
+    page, list_url: str, *, max_retries: int = 3
+) -> None:
+    """Load list URL and wait for datatable; full re-navigation on failure."""
+    last_err: Optional[BaseException] = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(
+                "Loading list page (attempt %s/%s): %s",
+                attempt,
+                max_retries,
+                list_url,
+            )
+            page.goto(
+                list_url, wait_until="domcontentloaded", timeout=60000
+            )
+            page.wait_for_timeout(3000)
+            wait_for_datatable_ready(page, max_retries=1)
+            return
+        except PlaywrightTimeoutError as exc:
+            last_err = exc
+            logger.warning(
+                "List page load timed out (attempt %s/%s): %s",
+                attempt,
+                max_retries,
+                list_url,
+            )
+            if attempt < max_retries:
+                page.wait_for_timeout(5000)
+    assert last_err is not None
+    raise last_err
 
 
 def paginate_cci_list(
@@ -639,8 +723,7 @@ def parse_approved_with_modification_table(html: str) -> List[Dict[str, Any]]:
 
 def fetch_detail_html(page, detail_url: str) -> str:
     logger.info("  Fetching detail: %s", detail_url)
-    page.goto(detail_url, wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(2000)
+    goto_with_retries(page, detail_url, settle_ms=2000)
     return page.content()
 
 

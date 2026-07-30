@@ -18,6 +18,7 @@ from cci_common import (
     attach_cci_common_logging,
     ensure_cci_indexes,
     get_cci_cases_collection,
+    load_cci_list_page,
     log_cci_db_lookup,
     paginate_cci_list,
     process_deal_match_and_email,
@@ -127,9 +128,7 @@ def run_cci_datatable_scraper(
             )
             page = context.new_page()
 
-            logger.info("Loading list page: %s", config.list_url)
-            page.goto(config.list_url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(3000)
+            load_cci_list_page(page, config.list_url)
 
             rows = paginate_cci_list(
                 page,
