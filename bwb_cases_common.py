@@ -344,16 +344,34 @@ def _dismiss_cookie_consent_if_present(page, wait_ms: int = 500) -> bool:
 
 
 def _reveal_all_listing_rows(page, wait_ms: int = 1500) -> None:
-    """Click month filter 'Alle' and expand DataTables so all year rows are in the DOM."""
+    """Click month filter 'Alle' and expand DataTables so all year rows are in the DOM.
+
+    Must click Alle *before* waiting for the table: the DE site defaults to the
+    current month, and an empty month (e.g. 8/2026) shows only
+    "Keine Zusammenschlüsse für dieses Monat vorhanden." with no <table>.
+    """
     _dismiss_cookie_consent_if_present(page)
-    page.wait_for_selector("table", timeout=60000)
+
+    # Wait for month filter UI (DE primary) — not the table.
+    try:
+        page.wait_for_selector(
+            "a:text-is('Alle'), button:text-is('Alle'), "
+            "a:text-is('All'), button:text-is('All'), table",
+            timeout=60000,
+        )
+    except Exception:
+        logger.warning(
+            "Month filter / listing content not ready; continuing anyway"
+        )
 
     alle_clicked = False
     for locator in (
         page.get_by_role("link", name="Alle", exact=True),
         page.get_by_role("button", name="Alle", exact=True),
         page.locator("a, button", has_text=re.compile(r"^Alle$")),
-        page.locator("a", has_text=re.compile(r"^Alle$")),
+        page.get_by_role("link", name="All", exact=True),
+        page.get_by_role("button", name="All", exact=True),
+        page.locator("a, button", has_text=re.compile(r"^All$")),
     ):
         try:
             if locator.count() > 0:
@@ -368,6 +386,16 @@ def _reveal_all_listing_rows(page, wait_ms: int = 1500) -> None:
         logger.warning("Month filter 'Alle' not found; listing may be partial")
 
     page.wait_for_timeout(wait_ms)
+
+    # After Alle is selected, table should appear if the year has any filings.
+    try:
+        page.wait_for_selector("table", timeout=60000)
+    except Exception:
+        logger.warning(
+            "No listing table after selecting Alle "
+            "(year may be empty or page structure changed)"
+        )
+        return
 
     # DataTables page length — show all entries (value -1 or label "Alle"/"All").
     length_select = page.locator(".dataTables_length select")
