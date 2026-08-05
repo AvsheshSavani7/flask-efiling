@@ -526,28 +526,48 @@ def scrape_oh_puc(
                         pw, proxy, collection, docket_number, test_mode, save_json
                     )
                     break
-                except RuntimeError as e:
-                    if _is_waf_error(e) and attempt < attempts:
+                except Exception as e:
+                    is_waf = isinstance(e, RuntimeError) and _is_waf_error(e)
+                    # Rotate to a fresh residential IP only for WAF blocks that
+                    # still have attempts left.
+                    if is_waf and attempt < attempts:
                         logger.warning(
                             f"WAF/fetch failure on session={session_id} "
                             f"({e}); rotating to a fresh residential IP and "
                             f"restarting the docket (dedup resumes where we left off)."
                         )
                         continue
-                    # All proxy retries exhausted (or a non-WAF fetch error):
-                    # force-stop this docket and send a detailed error email.
+                    # Either all proxy attempts are exhausted (WAF) or an
+                    # unexpected/non-WAF error occurred: force-stop this docket
+                    # and ALWAYS send a detailed error email so the failure is
+                    # visible and the next run can resume from where we left off.
+                    if is_waf:
+                        reason = "waf"
+                        summary = (
+                            f"Ohio PUC scraper STOPPED — WAF/fetch failure exhausted "
+                            f"all {attempts} proxy attempt(s) for docket "
+                            f"{docket_number}. Last error: {e}"
+                        )
+                    else:
+                        reason = "error"
+                        summary = (
+                            f"Ohio PUC scraper STOPPED — unexpected "
+                            f"{type(e).__name__} on attempt {attempt}/{attempts} "
+                            f"for docket {docket_number}: {e}"
+                        )
                     logger.error(
-                        f"Stopping docket after {attempt}/{attempts} attempt(s): {e}"
+                        f"Stopping docket after {attempt}/{attempts} attempt(s): {e}",
+                        exc_info=not is_waf,
                     )
                     _error_email(
-                        f"Ohio PUC scraper STOPPED — WAF/fetch failure exhausted "
-                        f"all {attempts} proxy attempt(s) for docket "
-                        f"{docket_number}. Last error: {e}",
+                        summary,
                         {
                             "docket_number": docket_number,
                             "docket_type": DOCKET_TYPE,
                             "case_url": case_url,
                             "step": "fetch",
+                            "reason": reason,
+                            "error_type": type(e).__name__,
                             "attempts_made": attempt,
                             "max_attempts": attempts,
                             "proxy_sessions_tried": tried_sessions,
@@ -556,7 +576,7 @@ def scrape_oh_puc(
                             "timestamp": _now_iso(),
                         },
                     )
-                    outcome = {"stopped": True, "reason": "waf",
+                    outcome = {"stopped": True, "reason": reason,
                                "error": str(e), "processed": []}
                     break
     finally:
