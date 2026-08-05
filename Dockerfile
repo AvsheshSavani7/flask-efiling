@@ -38,9 +38,12 @@ RUN playwright install chromium
 
 COPY . .
 
+RUN chmod +x /app/entrypoint.sh
+
 EXPOSE 10000
 ENV DISPLAY=:99
 ENV PORT=10000
 
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["gunicorn", "--bind", "0.0.0.0:10000", "--workers", "1", "--threads", "4", "--timeout", "1800", "--keep-alive", "5", "app:app"]
 
