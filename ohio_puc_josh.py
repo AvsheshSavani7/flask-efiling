@@ -11,6 +11,11 @@ The site is protected by an F5 BIG-IP WAF that requires a real browser
 with JavaScript execution. Uses Playwright in headed mode with stealth
 patches and a persistent browser profile to reliably bypass bot detection.
 
+The WAF also blocks datacenter IPs, so on a server we exit through a US/Ohio
+residential proxy. Sticky sessions are read from proxy-2174291-credentials.txt;
+one session (a fixed IP for ~30 min) is used per attempt, rotating to a fresh
+session if the WAF blocks. If the file is absent, it runs without a proxy.
+
 Requirements:
     pip install playwright pdfplumber
     python -m playwright install chromium
@@ -28,6 +33,8 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
+import random
 import re
 import shutil
 import sys
@@ -99,24 +106,92 @@ async (url) => {
 
 
 # ---------------------------------------------------------------------------
+# Residential proxy (sticky Ohio sessions)
+#
+# The F5 WAF blocks datacenter IPs, so from the server we must exit through a
+# US/Ohio residential IP. Each line in the credentials file is a sticky session
+# that pins one residential IP for ttl-30 minutes — plenty for a single run.
+# We pick one session per attempt and rotate to a fresh one if the WAF blocks.
+# ---------------------------------------------------------------------------
+
+# Resolve relative to this file (robust to CWD); override via OH_PUC_PROXY_FILE
+# so the credentials can live on a mounted path without editing code.
+PROXY_FILE = Path(
+    os.environ.get("OH_PUC_PROXY_FILE")
+    or Path(__file__).resolve().parent / "proxy-2174291-credentials.txt"
+)
+
+# reCAPTCHA / stealth need Google domains direct (not proxied).
+PROXY_BYPASS = "*.google.com;*.gstatic.com;*.googleapis.com;*.recaptcha.net"
+
+# Max distinct sticky sessions to try before giving up on the WAF.
+MAX_PROXY_ROTATIONS = 4
+
+
+def _parse_proxy_line(line: str) -> dict | None:
+    """Parse ``user:pass@host:port`` into a Playwright proxy dict."""
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    creds, _, hostport = line.rpartition("@")
+    if not creds or not hostport:
+        return None
+    user, _, password = creds.partition(":")
+    return {"server": f"http://{hostport}", "username": user, "password": password}
+
+
+def load_sticky_proxies(path: Path = PROXY_FILE) -> list[dict]:
+    """Load sticky Ohio session proxies from the credentials file."""
+    if not path.exists():
+        logger.warning(f"Proxy file not found ({path}); running without proxy.")
+        return []
+    proxies = [
+        p for p in (_parse_proxy_line(ln) for ln in path.read_text().splitlines()) if p
+    ]
+    logger.info(f"Loaded {len(proxies)} sticky Ohio proxy session(s) from {path.name}")
+    return proxies
+
+
+def _session_id(proxy: dict | None) -> str:
+    if not proxy:
+        return "no-proxy"
+    m = re.search(r"session-(\d+)", proxy.get("password", "") or "")
+    return m.group(1) if m else "unknown"
+
+
+def _is_waf_error(exc: Exception) -> bool:
+    msg = str(exc)
+    return "WAF rejected" in msg or "F5 challenge" in msg
+
+
+# ---------------------------------------------------------------------------
 # Browser helpers
 # ---------------------------------------------------------------------------
 
-def create_browser(playwright_instance):
-    """Launch Chromium with a persistent profile and stealth patches."""
+def create_browser(playwright_instance, proxy: dict | None = None):
+    """Launch Chromium with a persistent profile, stealth patches, optional proxy."""
     user_data_dir = tempfile.mkdtemp(prefix="puco_browser_")
-    context = playwright_instance.chromium.launch_persistent_context(
-        user_data_dir,
+    launch_kwargs = dict(
         headless=False,
         args=[
             "--disable-blink-features=AutomationControlled",
             "--no-sandbox",
             "--disable-dev-shm-usage",
+            f"--proxy-bypass-list={PROXY_BYPASS}",
         ],
         user_agent=USER_AGENT,
         viewport={"width": 1440, "height": 900},
         locale="en-US",
         timezone_id="America/New_York",
+    )
+    if proxy:
+        launch_kwargs["proxy"] = {
+            "server": proxy["server"],
+            "username": proxy.get("username"),
+            "password": proxy.get("password"),
+        }
+    context = playwright_instance.chromium.launch_persistent_context(
+        user_data_dir, **launch_kwargs
     )
     context.add_init_script(STEALTH_INIT_SCRIPT)
     return context, user_data_dir
@@ -383,8 +458,9 @@ def scrape_case(
                     if te.get("doc_id"):
                         prev_text_by_id[te["doc_id"]] = te
 
-    with sync_playwright() as pw:
-        context, user_data_dir = create_browser(pw)
+    def _run_session(pw, proxy: dict | None):
+        """One full scrape attempt through *proxy*. Raises on WAF block."""
+        context, user_data_dir = create_browser(pw, proxy)
         page = context.pages[0] if context.pages else context.new_page()
 
         try:
@@ -492,9 +568,37 @@ def scrape_case(
                             f"{pdf_stats['failed']} failed, "
                             f"{pdf_stats['total_bytes']:,} bytes")
 
+            return metadata, entries, new_entries
+
         finally:
             context.close()
             shutil.rmtree(user_data_dir, ignore_errors=True)
+
+    # --- Sticky-session proxies: shuffle so each run/attempt uses a fresh IP ---
+    proxies = load_sticky_proxies()
+    random.shuffle(proxies)
+    attempts = max(1, min(MAX_PROXY_ROTATIONS, len(proxies) or 1))
+
+    with sync_playwright() as pw:
+        last_exc: Exception | None = None
+        metadata = entries = new_entries = None
+        for attempt in range(1, attempts + 1):
+            proxy = proxies[attempt - 1] if proxies else None
+            logger.info(
+                f"[Attempt {attempt}/{attempts}] proxy session={_session_id(proxy)}"
+            )
+            try:
+                metadata, entries, new_entries = _run_session(pw, proxy)
+                break
+            except RuntimeError as e:
+                last_exc = e
+                if _is_waf_error(e) and attempt < attempts:
+                    logger.warning(
+                        f"WAF blocked session={_session_id(proxy)}; "
+                        f"rotating to a fresh residential IP..."
+                    )
+                    continue
+                raise
 
     return {
         "case_number": case_no,
