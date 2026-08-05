@@ -4,7 +4,8 @@ Tier1 Summary Generator
 ========================
 Generates only tier1_summary from metadata and text using the same prompt as docket_entry_analyzer.
 Handles long content via truncation or chunked summarization.
-Saves to MongoDB: hash_id, metadata, summary, original_content_length, summary_length.
+Saves to MongoDB: hash_id, metadata, content (full extracted text), summary,
+original_content_length, summary_length.
 """
 
 import os
@@ -226,7 +227,8 @@ def generate_tier1_summary(
 ) -> Dict[str, Any]:
     """
     Generate tier1 summary from metadata and text. Handles long content.
-    Saves to MongoDB: hash_id, metadata, summary, original_content_length, summary_length.
+    Saves to MongoDB: hash_id, metadata, content (extracted text), summary,
+    original_content_length, summary_length.
 
     Args:
         metadata: Dict with keys such as date, document_type, additional_info, on_behalf_of,
@@ -395,8 +397,10 @@ def generate_tier1_summary(
     summary_length = len(summary)
 
     # MongoDB: get or assign hash_id, then save (metadata with normalized date)
+    # Include full extracted text as `content` (same field enrichment / analyze_docket_entry use).
     record = {
         "metadata": metadata_for_save,
+        "content": text,
         "summary": summary,
         "original_content_length": original_length,
         "summary_length": summary_length,
@@ -415,6 +419,7 @@ def generate_tier1_summary(
             return {
                 "hash_id": next_hash_id,
                 "metadata": metadata_for_save,
+                "content": text,
                 "summary": summary,
                 "original_content_length": original_length,
                 "summary_length": summary_length,
@@ -424,6 +429,7 @@ def generate_tier1_summary(
             return {
                 "error": f"MongoDB error: {str(e)}",
                 "metadata": metadata_for_save,
+                "content": text,
                 "summary": summary,
                 "original_content_length": original_length,
                 "summary_length": summary_length,
@@ -434,6 +440,7 @@ def generate_tier1_summary(
     return {
         "hash_id": next_hash_id,
         "metadata": metadata_for_save,
+        "content": text,
         "summary": summary,
         "original_content_length": original_length,
         "summary_length": summary_length,
