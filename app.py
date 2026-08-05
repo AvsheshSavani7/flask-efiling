@@ -57,14 +57,7 @@ from docket_engine.cpuc_scraper import scrape_cpuc, scrape_all_cpuc
 from docket_engine.va_puc_scraper import scrape_va_puc, scrape_all_va_puc
 from under_review_scraper import run_under_review_scraper
 from cci_scraper_runtime import run_cci_datatable_scraper
-from ohio_puc_service import (
-    CDP_URL,
-    chrome_status,
-    fetch_doc_record_html,
-    fetch_ohio_puc_pdf,
-    pdf_result_to_api_dict,
-    start_chrome_cdp,
-)
+from docket_engine.ohio_puc_scraper import scrape_oh_puc, scrape_all_oh_puc
 from orders_section31_scraper import CONFIG as CCI_SECTION31_CONFIG
 from orders_section43a_44_scraper import CONFIG as CCI_SECTION43A_44_CONFIG
 from orders_approved_with_modification_scraper import CONFIG as CCI_APPROVED_MOD_CONFIG
@@ -225,6 +218,7 @@ def home():
             "/fcc-ecfs-scraper": "GET/POST - Scrape FCC ECFS docket filings, download PDFs, run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/fcc_ecfs_dockets.json (params: docket_number, no_proxy, test_mode, save_json)",
             "/cpuc-scraper": "GET/POST - Scrape CPUC Documents table via Playwright, download PDFs, run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/cpuc_dockets.json (params: docket_number, headless, test_mode, save_json, cutoff_days)",
             "/va-puc-scraper": "GET/POST - Scrape VA SCC/PUC Breeze documents API, download PDFs via residential proxy, run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/va_puc_dockets.json (params: docket_number, no_proxy, test_mode, save_json, cutoff_days)",
+            "/ohio-puc-scraper": "GET/POST - Scrape Ohio PUC (PUCO DIS) docket entries via headed browser + residential proxy, download PDFs (OCR fallback), run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/ohio_puc_dockets.json (params: docket_number, no_proxy, test_mode, save_json)",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -3014,6 +3008,7 @@ KNOWN_LOG_SCRIPTS = {
     "bwb_cases_update_monitor",
     "docket_entry_analyzer",
     "va_puc_scraper",
+    "ohio_puc_scraper",
 }
 
 
@@ -3127,144 +3122,66 @@ def get_log_content():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-@app.route('/ohio-puc/chrome/status', methods=['GET'])
-def ohio_puc_chrome_status():
-    """Check whether real Chrome CDP is reachable for native reCAPTCHA. Test-only; no email/DB."""
-    try:
-        cdp_url = request.args.get('cdp_url', '').strip() or None
-        status = chrome_status(cdp_url) if cdp_url else chrome_status()
-        return jsonify({"success": True, **status}), 200
-    except Exception as e:
-        logger.error(f"Ohio PUC chrome status error: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
-
-
-@app.route('/ohio-puc/chrome/start', methods=['POST'])
-def ohio_puc_chrome_start():
+@app.route('/ohio-puc-scraper', methods=['GET', 'POST'])
+def ohio_puc_scraper_endpoint():
     """
-    Launch real Chrome with --remote-debugging-port for native reCAPTCHA.
-    Test-only; no email or background tasks.
+    Scrape Ohio PUC (PUCO DIS) docket entries, download PDFs via the WAF-safe
+    headed browser + residential proxy rotation, extract text (OCR fallback for
+    scanned PDFs), and run tier1/2/3 analysis via docket_entry_analyzer.
 
-    Request body (optional):
-    {
-        "cdp_port": 9222
-    }
+    GET params or POST JSON body:
+        docket_number:  Case number (optional, e.g. 26-0435-EL-MER).
+                        Omit to run all active dockets from ohio_puc_dockets.json.
+        no_proxy:       Disable residential proxy (default: false)
+        test_mode:      Analyze but skip MongoDB/S3 writes (default: false)
+        save_json:      Save the extracted docket entry list to JSON (default: false)
+
+    Modes:
+        - Omit docket_number → run all active dockets from docket_engine/ohio_puc_dockets.json
+        - Provide docket_number → run that single case
     """
     try:
-        data = request.get_json() or {}
-        cdp_port = int(data.get('cdp_port', 9222))
-        result = start_chrome_cdp(cdp_port=cdp_port)
-        return jsonify({"success": True, **result}), 200
-    except Exception as e:
-        logger.error(f"Ohio PUC chrome start error: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+        else:
+            data = request.args.to_dict()
 
+        docket_number = (data.get("docket_number") or "").strip()
+        no_proxy = str(data.get("no_proxy", "false")).lower() == "true"
+        test_mode = str(data.get("test_mode", "false")).lower() == "true"
+        save_json = str(data.get("save_json", "false")).lower() == "true"
 
-@app.route('/ohio-puc/fetch-doc-record', methods=['POST'])
-def ohio_puc_fetch_doc_record():
-    """
-    Fetch Ohio PUC DocumentRecord HTML via WAF-safe proxy navigation.
-    Test-only; returns HTML in response only (no email/DB).
-
-    Request body:
-    {
-        "case_no": "26-0435",
-        "doc_id": "4ea27e26-2aaf-4fc1-ac9e-5389c0df039a",
-        "cmid": "optional",
-        "max_waf_retries": 15
-    }
-    """
-    try:
-        data = request.get_json() or {}
-        case_no = (data.get('case_no') or '').strip()
-        doc_id = (data.get('doc_id') or '').strip()
-        if not case_no or not doc_id:
-            return jsonify({
-                "success": False,
-                "error": "case_no and doc_id are required",
-            }), 400
-
-        result = fetch_doc_record_html(
-            case_no=case_no,
-            doc_id=doc_id,
-            cmid=(data.get('cmid') or '').strip(),
-            max_waf_retries=int(data.get('max_waf_retries', 15)),
-        )
-        return jsonify(result), 200
-    except Exception as e:
-        logger.error(f"Ohio PUC fetch-doc-record error: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
-
-
-@app.route('/ohio-puc/fetch-pdf', methods=['POST'])
-def ohio_puc_fetch_pdf():
-    """
-    Fetch Ohio PUC PDF via WAF proxy navigation + native reCAPTCHA in real Chrome (CDP).
-    Test-only; returns PDF/base64 in response only (no email/DB/background jobs).
-
-    Phase 1: Playwright + residential proxy reaches DocumentRecord (WAF bypass).
-    Phase 2: Real Chrome (CDP) loads ViewImage; page calls grecaptcha.enterprise.execute()
-             and submits the form on its own. No solver tokens injected.
-
-  Request body:
-    {
-        "case_no": "26-0435",
-        "doc_id": "4ea27e26-2aaf-4fc1-ac9e-5389c0df039a",
-        "cmid": "A1001001A26G09B40003I00844",
-        "view_url": "optional override",
-        "cdp_url": "http://127.0.0.1:9222",
-        "timeout_seconds": 120,
-        "max_waf_retries": 15,
-        "auto_start_chrome": true,
-        "mode": "cdp_full" | "hybrid",
-        "return_format": "base64" | "pdf"
-    }
-
-    return_format=pdf returns raw application/pdf bytes.
-    """
-    try:
-        data = request.get_json() or {}
-        case_no = (data.get('case_no') or '').strip()
-        doc_id = (data.get('doc_id') or '').strip()
-        if not case_no or not doc_id:
-            return jsonify({
-                "success": False,
-                "error": "case_no and doc_id are required",
-            }), 400
-
-        return_format = (data.get('return_format') or 'base64').strip().lower()
-        result = fetch_ohio_puc_pdf(
-            case_no=case_no,
-            doc_id=doc_id,
-            cmid=(data.get('cmid') or '').strip(),
-            view_url=(data.get('view_url') or '').strip(),
-            cdp_url=(data.get('cdp_url') or '').strip() or CDP_URL,
-            timeout_sec=int(data.get('timeout_seconds', 120)),
-            max_waf_retries=int(data.get('max_waf_retries', 15)),
-            auto_start_chrome=bool(data.get('auto_start_chrome', True)),
-            mode=(data.get('mode') or 'cdp_full').strip().lower(),
-        )
-
-        if return_format == 'pdf' and result.success and result.pdf_bytes:
-            filename = f"ohio_puc_{result.cmid or doc_id}.pdf"
-            return Response(
-                result.pdf_bytes,
-                mimetype='application/pdf',
-                headers={
-                    'Content-Disposition': f'attachment; filename="{filename}"',
-                    'X-Ohio-PUC-CMID': result.cmid,
-                    'X-Ohio-PUC-View-URL': result.view_url,
-                },
+        if not docket_number:
+            logger.info(
+                f"Starting OH PUC scraper (all dockets from config), "
+                f"test_mode={test_mode}, no_proxy={no_proxy}, save_json={save_json}"
+            )
+            result = scrape_all_oh_puc(
+                use_proxy=not no_proxy,
+                test_mode=test_mode,
+                save_json=save_json,
+            )
+        else:
+            logger.info(
+                f"Starting OH PUC scraper for docket_number={docket_number}, "
+                f"test_mode={test_mode}, no_proxy={no_proxy}, save_json={save_json}"
+            )
+            result = scrape_oh_puc(
+                docket_number=docket_number,
+                use_proxy=not no_proxy,
+                test_mode=test_mode,
+                save_json=save_json,
             )
 
-        payload = pdf_result_to_api_dict(
-            result, as_base64=(return_format != 'none'))
-        status = 200 if result.success else 502
-        return jsonify(payload), status
+        logger.info(
+            f"OH PUC scraper finished success={result.get('success')} "
+            f"analyzed={result.get('analyzed') or result.get('total_analyzed')} "
+            f"docket={result.get('docket_number') or 'all'}"
+        )
+        return jsonify(result), 200 if result.get("success") else 500
 
     except Exception as e:
-        logger.error(f"Ohio PUC fetch-pdf error: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Error in OH PUC scraper: {str(e)}", exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
 
 
