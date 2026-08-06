@@ -132,6 +132,7 @@ _GENERIC_ALIAS_BLOCKLIST: frozenset[str] = frozenset({
     "target",
     "company",
     "seller",
+    "the"
 })
 
 
@@ -209,7 +210,7 @@ def regex_match_split_orient(
     if not left or not right or not deals:
         return None
 
-    norm = lambda s: normalise_company_name(s, suffixes)
+    def norm(s): return normalise_company_name(s, suffixes)
 
     for deal in deals:
         acq_names, tgt_names = build_deal_name_sets(deal, norm)
@@ -248,7 +249,7 @@ def regex_match_flat_scan(
     if not text or not deals:
         return None
 
-    norm = lambda s: normalise_company_name(s, suffixes)
+    def norm(s): return normalise_company_name(s, suffixes)
     norm_text = norm(text)
 
     for deal in deals:
@@ -430,10 +431,10 @@ def regex_match_bwb_deal(
 
 
 # Aliases for test scripts
-_normalise_accc = lambda t: normalise_company_name(t, ACCC_SUFFIXES)
-_normalise_cade = lambda t: normalise_company_name(t, CADE_SUFFIXES)
-_normalise_nz = lambda t: normalise_company_name(t, NZ_SUFFIXES)
-_normalise_ec = lambda t: normalise_company_name(t, EC_SUFFIXES)
-_normalise_fs = lambda t: normalise_company_name(t, EC_SUFFIXES)
-_normalise_samr = lambda t: normalise_company_name(t, SAMR_SUFFIXES)
-_normalise_sa = lambda t: normalise_company_name(t, SA_SUFFIXES)
+def _normalise_accc(t): return normalise_company_name(t, ACCC_SUFFIXES)
+def _normalise_cade(t): return normalise_company_name(t, CADE_SUFFIXES)
+def _normalise_nz(t): return normalise_company_name(t, NZ_SUFFIXES)
+def _normalise_ec(t): return normalise_company_name(t, EC_SUFFIXES)
+def _normalise_fs(t): return normalise_company_name(t, EC_SUFFIXES)
+def _normalise_samr(t): return normalise_company_name(t, SAMR_SUFFIXES)
+def _normalise_sa(t): return normalise_company_name(t, SA_SUFFIXES)
