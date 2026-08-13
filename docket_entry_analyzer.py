@@ -120,6 +120,7 @@ DOCKET_TYPES_WITH_ENRICHMENT = frozenset({
     "sd-puc",
     "nm-prc",
     "ne-psc",
+    "va-puc",
 })
 
 # Maps docket collection type → dashboard_docket_type for enrich_docket_entry
@@ -130,6 +131,7 @@ _DOCKET_TO_DASHBOARD_TYPE: Dict[str, str] = {
     "sd-puc":                   "sd-puc",
     "nm-prc":                   "nm-prc",
     "ne-psc":                   "ne-psc",
+    "va-puc":                   "va-puc",
 }
 
 DOCKET_HISTORY_PROJECTION = {

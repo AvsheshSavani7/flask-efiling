@@ -105,6 +105,20 @@ CANONICAL_NAMES = {
     "black hills corporation": "Black Hills Corporation",
     "black hills energy": "Black Hills Corporation",
     "black hills montana gas": "Black Hills Corporation",
+    # VA-PUC — Commission
+    "virginia state corporation commission": "Virginia State Corporation Commission",
+    "virginia scc": "Virginia State Corporation Commission",
+    "scc staff": "Virginia State Corporation Commission",
+    # VA-PUC — Parties (NextEra / Dominion variants)
+    "nextera energy": "NextEra Energy",
+    "nextera energy, inc.": "NextEra Energy",
+    "nextera": "NextEra Energy",
+    "dominion energy": "Dominion Energy",
+    "dominion energy, inc.": "Dominion Energy",
+    "dominion energy virginia": "Dominion Energy Virginia",
+    "virginia electric and power": "Dominion Energy Virginia",
+    "virginia electric and power company": "Dominion Energy Virginia",
+    "vepco": "Dominion Energy Virginia",
 }
 
 INTERVENOR_TYPE_OVERRIDES = {
@@ -136,6 +150,7 @@ JURISDICTION_BY_DASHBOARD_TYPE = {
     "sd-puc": "South Dakota Public Utilities Commission",
     "nm-prc": "New Mexico Public Regulation Commission",
     "ne-psc": "Nebraska Public Service Commission",
+    "va-puc": "Virginia State Corporation Commission",
 }
 
 CASE_NAME_BY_DASHBOARD_TYPE = {
@@ -144,6 +159,7 @@ CASE_NAME_BY_DASHBOARD_TYPE = {
     "sd-puc": "South Dakota PUC - NorthWestern / Black Hills Merger (GE25-001)",
     "nm-prc": "New Mexico Public Regulation Commission - TXNM / Blackstone Merger (25-00060-UT)",
     "ne-psc": "Nebraska Public Service Commission - NorthWestern / Black Hills Merger (NG-128)",
+    "va-puc": "Virginia SCC - NextEra / Dominion Merger (147078d)",
 }
 
 

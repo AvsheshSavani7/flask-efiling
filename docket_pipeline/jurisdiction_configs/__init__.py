@@ -8,6 +8,7 @@ from .mt_psc import MT_PSC_CONFIG
 from .sd_puc import SD_PUC_CONFIG
 from .nm_prc import NM_PRC_CONFIG
 from .ne_psc import NE_PSC_CONFIG
+from .va_puc import VA_PUC_CONFIG
 
 JURISDICTION_REGISTRY = {
     "stb": STB_CONFIG,
@@ -15,6 +16,7 @@ JURISDICTION_REGISTRY = {
     "sd-puc": SD_PUC_CONFIG,
     "nm-prc": NM_PRC_CONFIG,
     "ne-psc": NE_PSC_CONFIG,
+    "va-puc": VA_PUC_CONFIG,
 }
 
 
