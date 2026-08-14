@@ -119,6 +119,21 @@ CANONICAL_NAMES = {
     "virginia electric and power": "Dominion Energy Virginia",
     "virginia electric and power company": "Dominion Energy Virginia",
     "vepco": "Dominion Energy Virginia",
+    # CPUC — Commission
+    "california public utilities commission": "California Public Utilities Commission",
+    "cpuc": "California Public Utilities Commission",
+    "public advocates office": "Cal Advocates",
+    "cal advocates": "Cal Advocates",
+    # CPUC — Parties (Charter / Cox variants)
+    "charter communications": "Charter Communications",
+    "charter communications, inc.": "Charter Communications",
+    "charter": "Charter Communications",
+    "cox communications": "Cox Communications",
+    "cox enterprises": "Cox Communications",
+    "cox enterprises, inc.": "Cox Communications",
+    "cox california telcom": "Cox California Telcom",
+    "cox california telcom, llc": "Cox California Telcom",
+    "liberty broadband": "Liberty Broadband",
 }
 
 INTERVENOR_TYPE_OVERRIDES = {
@@ -151,6 +166,7 @@ JURISDICTION_BY_DASHBOARD_TYPE = {
     "nm-prc": "New Mexico Public Regulation Commission",
     "ne-psc": "Nebraska Public Service Commission",
     "va-puc": "Virginia State Corporation Commission",
+    "cpuc": "California Public Utilities Commission",
 }
 
 CASE_NAME_BY_DASHBOARD_TYPE = {
@@ -160,6 +176,7 @@ CASE_NAME_BY_DASHBOARD_TYPE = {
     "nm-prc": "New Mexico Public Regulation Commission - TXNM / Blackstone Merger (25-00060-UT)",
     "ne-psc": "Nebraska Public Service Commission - NorthWestern / Black Hills Merger (NG-128)",
     "va-puc": "Virginia SCC - NextEra / Dominion Merger (147078d)",
+    "cpuc": "CPUC - Charter / Cox Merger (A2507016)",
 }
 
 

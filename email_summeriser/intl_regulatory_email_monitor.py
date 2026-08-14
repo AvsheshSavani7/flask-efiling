@@ -88,6 +88,92 @@ NOISE_URL_PATTERNS = re.compile(
     re.IGNORECASE
 )
 
+# ─── CADE Boilerplate Document Filter ───────────────────────────────────────
+#
+# CADE's SEI system includes many administrative documents that have zero
+# substantive value for merger arbitrage analysis. These consume token budget
+# (we have a 150K word safety-valve on combined text) and dilute the signal.
+#
+# This filter identifies boilerplate documents by their FILENAME (from the
+# HTTP Content-Disposition header) or by their CONTENT (first ~500 chars).
+#
+# WHAT WE FILTER (always boilerplate — structurally cannot contain substance):
+#
+#   Guia de Recolhimento da União (GRU)
+#     - Government payment form. Contains bank reference numbers, payment
+#       codes, amounts. The filing fee is standardized; this tells us nothing
+#       about the deal or competitive analysis.
+#
+#   Comprovante de recolhimento / pagamento GRU
+#     - Payment confirmation receipt. Bank account details, transaction IDs.
+#       Pure financial plumbing.
+#
+#   Procuração / Procuração + renúncia
+#     - Power of attorney. "I, [lawyer], am authorized to act for [party]."
+#       The only marginally useful info (which law firm represents each party)
+#       is already stated in the notification itself.
+#
+#   Substabelecimento
+#     - Sub-delegation of proxy from one lawyer to another at the same firm.
+#       One-paragraph form document.
+#
+#   Solicitação de Acesso ao Processo Restrito
+#     - Request for access to the restricted/confidential case file.
+#       One-paragraph form letter: "We request access." Never contains
+#       strategic arguments or substantive information.
+#
+#   Recibo de Notificação de AC / Recibo Eletrônico de Protocolo
+#     - System-generated filing receipts. Confirm process number and parties
+#       (already known from the notification itself). Machine output.
+#
+# WHAT WE KEEP (could contain substance — must be read):
+#
+#   Despacho Decisório — Could be access grant, deadline order, clearance
+#   Despacho Ordinatório — Usually routing, but could set deadlines
+#   Anexo — Generic "attachment," could be anything
+#   Ofício — Official letter, could be information request
+#   Nota Técnica — Staff competitive analysis (highly substantive)
+#   Parecer — Legal opinion
+#   Voto — Commissioner's decision vote
+#   Edital — Public notice (contains CNAE codes, case announcement)
+#   Notificação de Ato de Concentração — The actual merger notification
+#   Formulário de Notificação — The notification form (market data, shares)
+#   Any document type not explicitly listed above
+#
+# RISK ASSESSMENT: The filtered types are structurally boilerplate in CADE
+# proceedings. A Procuração will always be a lawyer authorization form.
+# A GRU will always be a bank payment form. There is no scenario where
+# substantive competitive analysis, decision reasoning, or deal-relevant
+# information would appear in these document types.
+#
+# See also: docs/cade_document_types.md for the full reference.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Filename patterns (matched against Content-Disposition filename, case-insensitive)
+CADE_BOILERPLATE_FILENAME_PATTERNS = re.compile(
+    r'Guia_de_Recolhimento|'             # GRU payment form
+    r'Comprovante_de_(?:pagamento|recolhimento)|'  # Payment confirmation
+    # Power of attorney (with/without accents)
+    r'Procura[cç][aã]o|'
+    r'Substabelecimento|'                # Proxy sub-delegation
+    r'Pet[\._].*de[\._].*acesso|'        # Petition for file access
+    r'Peticao_de_acesso|'               # Access petition (variant)
+    r'Solicita[cç][aã]o.*Acesso',        # Access request (variant)
+    re.IGNORECASE
+)
+
+# Content patterns (matched against first ~500 chars of extracted text)
+# Used as fallback when filename is not available (e.g., HTML documents)
+CADE_BOILERPLATE_CONTENT_PATTERNS = re.compile(
+    r'Recibo de Notifica[cç][aã]o de AC|'           # Filing receipt
+    r'Recibo Eletr[oô]nico de Protocolo|'           # Electronic receipt
+    # GRU generation system
+    r'Conecta\.Cade.*Sistema de Gera[cç][aã]o de Boletos|'
+    r'Comprovante de pagamento de boleto|'           # Payment confirmation
+    r'Solicita[cç][aã]o de Acesso.*Restrito',        # Access request in body
+    re.IGNORECASE
+)
+
 # Claude API settings
 CLAUDE_MODEL = "claude-opus-4-8"
 
@@ -276,10 +362,10 @@ class IntlRegulatoryMonitor:
     MAX_HISTORY_UPDATES = 6  # Max prior updates to inject into LLM context
 
     def _build_deal_history_context(self, deal_entry: Dict) -> str:
-        """Build plain-text history block from prior updates for injection into combined text.
+        """Build ESTABLISHED FACTS block from known_facts + recent timeline.
 
         Returns empty string if no prior updates exist.
-        Caps at MAX_HISTORY_UPDATES most recent to preserve token budget.
+        Caps timeline at MAX_HISTORY_UPDATES most recent to preserve token budget.
         """
         updates = deal_entry.get('updates', [])
         if not updates:
@@ -296,10 +382,65 @@ class IntlRegulatoryMonitor:
             "=== DEAL HISTORY CONTEXT ===",
             f"Case: {process_num} ({regulatory_body} {jurisdiction})",
             f"Target: {target} | Acquirer: {acquirer}",
-            f"This is update #{update_number} for this case ({len(updates)} prior updates).",
+            f"This is update #{update_number} for this case.",
         ]
 
-        # Show only the most recent N updates to stay within token budget
+        # Build ESTABLISHED FACTS from known_facts dict
+        kf = deal_entry.get('known_facts', {})
+        if kf:
+            lines.append("")
+            lines.append(
+                "ESTABLISHED FACTS (already reported — do NOT repeat):")
+            if kf.get('review_stage'):
+                lines.append(f"- Review stage: {kf['review_stage']}")
+            if kf.get('approval_status'):
+                lines.append(f"- Approval status: {kf['approval_status']}")
+            if kf.get('notification_date'):
+                lines.append(f"- Notification date: {kf['notification_date']}")
+            if kf.get('questionnaires_issued_to'):
+                lines.append(
+                    f"- Questionnaires issued to: {', '.join(kf['questionnaires_issued_to'])}")
+            if kf.get('questionnaire_responses_from'):
+                lines.append(
+                    f"- Questionnaire responses from: {', '.join(kf['questionnaire_responses_from'])}")
+            if kf.get('questionnaire_topics'):
+                lines.append(
+                    f"- Questionnaire topics: {', '.join(kf['questionnaire_topics'])}")
+            if kf.get('competitive_concerns'):
+                lines.append(
+                    f"- Competitive concerns identified: {', '.join(kf['competitive_concerns'])}")
+            if kf.get('theories_of_harm'):
+                lines.append(
+                    f"- Theories of harm: {', '.join(kf['theories_of_harm'])}")
+            if kf.get('filings_reported'):
+                lines.append(
+                    f"- Filings already reported: {', '.join(kf['filings_reported'])}")
+            if kf.get('remedies_proposed'):
+                lines.append(
+                    f"- Remedies proposed: {', '.join(kf['remedies_proposed'])}")
+            if kf.get('divestiture_assets'):
+                lines.append(
+                    f"- Divestiture assets: {', '.join(kf['divestiture_assets'])}")
+            if kf.get('intervenors'):
+                lines.append(f"- Intervenors: {', '.join(kf['intervenors'])}")
+            if kf.get('data_requested'):
+                lines.append(
+                    f"- Data requested: {', '.join(kf['data_requested'])}")
+            if kf.get('decisions'):
+                lines.append(f"- Decisions: {', '.join(kf['decisions'])}")
+            if kf.get('conditions_imposed'):
+                lines.append(
+                    f"- Conditions imposed: {', '.join(kf['conditions_imposed'])}")
+            if kf.get('pending_deadlines'):
+                lines.append(
+                    f"- Pending deadlines: {', '.join(kf['pending_deadlines'])}")
+            if kf.get('relevant_markets'):
+                lines.append(
+                    f"- Relevant markets: {', '.join(kf['relevant_markets'])}")
+
+        # Recent timeline
+        lines.append("")
+        lines.append("RECENT TIMELINE:")
         if len(updates) > self.MAX_HISTORY_UPDATES:
             skipped = len(updates) - self.MAX_HISTORY_UPDATES
             lines.append(f"  [... {skipped} earlier updates omitted ...]")
@@ -309,26 +450,19 @@ class IntlRegulatoryMonitor:
             recent = updates
             start_idx = 1
 
-        prev_status = None
         for i, update in enumerate(recent, start_idx):
             ts = update.get('timestamp', 'N/A')
             if 'T' in ts:
                 ts = ts.split('T')[0]
-            headline = update.get(
-                'L1_headline', update.get('action_taken', 'N/A'))
-
-            # Flag status transitions
-            status = update.get('approval_status', '')
-            stage = update.get('review_stage', '')
-            transition = ""
-            if prev_status and status and status != prev_status:
-                transition = f" [STATUS CHANGE: {prev_status} → {status}]"
-            prev_status = status or prev_status
-
+            headline = update.get('L1_headline', update.get(
+                'headline', update.get('action_taken', 'N/A')))
             backfill_tag = " [from docket]" if update.get(
                 'source') == 'backfill' else ""
-            lines.append(f"  [{i}] {ts}: {headline}{transition}{backfill_tag}")
+            lines.append(f"  [{i}] {ts}: {headline}{backfill_tag}")
 
+        lines.append("")
+        lines.append(
+            "YOUR TASK: Report ONLY facts from the new document NOT in ESTABLISHED FACTS above.")
         lines.append("===")
         return "\n".join(lines)
 
@@ -345,65 +479,36 @@ class IntlRegulatoryMonitor:
                                 summary: Dict) -> str:
         """Build the Case Status HTML section for the summary email.
 
-        Shows status badges and a timeline of all updates. Appears in every email.
+        For NEW CASE (update #1): returns a slim one-line badge — header already
+        shows process number, stage, and status so we don't duplicate.
+        For UPDATE #2+: shows update label, tracking info, and case timeline.
         """
-        d = summary.get('L3_detailed', {})
-        review_stage = d.get('review_stage', '')
-        approval_status = d.get('approval_status', '')
-        status_color = self.STATUS_COLORS.get(approval_status, '#616161')
-
-        # Pull case identifiers from deal_entry first, fall back to summary
         if deal_entry:
-            process_num = deal_entry.get(
-                'process_number', summary.get('process_number', ''))
-            jurisdiction = deal_entry.get(
-                'jurisdiction', summary.get('jurisdiction', ''))
-            reg_body = deal_entry.get(
-                'regulatory_body', summary.get('regulatory_body', ''))
             first_seen = deal_entry.get('first_seen', '')
             if 'T' in first_seen:
                 first_seen = first_seen.split('T')[0]
         else:
-            process_num = summary.get('process_number', '')
-            jurisdiction = summary.get('jurisdiction', '')
-            reg_body = summary.get('regulatory_body', '')
             first_seen = datetime.now().strftime('%Y-%m-%d')
 
-        # Header: NEW CASE or UPDATE #N
+        # ── NEW CASE: slim badge only ──
         if update_number <= 1:
-            header_label = "NEW CASE"
-            tracking_line = f"First tracked: {first_seen}"
-        else:
-            header_label = f"UPDATE #{update_number}"
-            count = deal_entry.get(
-                'update_count', update_number) if deal_entry else update_number
-            tracking_line = f"Tracked since {first_seen} &middot; {count} updates"
-
-        # Agency label
-        agency_label = reg_body if reg_body else jurisdiction
-        case_id_line = f"{process_num} &middot; {agency_label}" if process_num else agency_label
-
-        # Badge HTML (use &nbsp; separator — reliable across email clients)
-        stage_badge = ""
-        if review_stage:
-            stage_badge = (
-                f'<span style="display:inline-block;padding:4px 12px;border-radius:3px;'
-                f'font-size:12px;font-weight:bold;color:white;background-color:#006644;">'
-                f'{review_stage}</span>'
+            return (
+                f'<div style="margin:10px 0;font-size:12px;color:#006644;">'
+                f'<span style="display:inline-block;padding:3px 10px;border-radius:3px;'
+                f'font-size:11px;font-weight:bold;color:white;background-color:#006644;">'
+                f'NEW CASE</span>'
+                f' &nbsp; First tracked: {first_seen}'
+                f'</div>'
             )
-        status_badge = ""
-        if approval_status:
-            status_badge = (
-                f'<span style="display:inline-block;padding:4px 12px;border-radius:3px;'
-                f'font-size:12px;font-weight:bold;color:white;background-color:{status_color};">'
-                f'{approval_status}</span>'
-            )
-        badge_separator = " &nbsp; " if stage_badge and status_badge else ""
 
-        # Timeline (for update #2+)
+        # ── UPDATE #N: tracking info + timeline ──
+        count = deal_entry.get(
+            'update_count', update_number) if deal_entry else update_number
+        tracking_line = f"Tracked since {first_seen} &middot; {count} updates"
+
         MAX_TIMELINE_ROWS = 8
         timeline_html = ""
-        if update_number > 1 and deal_entry:
+        if deal_entry:
             all_updates = deal_entry.get('updates', [])
             rows = ""
 
@@ -434,7 +539,8 @@ class IntlRegulatoryMonitor:
                 except (IndexError, ValueError):
                     ts_short = ts
 
-                action = u.get('action_taken', u.get('L1_headline', ''))
+                action = u.get('L1_headline', u.get(
+                    'headline', u.get('action_taken', '')))
                 if len(action) > 80:
                     action = action[:77] + "..."
 
@@ -484,19 +590,25 @@ class IntlRegulatoryMonitor:
             f'<div style="margin:15px 0;padding:14px 18px;background-color:#e8f5e9;'
             f'border-left:4px solid #006644;border-radius:3px;">'
             f'<div style="font-size:14px;font-weight:bold;color:#006644;margin-bottom:4px;">'
-            f'&#9679; {header_label}</div>'
-            f'<div style="font-size:13px;color:#333;margin-bottom:6px;">{case_id_line}</div>'
-            f'<div style="margin-bottom:6px;">{stage_badge}{badge_separator}{status_badge}</div>'
+            f'&#9679; UPDATE #{update_number}</div>'
             f'<div style="font-size:12px;color:#666;">{tracking_line}</div>'
             f'{timeline_html}'
             f'</div>'
         )
+
+    @staticmethod
+    def _append_unique(lst: list, items):
+        """Append items to lst only if not already present (set-like dedup)."""
+        for item in (items if isinstance(items, list) else [items]):
+            if item and item not in lst:
+                lst.append(item)
 
     def _update_deal_state(self, deal_key: str, meta: Dict, summary: Dict,
                            email_data: Dict, backfill_entries: List[Dict] = None) -> int:
         """Upsert deal entry after successful summarization.
 
         Returns the update_number for this update.
+        Accumulates known_facts from each summary for delta detection.
         """
         # Use email Date header for the timestamp (not processing time)
         raw_date = email_data.get('date', '')
@@ -505,7 +617,8 @@ class IntlRegulatoryMonitor:
             ts = email_dt.isoformat(timespec='seconds')
         except Exception:
             ts = datetime.now().isoformat(timespec='seconds')
-        d = summary.get('L3_detailed', {})
+
+        cs = summary.get('case_snapshot', {})
 
         if deal_key in self.deal_state:
             entry = self.deal_state[deal_key]
@@ -526,6 +639,7 @@ class IntlRegulatoryMonitor:
                 'last_updated': ts,
                 'current_status': '',
                 'current_review_stage': '',
+                'known_facts': {},
                 'updates': [],
             }
             self.deal_state[deal_key] = entry
@@ -538,22 +652,129 @@ class IntlRegulatoryMonitor:
                     f"   Pre-seeded {len(backfill_entries)} backfill entries")
 
         # Update current status from summary
-        if d.get('approval_status'):
-            entry['current_status'] = d['approval_status']
-        if d.get('review_stage'):
-            entry['current_review_stage'] = d['review_stage']
+        if cs.get('approval_status'):
+            entry['current_status'] = cs['approval_status']
+        if cs.get('review_stage'):
+            entry['current_review_stage'] = cs['review_stage']
 
         # Append update record
+        headline = summary.get('L1_headline', summary.get('headline', ''))
         entry['updates'].append({
             'email_id': email_data.get('email_id', ''),
             'timestamp': ts,
             'email_subject': email_data.get('subject', ''),
-            'L1_headline': summary.get('L1_headline', ''),
-            'action_taken': d.get('action_taken', ''),
-            'review_stage': d.get('review_stage', ''),
-            'approval_status': d.get('approval_status', ''),
-            'significance': d.get('significance', 'medium'),
+            'L1_headline': headline,
+            'headline': headline,  # backward compat
+            'action_taken': summary.get('filing_category', ''),
+            'review_stage': cs.get('review_stage', ''),
+            'approval_status': cs.get('approval_status', ''),
+            'significance': summary.get('significance', 'medium'),
         })
+
+        # ── Accumulate known_facts ──
+        kf = entry.setdefault('known_facts', {})
+
+        # From case_snapshot
+        if cs.get('review_stage'):
+            kf['review_stage'] = cs['review_stage']
+        if cs.get('approval_status'):
+            kf['approval_status'] = cs['approval_status']
+        timeline = cs.get('timeline', {})
+        if timeline.get('notification_date'):
+            kf['notification_date'] = timeline['notification_date']
+        kf.setdefault('relevant_markets', [])
+        self._append_unique(kf['relevant_markets'],
+                            cs.get('relevant_markets', []))
+
+        # From new_filings
+        kf.setdefault('filings_reported', [])
+        for nf in summary.get('new_filings', []):
+            desc = nf.get('filing_description', '')
+            self._append_unique(kf['filings_reported'], desc)
+
+        # From questionnaire_detail
+        qd = summary.get('questionnaire_detail', {})
+        if qd.get('has_questionnaires'):
+            kf.setdefault('questionnaires_issued_to', [])
+            kf.setdefault('questionnaire_responses_from', [])
+            kf.setdefault('questionnaire_topics', [])
+            for resp in qd.get('respondents', []):
+                name = resp.get('entity_name', '')
+                if resp.get('date_responded'):
+                    entry_str = f"{name} ({resp['date_responded']})"
+                    self._append_unique(
+                        kf['questionnaire_responses_from'], entry_str)
+                elif resp.get('date_issued'):
+                    entry_str = f"{name} ({resp['date_issued']})"
+                    self._append_unique(
+                        kf['questionnaires_issued_to'], entry_str)
+                elif name:
+                    self._append_unique(kf['questionnaires_issued_to'], name)
+                self._append_unique(
+                    kf['questionnaire_topics'], resp.get('topics_covered', []))
+
+        # From remedy_detail
+        rd = summary.get('remedy_detail', {})
+        if rd.get('has_remedies'):
+            kf.setdefault('remedies_proposed', [])
+            kf.setdefault('divestiture_assets', [])
+            if rd.get('remedy_type'):
+                kf['remedy_type'] = rd['remedy_type']
+            for rem in rd.get('remedies', []):
+                desc = rem.get('description', '')
+                self._append_unique(kf['remedies_proposed'], desc)
+                if rem.get('divestiture_assets'):
+                    self._append_unique(
+                        kf['divestiture_assets'], rem['divestiture_assets'])
+
+        # From objection_detail
+        od = summary.get('objection_detail', {})
+        if od.get('has_objections'):
+            kf.setdefault('competitive_concerns', [])
+            kf.setdefault('theories_of_harm', [])
+            for concern in od.get('concerns', []):
+                if concern.get('description'):
+                    self._append_unique(
+                        kf['competitive_concerns'], concern['description'])
+                if concern.get('theory_of_harm'):
+                    self._append_unique(
+                        kf['theories_of_harm'], concern['theory_of_harm'])
+
+        # From intervention_detail
+        ivd = summary.get('intervention_detail', {})
+        if ivd.get('has_interventions'):
+            kf.setdefault('intervenors', [])
+            for iv in ivd.get('intervenors', []):
+                name = iv.get('entity_name', '')
+                pos = iv.get('position', '')
+                if name:
+                    entry_str = f"{name} ({pos})" if pos else name
+                    self._append_unique(kf['intervenors'], entry_str)
+
+        # From information_request_detail
+        ird = summary.get('information_request_detail', {})
+        if ird.get('has_info_request'):
+            kf.setdefault('data_requested', [])
+            kf.setdefault('pending_deadlines', [])
+            for req in ird.get('requests', []):
+                for d_item in req.get('data_requested', []):
+                    self._append_unique(kf['data_requested'], d_item)
+                if req.get('deadline'):
+                    self._append_unique(
+                        kf['pending_deadlines'], req['deadline'])
+
+        # From decision_detail
+        dd = summary.get('decision_detail', {})
+        if dd.get('has_decision'):
+            kf.setdefault('decisions', [])
+            kf.setdefault('conditions_imposed', [])
+            dtype = dd.get('decision_type', '')
+            ddate = dd.get('decision_date', '')
+            if dtype:
+                entry_str = f"{dtype} ({ddate})" if ddate else dtype
+                self._append_unique(kf['decisions'], entry_str)
+            for cond in dd.get('conditions_imposed', []):
+                self._append_unique(kf['conditions_imposed'], cond)
 
         return entry['update_count']
 
@@ -845,6 +1066,7 @@ Return ONLY the JSON array, no markdown fences or explanation."""
 
             content_type = resp.headers.get("Content-Type", "")
             if "application/pdf" in content_type or url.lower().endswith(".pdf"):
+                # Use fetch_utils for PDF handling
                 from fetch_utils import fetch_text
                 return fetch_text(url, word_limit=10000)
 
@@ -889,7 +1111,7 @@ Return ONLY the JSON array, no markdown fences or explanation."""
             logger.warning(f"   Failed to fetch {url}: {e}")
             return ""
 
-    def _fetch_with_playwright(self, url: str) -> str | None:
+    def _fetch_with_playwright(self, url: str) -> Optional[str]:
         """Render a JS-heavy page with Playwright headless Chromium.
 
         Returns extracted text, or None if Playwright is not installed.
@@ -944,16 +1166,72 @@ Return ONLY the JSON array, no markdown fences or explanation."""
             logger.warning(f"   Jina Reader also failed for {url}: {jina_e}")
             return ""
 
-    def build_combined_text(self, email_content: Dict) -> str:
+    def _is_boilerplate_document(self, url: str, linked_text: str) -> Optional[str]:
+        """Check if a fetched document is boilerplate (zero merger-arb value).
+
+        Checks the URL's Content-Disposition filename first (lightweight),
+        then falls back to checking the first ~500 chars of extracted text.
+
+        Returns:
+            A string describing why it was filtered (for logging), or None if
+            the document should be kept.
+
+        See CADE_BOILERPLATE_FILENAME_PATTERNS and CADE_BOILERPLATE_CONTENT_PATTERNS
+        for the full list of filtered types and rationale.
+        """
+        # Only apply to CADE SEI document URLs
+        if 'sei.cade.gov.br' not in url:
+            return None
+
+        # Check 1: Filename from Content-Disposition (if we can get it cheaply)
+        # We already fetched the content, but we can do a HEAD to get the filename
+        # without re-downloading. For efficiency, check the text content first.
+
+        # Check 2: Content-based detection (first ~500 chars)
+        text_preview = linked_text[:500] if linked_text else ''
+        match = CADE_BOILERPLATE_CONTENT_PATTERNS.search(text_preview)
+        if match:
+            return f"content match: '{match.group()[:50]}'"
+
+        # Check 3: Filename-based detection via HEAD request
+        try:
+            headers = {
+                "User-Agent": "MergerArbDashboard/1.0 (merger-arb-research@outlook.com)"}
+            resp = requests.head(url, headers=headers,
+                                 timeout=10, allow_redirects=True)
+            cd = resp.headers.get('Content-Disposition', '')
+            fname_match = re.search(r'filename="?([^"]+)"?', cd)
+            if fname_match:
+                fname = fname_match.group(1)
+                if CADE_BOILERPLATE_FILENAME_PATTERNS.search(fname):
+                    return f"filename match: '{fname}'"
+        except Exception:
+            # If HEAD fails, keep the document (err on the side of inclusion)
+            pass
+
+        return None
+
+    def build_combined_text(self, email_content: Dict) -> Dict:
         """Build combined document from email body + linked documents.
 
-        Returns text in format:
-        === EMAIL BODY ===
-        [email text]
-        === LINKED DOCUMENT: [url] ===
-        [fetched text]
+        Fetches all linked URLs, filters out known boilerplate documents
+        (payment receipts, proxies, access requests — see CADE_BOILERPLATE_*
+        constants for full list), and concatenates into a single text block
+        for LLM summarization.
+
+        Returns dict with:
+          'text': combined text string
+          'fetch_results': {
+              'succeeded': [urls that were fetched and included],
+              'failed': [urls that could not be fetched],
+              'filtered': [{'url': str, 'reason': str} for boilerplate docs],
+              'total': int (total URLs attempted)
+          }
         """
         parts = []
+        fetch_succeeded = []
+        fetch_failed = []
+        fetch_filtered = []
 
         # Email body is content (not just a pointer like 8-K emails)
         body_text = email_content.get('text_body', '').strip()
@@ -968,19 +1246,65 @@ Return ONLY the JSON array, no markdown fences or explanation."""
                 logger.info(f"   Fetching: {url}")
                 linked_text = self._fetch_url_text(url)
                 if linked_text.strip():
+                    # Check if this is a boilerplate document before including
+                    boilerplate_reason = self._is_boilerplate_document(
+                        url, linked_text)
+                    if boilerplate_reason:
+                        fetch_filtered.append(
+                            {'url': url, 'reason': boilerplate_reason})
+                        logger.info(
+                            f"   FILTERED (boilerplate): {boilerplate_reason}")
+                    else:
+                        parts.append(
+                            f"=== LINKED DOCUMENT: {url} ===\n\n" + linked_text)
+                        fetch_succeeded.append(url)
+                else:
+                    # CRITICAL: Tell the LLM what it DOESN'T have
                     parts.append(
-                        f"=== LINKED DOCUMENT: {url} ===\n\n" + linked_text)
+                        f"=== SOURCE UNAVAILABLE: {url} ===\n"
+                        f"WARNING: This linked document could not be fetched (access restricted, "
+                        f"JS-rendered, or server error). You have ONLY the email body above — "
+                        f"NOT the full document text. Do NOT infer document content from titles or labels alone."
+                    )
+                    fetch_failed.append(url)
+
+        if fetch_filtered:
+            logger.info(
+                f"   BOILERPLATE FILTERED: {len(fetch_filtered)}/{len(urls)} document(s) "
+                f"excluded (payment receipts, proxies, access requests)"
+            )
+        if fetch_failed:
+            logger.warning(
+                f"   FETCH FAILURES: {len(fetch_failed)}/{len(urls)} URL(s) could not be fetched"
+            )
+            for fu in fetch_failed:
+                logger.warning(f"     FAILED: {fu}")
 
         combined = "\n\n".join(parts)
 
-        # Truncate to stay within token budget
+        # Safety-valve truncation only — the Haiku extraction pass (50K-word
+        # chunks, auto-parallel) handles condensation.  The old 15K cap silently
+        # discarded most questionnaire responses when 60+ docs were fetched.
         words = combined.split()
-        if len(words) > 15000:
-            combined = " ".join(words[:15000])
-            logger.info(f"   Truncated combined text to 15000 words")
+        if len(words) > 150000:
+            combined = " ".join(words[:150000])
+            logger.info(
+                f"   Truncated combined text to 150000 words (safety valve)")
 
-        logger.info(f"   Total combined text: {len(combined.split())} words")
-        return combined
+        logger.info(f"   Total combined text: {len(combined.split())} words "
+                    f"({len(fetch_succeeded)} docs included, "
+                    f"{len(fetch_filtered)} boilerplate filtered, "
+                    f"{len(fetch_failed)} fetch failures)")
+
+        return {
+            'text': combined,
+            'fetch_results': {
+                'succeeded': fetch_succeeded,
+                'failed': fetch_failed,
+                'filtered': fetch_filtered,
+                'total': len(urls),
+            }
+        }
 
     def summarize(self, text: str) -> Dict:
         """Generate summary using two-pass extraction (Haiku) then Opus summarization."""
@@ -995,7 +1319,7 @@ Return ONLY the JSON array, no markdown fences or explanation."""
         logger.info("   Pass 2: Generating summary via Claude Opus...")
         msg = self.anthropic_client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=4096,
+            max_tokens=16384,
             messages=[{
                 "role": "user",
                 "content": SUMMARY_PROMPT + "\n\n" + extracted
@@ -1018,107 +1342,398 @@ Return ONLY the JSON array, no markdown fences or explanation."""
             f"   Generated summary: {summary.get('jurisdiction', '?')} / {summary.get('regulatory_body', '?')}")
         return summary
 
+    def _validate_high_stakes_claims(self, summary: Dict, combined_text: str) -> Dict:
+        """Validate high-stakes claims (approvals, blocks) against source evidence.
+
+        Returns modified summary with claims downgraded if unsupported.
+        """
+        approval = summary.get('case_snapshot', {}).get('approval_status', '')
+        decision = summary.get('decision_detail', {})
+        source_quality = summary.get('source_quality', {})
+
+        HIGH_STAKES_DECISIONS = ['clearance',
+                                 'conditional_clearance', 'blocking']
+
+        is_high_stakes = (
+            any(kw in approval for kw in ('Approved', 'Blocked', 'Conditions')) or
+            decision.get('decision_type') in HIGH_STAKES_DECISIONS
+        )
+
+        if not is_high_stakes:
+            return summary
+
+        # Check 1: Does the source quality indicate we have full document text?
+        has_full_text = source_quality.get('has_full_document_text', False)
+        basis = source_quality.get('basis_for_claims', 'unknown')
+
+        # Check 2: Does the combined text contain explicit approval/blocking language?
+        approval_evidence_terms = [
+            'aprovação', 'aprovado', 'approved', 'clearance', 'cleared',
+            'sem restrições', 'without conditions', 'unconditional',
+            'aprovação sem restrições', 'merger cleared',
+            'denied', 'blocked', 'prohibition', 'proibição'
+        ]
+        text_lower = combined_text.lower()
+        has_evidence = any(
+            term in text_lower for term in approval_evidence_terms)
+
+        if not has_full_text and not has_evidence:
+            # DOWNGRADE: Insufficient evidence for high-stakes claim
+            logger.warning(
+                f"   HIGH-STAKES CLAIM DOWNGRADED: '{approval}' / "
+                f"decision_type='{decision.get('decision_type')}' — "
+                f"source basis is '{basis}', no approval language found in text"
+            )
+
+            # Reset to safe defaults
+            summary['case_snapshot']['approval_status'] = 'Pending - Under Review'
+            summary['decision_detail'] = {'has_decision': False}
+            summary['significance'] = 'low'
+            summary['significance_reasoning'] = (
+                'DOWNGRADED: Approval/blocking claim could not be verified against source text. '
+                'Only docket entry available — actual document content inaccessible.'
+            )
+
+            # Rewrite headline to remove false claim
+            headline_key = 'L1_headline' if 'L1_headline' in summary else 'headline'
+            headline = summary.get(headline_key, '')
+            if any(w in headline.lower() for w in ['approves', 'approved', 'blocks', 'blocked', 'clears', 'cleared', 'denies', 'denied']):
+                summary[headline_key] = headline.replace('approves', 'files decision order for') \
+                                                .replace('approved', 'filed decision order for') \
+                                                .replace('blocks', 'files order regarding') \
+                                                .replace('clears', 'files order regarding')
+                summary['_downgraded'] = True
+
+        return summary
+
     def format_summary_email(self, summary: Dict, urls: List[str],
                              update_number: int = 1, deal_entry: Optional[Dict] = None) -> str:
-        """Format summary as HTML email with green theme."""
+        """Format summary as HTML email — L1/L2/L3 layout.
+
+        L1: Headline (5-second scan)
+        L2: Brief + filing cards (30-second read)
+        L3: Conditional detail block (deep dive)
+        Case Snapshot: Compact reference
+        Footer: Source links, source notes, attribution
+        """
         jurisdiction = summary.get('jurisdiction', 'INTL')
         authority = summary.get('regulatory_body', '')
         date = summary.get('document_date', '')
         doc_type = summary.get('document_type', '')
         process_num = summary.get('process_number', '')
         parties = summary.get('parties', {})
-        d = summary.get('L3_detailed', {})
+        cs = summary.get('case_snapshot', {})
+        headline = summary.get('L1_headline', summary.get('headline', ''))
+        brief = summary.get('L2_brief', summary.get('what_happened', ''))
+        review_stage = cs.get('review_stage', '')
+        approval_status = cs.get('approval_status', '')
 
-        # Build filing links
-        links_html = ""
-        for url in urls:
-            domain = re.search(r'https?://([^/]+)', url)
-            domain_label = domain.group(1) if domain else url
-            links_html += f'<p><a href="{url}" target="_blank">View on {domain_label}</a></p>'
+        # ── Significance badge ──
+        sig = summary.get('significance', 'medium')
+        sig_colors = {'critical': '#c62828', 'high': '#e65100',
+                      'medium': '#1565c0', 'low': '#616161', 'routine': '#9e9e9e'}
+        sig_color = sig_colors.get(sig, '#616161')
 
-        # Build detailed sections
-        detail_sections = ""
+        # ── Source issue indicator for header ──
+        source_quality = summary.get('source_quality', {})
+        fetch_results = summary.get('_fetch_results', {})
+        failed_urls = fetch_results.get('failed', [])
+        total_urls = fetch_results.get('total', 0)
+        has_source_issues = bool(failed_urls) or source_quality.get(
+            'basis_for_claims') == 'docket_table_only'
+        source_indicator = (' &nbsp;<span style="font-size:11px;" title="Source limitations — see footer">'
+                            '&#9888;</span>') if has_source_issues else ''
 
-        if d.get('action_taken'):
-            detail_sections += f"""
-                <div class="detail-label">Action Taken:</div>
-                <p>{d['action_taken']}</p>
-            """
+        # ── Status badges ──
+        status_color = self.STATUS_COLORS.get(approval_status, '#616161')
+        stage_badge = (f'<span style="display:inline-block;padding:3px 10px;border-radius:3px;'
+                       f'font-size:11px;font-weight:bold;color:white;background-color:#006644;">'
+                       f'{review_stage}</span>') if review_stage else ''
+        status_badge = (f'<span style="display:inline-block;padding:3px 10px;border-radius:3px;'
+                        f'font-size:11px;font-weight:bold;color:white;background-color:{status_color};">'
+                        f'{approval_status}</span>') if approval_status else ''
+        badge_separator = ' &nbsp; ' if stage_badge and status_badge else ''
 
-        if d.get('review_stage'):
-            detail_sections += f"""
-                <div class="detail-label">Review Stage:</div>
-                <p>{d['review_stage']}</p>
-            """
-
-        if d.get('approval_status'):
-            detail_sections += f"""
-                <div class="detail-label">Approval Status:</div>
-                <p>{d['approval_status']}</p>
-            """
-
-        if d.get('relevant_markets'):
-            detail_sections += f"""
-                <div class="detail-label">Relevant Markets:</div>
-                <ul>{''.join(f'<li>{m}</li>' for m in d['relevant_markets'])}</ul>
-            """
-
-        if d.get('information_requested'):
-            detail_sections += f"""
-                <div class="detail-label">Information Requested:</div>
-                <ul>{''.join(f'<li>{i}</li>' for i in d['information_requested'])}</ul>
-            """
-
-        if d.get('conditions_or_remedies'):
-            detail_sections += f"""
-                <div class="detail-label">Conditions / Remedies:</div>
-                <ul>{''.join(f'<li>{c}</li>' for c in d['conditions_or_remedies'])}</ul>
-            """
-
-        if d.get('competitive_concerns'):
-            detail_sections += f"""
-                <div class="detail-label">Competitive Concerns:</div>
-                <ul>{''.join(f'<li>{c}</li>' for c in d['competitive_concerns'])}</ul>
-            """
-
-        if d.get('legal_basis'):
-            detail_sections += f"""
-                <div class="detail-label">Legal Basis:</div>
-                <p>{d['legal_basis']}</p>
-            """
-
-        timeline = d.get('timeline', {})
-        if any(v for v in timeline.values()):
-            timeline_items = ''.join(
-                f'<li><strong>{k.replace("_", " ").title()}:</strong> {v}</li>'
-                for k, v in timeline.items() if v
-            )
-            detail_sections += f"""
-                <div class="detail-label">Timeline:</div>
-                <ul>{timeline_items}</ul>
-            """
-
-        if d.get('deal_implications_for_us_investors'):
-            detail_sections += f"""
-                <div class="detail-label">Deal Implications for US Investors:</div>
-                <p>{d['deal_implications_for_us_investors']}</p>
-            """
-
-        if d.get('related_proceedings'):
-            detail_sections += f"""
-                <div class="detail-label">Related Proceedings:</div>
-                <ul>{''.join(f'<li>{r}</li>' for r in d['related_proceedings'])}</ul>
-            """
-
-        if d.get('risks_flagged'):
-            detail_sections += f"""
-                <div class="detail-label">Risks Flagged:</div>
-                <ul>{''.join(f'<li>{r}</li>' for r in d['risks_flagged'])}</ul>
-            """
-
-        # Build case status section (appears in every email)
+        # ── Case status (UPDATE #N / NEW CASE + tracking) ──
         case_status_html = self._build_case_status_html(
             update_number, deal_entry, summary)
+
+        # ── L2: Filing cards ──
+        filing_cards_html = ""
+        new_filings = summary.get('new_filings', [])
+        if new_filings:
+            seen_type_explanations = set()
+            for f in new_filings:
+                first_badge = ""
+                if f.get('is_first_occurrence'):
+                    first_badge = (' <span style="display:inline-block;padding:2px 8px;border-radius:3px;'
+                                   'font-size:10px;font-weight:bold;color:white;background-color:#2e7d32;'
+                                   'vertical-align:middle;">FIRST REPORTED</span>')
+                source_link = ""
+                if f.get('source_url'):
+                    source_link = (f' <a href="{f["source_url"]}" target="_blank" '
+                                   f'style="font-size:12px;color:#4a90e2;">View source</a>')
+
+                # Deduplicate filing_type_explanation — show only on first card of each type
+                type_exp = f.get('filing_type_explanation', '') or ''
+                type_exp_html = ""
+                if type_exp and type_exp not in seen_type_explanations:
+                    seen_type_explanations.add(type_exp)
+                    type_exp_html = (f'<div style="font-style:italic;color:#888;font-size:13px;margin:6px 0;">'
+                                     f'{type_exp}</div>')
+
+                # Source link only (what_it_means is covered by L2_brief)
+                link_html = ""
+                if source_link:
+                    link_html = f' {source_link}'
+
+                filing_cards_html += (
+                    f'<div style="margin:8px 0 0 0;padding:8px 12px;background:#f9f9f9;border:1px solid #e8e8e8;'
+                    f'border-radius:3px;font-size:13px;color:#555;">'
+                    f'<strong style="color:#333;">{f.get("filing_description", "")}</strong>{first_badge}{link_html}'
+                    f'{type_exp_html}'
+                    f'</div>'
+                )
+
+        # ── L3: Detail block (conditional — only the relevant one) ──
+        detail_html = ""
+        detail_label = ""
+
+        # Questionnaire detail
+        qd = summary.get('questionnaire_detail', {})
+        if qd.get('has_questionnaires') and qd.get('respondents'):
+            detail_label = "Questionnaire Detail"
+            respondent_cards = ""
+            for r in qd['respondents']:
+                date_parts = []
+                if r.get('date_issued'):
+                    date_parts.append(f"Issued: {r['date_issued']}")
+                if r.get('date_responded'):
+                    date_parts.append(f"Responded: {r['date_responded']}")
+                if r.get('response_deadline'):
+                    date_parts.append(f"Deadline: {r['response_deadline']}")
+                dates_line = f'<div style="font-size:12px;color:#666;margin:4px 0;">{" | ".join(date_parts)}</div>' if date_parts else ""
+
+                topics = ''.join(
+                    f'<li>{t}</li>' for t in (r.get('topics_covered') or []) if t)
+                topics_html = f'<div style="margin-top:6px;"><strong style="font-size:12px;color:#555;">Topics:</strong><ul style="margin:2px 0;padding-left:18px;font-size:13px;">{topics}</ul></div>' if topics else ""
+
+                positions = ''.join(
+                    f'<li>{p}</li>' for p in (r.get('key_positions_stated') or []) if p)
+                positions_html = f'<div style="margin-top:6px;"><strong style="font-size:12px;color:#555;">Positions:</strong><ul style="margin:2px 0;padding-left:18px;font-size:13px;">{positions}</ul></div>' if positions else ""
+
+                concerns = ''.join(
+                    f'<li>{c}</li>' for c in (r.get('concerns_raised') or []) if c)
+                concerns_html = f'<div style="margin-top:6px;"><strong style="font-size:12px;color:#555;">Concerns Raised:</strong><ul style="margin:2px 0;padding-left:18px;font-size:13px;">{concerns}</ul></div>' if concerns else ""
+
+                source_link = ""
+                if r.get('source_url'):
+                    source_link = f' <a href="{r["source_url"]}" target="_blank" style="font-size:11px;color:#4a90e2;">Link</a>'
+
+                type_badge = f' <span style="font-size:11px;color:#666;font-style:italic;">({r.get("questionnaire_type", "")})</span>' if r.get(
+                    'questionnaire_type') else ""
+
+                # Takeaway one-liner
+                takeaway = r.get('takeaway') or ''
+                takeaway_html = ""
+                if takeaway:
+                    takeaway_html = (
+                        f'<div style="font-size:13px;font-weight:bold;color:#006644;margin:4px 0;'
+                        f'padding:4px 8px;background:#e8f5e9;border-radius:3px;">'
+                        f'{takeaway}</div>'
+                    )
+
+                respondent_cards += (
+                    f'<div style="margin:8px 0;padding:10px;background:#fff;border:1px solid #e0e0e0;border-radius:3px;">'
+                    f'<div style="font-weight:bold;color:#333;">{r.get("entity_name", "")}{type_badge}{source_link}</div>'
+                    f'<div style="font-size:12px;color:#888;margin:2px 0;">{r.get("role_description", "")}</div>'
+                    f'{takeaway_html}'
+                    f'{dates_line}{topics_html}{positions_html}{concerns_html}'
+                    f'</div>'
+                )
+            detail_html += respondent_cards
+
+        # Remedy detail
+        rd = summary.get('remedy_detail', {})
+        if rd.get('has_remedies') and rd.get('remedies'):
+            detail_label = detail_label or "Remedy Detail"
+            remedy_type = rd.get('remedy_type', '')
+            proposed_by = rd.get('proposed_by', '')
+            detail_html += f'<div style="font-size:13px;color:#666;margin-bottom:8px;">Type: {remedy_type} | Proposed by: {proposed_by}</div>'
+            for rem in rd['remedies']:
+                markets = ''.join(
+                    f'<li>{m}</li>' for m in rem.get('markets_addressed', []) if m)
+                markets_html = f'<ul style="margin:2px 0;padding-left:18px;font-size:13px;">{markets}</ul>' if markets else ""
+                commitments = ''.join(
+                    f'<li>{c}</li>' for c in rem.get('behavioral_commitments', []) if c)
+                commitments_html = f'<div style="margin-top:4px;"><strong style="font-size:12px;">Behavioral:</strong><ul style="margin:2px 0;padding-left:18px;font-size:13px;">{commitments}</ul></div>' if commitments else ""
+                assets_line = f'<div style="font-size:13px;margin:4px 0;"><strong>Assets:</strong> {rem["divestiture_assets"]}</div>' if rem.get(
+                    'divestiture_assets') else ""
+                buyer_line = f'<div style="font-size:13px;margin:4px 0;"><strong>Buyer:</strong> {rem["divestiture_buyer"]}</div>' if rem.get(
+                    'divestiture_buyer') else ""
+                duration_line = f'<div style="font-size:13px;margin:4px 0;"><strong>Duration:</strong> {rem["duration"]}</div>' if rem.get(
+                    'duration') else ""
+
+                detail_html += (
+                    f'<div style="margin:8px 0;padding:10px;background:#fff;border:1px solid #e0e0e0;border-radius:3px;">'
+                    f'<div style="font-weight:bold;color:#333;">{rem.get("description", "")}</div>'
+                    f'{assets_line}{buyer_line}{markets_html}{commitments_html}{duration_line}</div>'
+                )
+
+        # Objection detail
+        od = summary.get('objection_detail', {})
+        if od.get('has_objections') and od.get('concerns'):
+            detail_label = detail_label or "Objection Detail"
+            for c in od['concerns']:
+                markets = ''.join(
+                    f'<li>{m}</li>' for m in c.get('markets_affected', []) if m)
+                markets_html = f'<div style="margin-top:4px;"><strong style="font-size:12px;">Markets:</strong><ul style="margin:2px 0;padding-left:18px;font-size:13px;">{markets}</ul></div>' if markets else ""
+                evidence = ''.join(
+                    f'<li>{e}</li>' for e in c.get('evidence_cited', []) if e)
+                evidence_html = f'<div style="margin-top:4px;"><strong style="font-size:12px;">Evidence:</strong><ul style="margin:2px 0;padding-left:18px;font-size:13px;">{evidence}</ul></div>' if evidence else ""
+
+                detail_html += (
+                    f'<div style="margin:8px 0;padding:10px;background:#fff;border:1px solid #e0e0e0;border-radius:3px;">'
+                    f'<div style="font-weight:bold;color:#333;">Theory: {c.get("theory_of_harm", "")}</div>'
+                    f'<div style="font-size:13px;color:#333;margin:4px 0;">{c.get("description", "")}</div>'
+                    f'{markets_html}{evidence_html}</div>'
+                )
+
+        # Intervention detail
+        ivd = summary.get('intervention_detail', {})
+        if ivd.get('has_interventions') and ivd.get('intervenors'):
+            detail_label = detail_label or "Intervention Detail"
+            for iv in ivd['intervenors']:
+                position = iv.get('position', '')
+                pos_color = '#2e7d32' if position == 'supports' else '#c62828' if position == 'opposes' else '#616161'
+                pos_badge = (f' <span style="display:inline-block;padding:2px 8px;border-radius:3px;'
+                             f'font-size:10px;font-weight:bold;color:white;background-color:{pos_color};">'
+                             f'{position.upper()}</span>') if position else ""
+                args = ''.join(
+                    f'<li>{a}</li>' for a in iv.get('key_arguments', []) if a)
+                args_html = f'<ul style="margin:4px 0;padding-left:18px;font-size:13px;">{args}</ul>' if args else ""
+                remedies_req = ''.join(
+                    f'<li>{r}</li>' for r in iv.get('remedies_requested', []) if r)
+                remedies_html = f'<div style="margin-top:4px;"><strong style="font-size:12px;">Remedies Requested:</strong><ul style="margin:2px 0;padding-left:18px;font-size:13px;">{remedies_req}</ul></div>' if remedies_req else ""
+
+                detail_html += (
+                    f'<div style="margin:8px 0;padding:10px;background:#fff;border:1px solid #e0e0e0;border-radius:3px;">'
+                    f'<div style="font-weight:bold;color:#333;">{iv.get("entity_name", "")} '
+                    f'<span style="font-size:11px;color:#666;">({iv.get("entity_type", "")})</span>{pos_badge}</div>'
+                    f'{args_html}{remedies_html}</div>'
+                )
+
+        # Information request detail
+        ird = summary.get('information_request_detail', {})
+        if ird.get('has_info_request') and ird.get('requests'):
+            detail_label = detail_label or "Information Request Detail"
+            for req in ird['requests']:
+                data_items = ''.join(
+                    f'<li>{d}</li>' for d in req.get('data_requested', []) if d)
+                data_html = f'<ul style="margin:4px 0;padding-left:18px;font-size:13px;">{data_items}</ul>' if data_items else ""
+                scope_line = f'<div style="font-size:13px;margin:4px 0;"><strong>Scope:</strong> {req["scope"]}</div>' if req.get(
+                    'scope') else ""
+                deadline_line = f'<div style="font-size:13px;margin:4px 0;"><strong>Deadline:</strong> {req["deadline"]}</div>' if req.get(
+                    'deadline') else ""
+                basis_line = f'<div style="font-size:13px;margin:4px 0;"><strong>Legal Basis:</strong> {req["legal_basis"]}</div>' if req.get(
+                    'legal_basis') else ""
+
+                detail_html += (
+                    f'<div style="margin:8px 0;padding:10px;background:#fff;border:1px solid #e0e0e0;border-radius:3px;">'
+                    f'<div style="font-weight:bold;color:#333;">From: {req.get("requested_from", "")} '
+                    f'({req.get("request_type", "")})</div>'
+                    f'{data_html}{scope_line}{deadline_line}{basis_line}</div>'
+                )
+
+        # Decision detail
+        dd = summary.get('decision_detail', {})
+        if dd.get('has_decision'):
+            detail_label = detail_label or "Decision Detail"
+            dtype = dd.get('decision_type', '')
+            dtype_color = '#2e7d32' if 'clearance' in dtype else '#c62828' if 'blocking' in dtype else '#1565c0'
+            dtype_badge = (f'<span style="display:inline-block;padding:4px 12px;border-radius:3px;'
+                           f'font-size:12px;font-weight:bold;color:white;background-color:{dtype_color};">'
+                           f'{dtype.replace("_", " ").upper()}</span>')
+            conditions = ''.join(
+                f'<li>{c}</li>' for c in dd.get('conditions_imposed', []) if c)
+            conditions_html = f'<div style="margin-top:6px;"><strong>Conditions:</strong><ul style="margin:2px 0;padding-left:18px;font-size:13px;">{conditions}</ul></div>' if conditions else ""
+
+            detail_html += (
+                f'<div style="margin-bottom:8px;">{dtype_badge}</div>'
+                f'<div style="font-size:13px;color:#333;">'
+                f'{"<strong>Authority:</strong> " + dd["decision_authority"] + "<br>" if dd.get("decision_authority") else ""}'
+                f'{"<strong>Date:</strong> " + dd["decision_date"] + "<br>" if dd.get("decision_date") else ""}'
+                f'{"<strong>Legal Basis:</strong> " + dd["legal_basis"] + "<br>" if dd.get("legal_basis") else ""}'
+                f'{"<strong>Effective:</strong> " + dd["effective_date"] + "<br>" if dd.get("effective_date") else ""}'
+                f'{"<strong>Appeal Deadline:</strong> " + dd["appeal_deadline"] + "<br>" if dd.get("appeal_deadline") else ""}'
+                f'{"<strong>Panel:</strong> " + dd["vote_or_panel"] if dd.get("vote_or_panel") else ""}'
+                f'</div>{conditions_html}'
+            )
+
+        # Wrap L3 detail in a single section if any detail exists
+        l3_html = ""
+        if detail_html:
+            l3_html = (
+                f'<div style="margin:20px 0;">'
+                f'<h3 style="margin:0 0 8px 0;color:#006644;font-size:13px;letter-spacing:0.5px;">L3 &mdash; {detail_label}</h3>'
+                f'<div style="padding:15px;background-color:#f5f5f5;border-radius:5px;">'
+                f'{detail_html}</div></div>'
+            )
+
+        # ── Case Snapshot ──
+        snapshot_timeline = cs.get('timeline', {})
+        timeline_items = ''.join(
+            f'<li><strong>{k.replace("_", " ").title()}:</strong> {v}</li>'
+            for k, v in snapshot_timeline.items() if v
+        )
+        timeline_html = f'<ul style="margin:4px 0;padding-left:18px;font-size:13px;">{timeline_items}</ul>' if timeline_items else ""
+        markets = ''.join(
+            f'<li>{m}</li>' for m in cs.get('relevant_markets', []) if m)
+        markets_html = f'<div style="margin-top:6px;"><strong style="font-size:12px;">Markets:</strong><ul style="margin:2px 0;padding-left:18px;font-size:13px;">{markets}</ul></div>' if markets else ""
+        related = ''.join(
+            f'<li>{r}</li>' for r in cs.get('related_proceedings', []) if r)
+        related_html = f'<div style="margin-top:6px;"><strong style="font-size:12px;">Related:</strong><ul style="margin:2px 0;padding-left:18px;font-size:13px;">{related}</ul></div>' if related else ""
+
+        snapshot_html = (
+            f'<div style="margin:20px 0;padding:15px;background-color:#f5f5f5;border-radius:5px;">'
+            f'<h3 style="margin:0 0 10px 0;color:#006644;">Case Snapshot</h3>'
+            f'<div style="font-size:13px;color:#333;">'
+            f'<strong>Stage:</strong> {review_stage} &middot; '
+            f'<strong>Status:</strong> {approval_status}'
+            f'{"<br><strong>Legal Basis:</strong> " + cs["legal_basis"] if cs.get("legal_basis") else ""}'
+            f'</div>{timeline_html}{markets_html}{related_html}</div>'
+        )
+
+        # ── Footer: main case link + source notes ──
+        links_html = ""
+        if urls:
+            # Show only the first URL (main case/process page), not every individual doc
+            main_url = urls[0]
+            domain = re.search(r'https?://([^/]+)', main_url)
+            domain_label = domain.group(1) if domain else main_url
+            links_html = f'<p><a href="{main_url}" target="_blank">View case on {domain_label}</a></p>'
+
+        source_notes_html = ""
+        if failed_urls:
+            failed_list = ''.join(
+                f'<li style="font-size:11px;word-break:break-all;">{u}</li>'
+                for u in failed_urls
+            )
+            source_notes_html += (
+                f'<div style="margin:8px 0;padding:8px 12px;background-color:#fff3e0;border-radius:3px;font-size:12px;">'
+                f'<strong style="color:#e65100;">&#9888; {len(failed_urls)} of {total_urls} source URL(s) '
+                f'could not be fetched.</strong> Claims about their content should be verified.'
+                f'<ul style="margin:4px 0;padding-left:16px;color:#666;">{failed_list}</ul>'
+                f'</div>'
+            )
+        if source_quality.get('basis_for_claims') == 'docket_table_only':
+            source_notes_html += (
+                '<div style="margin:8px 0;padding:8px 12px;background-color:#fff3e0;border-radius:3px;font-size:12px;">'
+                '<strong style="color:#e65100;">&#9888; Limited Source:</strong> '
+                'Summary based on docket table listing only &mdash; full document text not available. '
+                'Content should be independently verified.'
+                '</div>'
+            )
 
         html = f"""
         <html>
@@ -1129,43 +1744,47 @@ Return ONLY the JSON array, no markdown fences or explanation."""
                 .header {{ background-color: #006644; color: white; padding: 20px; border-radius: 5px; }}
                 .header h2 {{ margin: 0 0 5px 0; }}
                 .header p {{ margin: 3px 0; opacity: 0.9; }}
-                .section {{ margin: 20px 0; padding: 15px; background-color: #f5f5f5; border-radius: 5px; }}
-                .headline {{ font-size: 18px; font-weight: bold; color: #006644; margin: 10px 0; }}
-                .brief {{ font-size: 14px; line-height: 1.6; margin: 10px 0; }}
-                .detail-label {{ font-weight: bold; color: #555; margin-top: 10px; }}
-                ul {{ margin: 5px 0; padding-left: 20px; }}
                 .footer {{ margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd; font-size: 12px; color: #999; }}
                 a {{ color: #4a90e2; text-decoration: none; }}
-                .meta {{ font-size: 13px; margin: 5px 0; }}
             </style>
         </head>
         <body>
+            <!-- HEADER -->
             <div class="header">
-                <h2>{jurisdiction} — {authority}</h2>
-                <p>{doc_type}</p>
-                <p>Process: {process_num} | Date: {date}</p>
+                <h2>{jurisdiction} &mdash; {authority}</h2>
+                <p>Process: {process_num} | {date} &nbsp;
+                    <span style="display:inline-block;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:bold;color:white;background-color:{sig_color};">{sig.upper()}</span>{source_indicator}</p>
                 <p>Target: {parties.get('target', 'N/A')} | Acquirer: {parties.get('acquirer', 'N/A')}</p>
+                <p>{stage_badge}{badge_separator}{status_badge}</p>
             </div>
 
             {case_status_html}
 
-            <div class="section">
-                <h3>L1 — Headline</h3>
-                <p class="headline">{summary.get('L1_headline', '')}</p>
+            <!-- L1: HEADLINE -->
+            <div style="margin:20px 0;">
+                <h3 style="margin:0 0 8px 0;color:#006644;font-size:13px;letter-spacing:0.5px;">L1 &mdash; Headline</h3>
+                <div style="padding:14px 18px;border-left:4px solid #006644;background-color:#e8f5e9;border-radius:3px;">
+                    <div style="font-size:16px;font-weight:bold;color:#006644;line-height:1.4;">{headline}</div>
+                </div>
             </div>
 
-            <div class="section">
-                <h3>L2 — Brief</h3>
-                <p class="brief">{summary.get('L2_brief', '')}</p>
+            <!-- L2: BRIEF -->
+            <div style="margin:20px 0;">
+                <h3 style="margin:0 0 8px 0;color:#006644;font-size:13px;letter-spacing:0.5px;">L2 &mdash; Brief</h3>
+                <div style="font-size:14px;color:#333;line-height:1.6;">{brief}</div>
+                {filing_cards_html}
             </div>
 
-            <div class="section">
-                <h3>L3 — Detailed</h3>
-                {detail_sections}
-            </div>
+            <!-- L3: DETAIL -->
+            {l3_html}
 
+            <!-- CASE SNAPSHOT -->
+            {snapshot_html}
+
+            <!-- FOOTER -->
             <div class="footer">
                 {links_html}
+                {source_notes_html}
                 <p>Automated International Regulatory Summary generated by Hyperion Technologies</p>
                 <p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
             </div>
@@ -1180,7 +1799,7 @@ Return ONLY the JSON array, no markdown fences or explanation."""
                                     update_number: int = 0, deal_entry: Optional[Dict] = None):
         """Send brief 'filtered' notification to josh@ only for low-value updates."""
         try:
-            headline = summary.get('L1_headline', '')
+            headline = summary.get('L1_headline', summary.get('headline', ''))
             jurisdiction = summary.get('jurisdiction', '')
             body = summary.get('regulatory_body', '')
             target = summary.get('parties', {}).get('target', '')
@@ -1190,8 +1809,9 @@ Return ONLY the JSON array, no markdown fences or explanation."""
             last_emailed = ''
             if deal_entry and deal_entry.get('updates'):
                 for u in reversed(deal_entry['updates']):
-                    if u.get('significance') not in ('low', 'routine') and u.get('L1_headline'):
-                        last_emailed = u['L1_headline']
+                    u_headline = u.get('L1_headline', u.get('headline', ''))
+                    if u.get('significance') not in ('low', 'routine') and u_headline:
+                        last_emailed = u_headline
                         break
 
             context_line = ''
@@ -1236,7 +1856,7 @@ Full JSON saved locally. Not sent to distribution list.
                            update_number: int = 1, deal_entry: Optional[Dict] = None,
                            original_subject: str = ''):
         """Send summary email via Gmail SMTP."""
-        l1 = summary.get('L1_headline', '')
+        l1 = summary.get('L1_headline', summary.get('headline', ''))
         if original_subject and l1:
             subject = f"{original_subject} | {l1}"
         else:
@@ -1328,7 +1948,9 @@ Full JSON saved locally. Not sent to distribution list.
                     f"   Found existing deal with {deal_entry['update_count']} prior update(s)")
 
             # 3. Build combined text from email body + linked documents
-            combined_text = self.build_combined_text(content)
+            build_result = self.build_combined_text(content)
+            combined_text = build_result['text']
+            fetch_results = build_result['fetch_results']
 
             if not combined_text.strip():
                 logger.warning(f"   No text content found in email: {subject}")
@@ -1340,6 +1962,12 @@ Full JSON saved locally. Not sent to distribution list.
 
             # 5. Generate summary (two-pass: Haiku extraction + Opus summarization)
             summary = self.summarize(combined_text)
+
+            # 5a. Attach fetch results metadata to summary for email rendering
+            summary['_fetch_results'] = fetch_results
+
+            # 5c. Validate high-stakes claims before sending
+            summary = self._validate_high_stakes_claims(summary, combined_text)
 
             # 5b. CADE docket backfill — on first encounter, pre-seed historical milestones
             backfill = []
@@ -1362,16 +1990,18 @@ Full JSON saved locally. Not sent to distribution list.
             self._save_deal_state()
 
             # 7b. Significance gate — skip email for low-value updates
-            significance = summary.get('L3_detailed', {}).get(
-                'significance', 'medium')
-            sig_reason = summary.get('L3_detailed', {}).get(
-                'significance_reasoning', '')
+            significance = summary.get('significance', 'medium')
+            sig_reason = summary.get('significance_reasoning', '')
 
-            # Hard override: always email for approvals/blocks
-            approval = summary.get('L3_detailed', {}).get(
+            # Hard override: always email for VALIDATED approvals/blocks
+            approval = summary.get('case_snapshot', {}).get(
                 'approval_status', '')
             if any(kw in approval for kw in ('Approved', 'Blocked', 'Conditions')):
-                significance = 'critical'
+                if not summary.get('_downgraded'):
+                    significance = 'critical'
+                else:
+                    logger.warning(
+                        f"   Approval/block claim was downgraded — NOT escalating to critical")
 
             is_new_deal = (update_number == 1 and not backfill)
 
@@ -1453,8 +2083,7 @@ Full JSON saved locally. Not sent to distribution list.
         logger.info(f"Monitoring: {self.gmail_email}")
         logger.info(f"Looking for emails from: {', '.join(SENDERS)}")
         logger.info(f"Excluding: 8-K filings (handled by 8K monitor)")
-        logger.info(
-            f"Matching: [FRMD] tags and agency regulatory updates (subject-only)")
+        logger.info(f"Matching: [FRMD] subject tag required")
         logger.info(
             f"Previously processed: {len(self.processed_emails)} emails")
         logger.info(

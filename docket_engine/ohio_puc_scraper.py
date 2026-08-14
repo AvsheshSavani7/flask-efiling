@@ -43,6 +43,14 @@ On a Linux server the container entrypoint already runs Xvfb (headed Chromium).
 """
 
 from __future__ import annotations
+from docket_engine.intake_analyzer import generate_intake_note
+from docket_engine.email_renderer import render_intake_card, render_email_html
+from docket_engine.docket_email_service import send_docket_email
+from error_email_service import send_error_email
+from log_utils import ensure_script_logger, refresh_script_log
+import ohio_puc_josh as oh
+from pymongo import MongoClient
+from dotenv import load_dotenv
 
 import argparse
 import json
@@ -62,17 +70,9 @@ _PROJECT_ROOT = os.path.dirname(_THIS_DIR)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from dotenv import load_dotenv
-from pymongo import MongoClient
 
 # Reuse the server-tested fetching functions unchanged.
-import ohio_puc_josh as oh
 
-from log_utils import ensure_script_logger, refresh_script_log
-from error_email_service import send_error_email
-from docket_engine.docket_email_service import send_docket_email
-from docket_engine.email_renderer import render_intake_card, render_email_html
-from docket_engine.intake_analyzer import generate_intake_note
 
 load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 
@@ -142,7 +142,8 @@ def load_dockets_config(
 ) -> List[Dict[str, Any]]:
     """Load active docket entries from ohio_puc_dockets.json."""
     if not os.path.isfile(dockets_file):
-        raise FileNotFoundError(f"Dockets config file not found: {dockets_file}")
+        raise FileNotFoundError(
+            f"Dockets config file not found: {dockets_file}")
     with open(dockets_file, "r", encoding="utf-8") as f:
         config = json.load(f)
     all_dockets = config.get("dockets", [])
@@ -254,8 +255,10 @@ def _send_notification_email(
         document_url = metadata.get("url") or metadata.get("document_id") or ""
         base_html = render_intake_card(intake_note, document_url)
         email_html = render_email_html(
-            tier2_response=(result.get("tier2_analysis") or {}).get("response", ""),
-            tier3_response=(result.get("tier3_risk_assessment") or {}).get("response", ""),
+            tier2_response=(result.get("tier2_analysis")
+                            or {}).get("response", ""),
+            tier3_response=(result.get("tier3_risk_assessment")
+                            or {}).get("response", ""),
             base_html=base_html,
             metadata=metadata,
         )
@@ -263,7 +266,7 @@ def _send_notification_email(
             "target_company_name", ""
         )
         subject = (
-            f"{target_company_name} : OHPUC - {docket_number}: "
+            f"{target_company_name} : OH PUC - {docket_number}: "
             f"{metadata.get('additional_info', '')} - {metadata.get('document_type', '')}"
         )
         logger.info(f"  Sending docket email subject={subject!r}")
@@ -369,7 +372,8 @@ def _process_entry(
     )
 
     if result.get("error"):
-        logger.error(f"    Analysis error for doc_id={doc_id}: {result['error']}")
+        logger.error(
+            f"    Analysis error for doc_id={doc_id}: {result['error']}")
         _error_email(
             f"Docket analysis error for doc_id={doc_id}: {result['error']}",
             {"doc_id": doc_id, "docket_number": docket_number,
@@ -379,7 +383,8 @@ def _process_entry(
                 "error": result["error"]}
 
     status = result.get("status", "unknown")
-    logger.info(f"    → status={status} deal_id={result.get('deal_id') or '(none)'}")
+    logger.info(
+        f"    → status={status} deal_id={result.get('deal_id') or '(none)'}")
 
     if status == "new_analysis":
         _send_notification_email(result, metadata, docket_number, doc_id)
@@ -639,10 +644,12 @@ def scrape_all_oh_puc(
         docket_number = (entry.get("docket_number") or "").strip()
         description = entry.get("description", "")
         if not docket_number:
-            logger.warning(f"Skipping config entry missing docket_number: {entry}")
+            logger.warning(
+                f"Skipping config entry missing docket_number: {entry}")
             continue
 
-        logger.info(f"\n{'=' * 60}\nDocket: {docket_number}\n{description}\n{'=' * 60}")
+        logger.info(
+            f"\n{'=' * 60}\nDocket: {docket_number}\n{description}\n{'=' * 60}")
         result = scrape_oh_puc(
             docket_number=docket_number,
             use_proxy=use_proxy,

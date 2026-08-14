@@ -121,7 +121,13 @@ DOCKET_TYPES_WITH_ENRICHMENT = frozenset({
     "nm-prc",
     "ne-psc",
     "va-puc",
+    "CPUC",
 })
+
+# Restrict enrichment to specific docket numbers when a type has multiple dockets.
+_ENRICHMENT_DOCKET_NUMBERS: Dict[str, frozenset] = {
+    "CPUC": frozenset({"A2507016"}),
+}
 
 # Maps docket collection type → dashboard_docket_type for enrich_docket_entry
 _DOCKET_TO_DASHBOARD_TYPE: Dict[str, str] = {
@@ -132,6 +138,7 @@ _DOCKET_TO_DASHBOARD_TYPE: Dict[str, str] = {
     "nm-prc":                   "nm-prc",
     "ne-psc":                   "ne-psc",
     "va-puc":                   "va-puc",
+    "CPUC":                     "CPUC",
 }
 
 DOCKET_HISTORY_PROJECTION = {
@@ -199,8 +206,13 @@ def _next_hash_id(entries: list) -> int:
     return max_hash_id + 1 if entries else 1
 
 
-def _should_schedule_enrichment(docket_type: str) -> bool:
-    return docket_type in DOCKET_TYPES_WITH_ENRICHMENT
+def _should_schedule_enrichment(docket_type: str, docket_number: str = "") -> bool:
+    if docket_type not in DOCKET_TYPES_WITH_ENRICHMENT:
+        return False
+    allowed_numbers = _ENRICHMENT_DOCKET_NUMBERS.get(docket_type)
+    if allowed_numbers is None:
+        return True
+    return docket_number in allowed_numbers
 
 
 def _schedule_docket_enrichment(record_id: str, docket_type: str) -> None:
@@ -1245,19 +1257,19 @@ Be factual and concise. Focus on substantive content, not procedural details."""
             insert_result = collection.insert_one(new_entry)
             inserted_id = insert_result.inserted_id
             logger.info("✓ Saved entry to MongoDB _id=%s", inserted_id)
-            if _should_schedule_enrichment(docket_type):
+            if _should_schedule_enrichment(docket_type, docket_number):
                 _schedule_docket_enrichment(str(inserted_id), docket_type)
                 enrichment_scheduled = True
             else:
                 logger.info(
-                    "Skipping enrichment for docket_type=%s (not in %s)",
+                    "Skipping enrichment for docket_type=%s docket_number=%s",
                     docket_type,
-                    sorted(DOCKET_TYPES_WITH_ENRICHMENT),
+                    docket_number,
                 )
         except Exception as e:
             logger.warning(
                 "Failed to save to MongoDB: %s", str(e))
-    elif _should_schedule_enrichment(docket_type):
+    elif _should_schedule_enrichment(docket_type, docket_number):
         _schedule_docket_enrichment_test(new_entry)
         enrichment_scheduled = True
 

@@ -897,7 +897,7 @@ def scrape_va_puc(
                                 )
                             )
                             subject = (
-                                f"{target_company_name} : VAPUC - {matter_no}"
+                                f"{target_company_name} : VA PUC - {matter_no}"
                                 f": {additional_info} - {document_type}"
                             )
                             logger.info(
