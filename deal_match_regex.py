@@ -138,13 +138,17 @@ _GENERIC_ALIAS_BLOCKLIST: frozenset[str] = frozenset({
 
 def name_hits_text(name: str, text: str) -> bool:
     """
-    Returns True if the full normalised name appears as a substring in text.
+    Returns True if the full normalised name appears in text as a complete
+    word or phrase (not as a substring of a longer token).
 
     Matching direction: the deal name must be contained within the input text,
     not the other way around.  e.g. deal="Warner Bros", text="Warner Bros Discovery"
     → match; deal="Warner Bros Discovery", text="Warner Bros" → no match.
+    "lien" in "resilient" → no match.
     """
-    return name in text
+    if not name or not text:
+        return False
+    return re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text) is not None
 
 
 def build_deal_name_sets(
@@ -204,7 +208,7 @@ def regex_match_split_orient(
     """
     Match pre-split left/right sides against deals (both orientations).
 
-    Uses simple substring matching (a in left or left in a).
+    Uses whole-word/phrase matching (not substring-inside-token).
     Caller must pass already-normalised left and right strings.
     """
     if not left or not right or not deals:
@@ -218,12 +222,24 @@ def regex_match_split_orient(
             continue
 
         match_normal = (
-            any(a in left or left in a for a in acq_names if len(a) > min_name_len)
-            and any(t in right or right in t for t in tgt_names if len(t) > min_name_len)
+            any(
+                name_hits_text(a, left) or name_hits_text(left, a)
+                for a in acq_names if len(a) > min_name_len
+            )
+            and any(
+                name_hits_text(t, right) or name_hits_text(right, t)
+                for t in tgt_names if len(t) > min_name_len
+            )
         )
         match_reversed = (
-            any(t in left or left in t for t in tgt_names if len(t) > min_name_len)
-            and any(a in right or right in a for a in acq_names if len(a) > min_name_len)
+            any(
+                name_hits_text(t, left) or name_hits_text(left, t)
+                for t in tgt_names if len(t) > min_name_len
+            )
+            and any(
+                name_hits_text(a, right) or name_hits_text(right, a)
+                for a in acq_names if len(a) > min_name_len
+            )
         )
 
         if match_normal or match_reversed:
@@ -242,9 +258,10 @@ def regex_match_flat_scan(
     """
     Flat-scan: require acquirer hit AND target hit anywhere in normalised text.
 
-    Uses exact substring matching: the deal name must appear fully inside the
-    input text (not the reverse).  e.g. deal="Warner Bros", text="Warner Bros
-    Discovery" → match; deal="Warner Bros Discovery", text="Warner Bros" → no match.
+    Uses whole-word/phrase matching: the deal name must appear as complete
+    tokens inside the input text (not the reverse).  e.g. deal="Warner Bros",
+    text="Warner Bros Discovery" → match; deal="Warner Bros Discovery",
+    text="Warner Bros" → no match; "lien" in "resilient" → no match.
     """
     if not text or not deals:
         return None
