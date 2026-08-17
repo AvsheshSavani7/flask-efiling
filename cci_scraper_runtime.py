@@ -16,8 +16,10 @@ from playwright.sync_api import sync_playwright
 
 from cci_common import (
     attach_cci_common_logging,
+    close_cci_browser,
     ensure_cci_indexes,
     get_cci_cases_collection,
+    launch_cci_browser,
     load_cci_list_page,
     log_cci_db_lookup,
     paginate_cci_list,
@@ -111,147 +113,135 @@ def run_cci_datatable_scraper(
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=not headed,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage",
-                ],
-            )
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                ),
-            )
-            page = context.new_page()
+            browser = None
+            try:
+                browser, _context, page = launch_cci_browser(p, headed=headed)
 
-            load_cci_list_page(page, config.list_url)
+                load_cci_list_page(page, config.list_url)
 
-            rows = paginate_cci_list(
-                page,
-                config.parse_table,
-                config.cutoff,
-                config.cutoff_field,
-                collection=collection if not dry_run else None,
-                source_key=config.source_key,
-                single_page=config.single_page,
-            )
-            stats["list_rows"] = len(rows)
-            logger.info("Rows to process: %s", len(rows))
-
-            for idx, row in enumerate(rows, 1):
-                log_file = refresh_script_log(logger, get_log_file, log_file)
-
-                reg_no = (row.get("combination_registration_no") or "").strip()
-                detail_url = row.get("detail_url", "")
-                logger.info(
-                    "[%s/%s] %s — %s",
-                    idx,
-                    len(rows),
-                    reg_no,
-                    config.row_label(row),
+                rows = paginate_cci_list(
+                    page,
+                    config.parse_table,
+                    config.cutoff,
+                    config.cutoff_field,
+                    collection=collection if not dry_run else None,
+                    source_key=config.source_key,
+                    single_page=config.single_page,
                 )
+                stats["list_rows"] = len(rows)
+                logger.info("Rows to process: %s", len(rows))
 
-                if not reg_no or not detail_url:
-                    logger.warning("  Missing reg_no or detail_url; skipping")
-                    continue
+                for idx, row in enumerate(rows, 1):
+                    log_file = refresh_script_log(logger, get_log_file, log_file)
 
-                existing = None
-                if collection is not None:
-                    existing = collection.find_one(
-                        {"combination_registration_no": reg_no}
-                    )
-                    log_cci_db_lookup(reg_no, existing, config.source_key)
-
-                if existing and source_already_processed(existing, config.source_key):
-                    stats["skipped_processed"] += 1
+                    reg_no = (row.get("combination_registration_no") or "").strip()
+                    detail_url = row.get("detail_url", "")
                     logger.info(
-                        "  Skip: already processed from %s (no detail visit, no email)",
-                        config.source_key,
+                        "[%s/%s] %s — %s",
+                        idx,
+                        len(rows),
+                        reg_no,
+                        config.row_label(row),
                     )
-                    continue
 
-                try:
-                    detail_data = config.fetch_detail(page, row, detail_url)
-                except Exception as exc:
-                    logger.exception("  Detail page error: %s", exc)
-                    collect_error(
-                        error_items,
-                        str(exc),
-                        step="fetch_detail",
-                        context={
-                            "combination_registration_no": reg_no,
-                            "detail_url": detail_url,
-                        },
-                    )
-                    stats["errors"] += 1
-                    continue
+                    if not reg_no or not detail_url:
+                        logger.warning("  Missing reg_no or detail_url; skipping")
+                        continue
 
-                is_new_record = existing is None
+                    existing = None
+                    if collection is not None:
+                        existing = collection.find_one(
+                            {"combination_registration_no": reg_no}
+                        )
+                        log_cci_db_lookup(reg_no, existing, config.source_key)
 
-                if dry_run:
+                    if existing and source_already_processed(existing, config.source_key):
+                        stats["skipped_processed"] += 1
+                        logger.info(
+                            "  Skip: already processed from %s (no detail visit, no email)",
+                            config.source_key,
+                        )
+                        continue
+
+                    try:
+                        detail_data = config.fetch_detail(page, row, detail_url)
+                    except Exception as exc:
+                        logger.exception("  Detail page error: %s", exc)
+                        collect_error(
+                            error_items,
+                            str(exc),
+                            step="fetch_detail",
+                            context={
+                                "combination_registration_no": reg_no,
+                                "detail_url": detail_url,
+                            },
+                        )
+                        stats["errors"] += 1
+                        continue
+
+                    is_new_record = existing is None
+
+                    if dry_run:
+                        logger.info(
+                            "  [DRY-RUN] would %s — %s (no DB write, no LLM/email)",
+                            "insert" if is_new_record else "update",
+                            detail_data,
+                        )
+                        if is_new_record:
+                            stats["inserted"] += 1
+                        else:
+                            stats["updated"] += 1
+                        continue
+
                     logger.info(
-                        "  [DRY-RUN] would %s — %s (no DB write, no LLM/email)",
+                        "  Persisting to cci_cases (%s)...",
                         "insert" if is_new_record else "update",
+                    )
+                    config.persist_record(
+                        collection,
+                        row,
+                        detail_url,
                         detail_data,
+                        existing,
+                        is_new_record,
+                        utc_now_iso(),
                     )
                     if is_new_record:
                         stats["inserted"] += 1
+                        logger.info("  Inserted new case")
                     else:
                         stats["updated"] += 1
-                    continue
+                        logger.info("  Updated existing case (first time from this source)")
 
-                logger.info(
-                    "  Persisting to cci_cases (%s)...",
-                    "insert" if is_new_record else "update",
-                )
-                config.persist_record(
-                    collection,
-                    row,
-                    detail_url,
-                    detail_data,
-                    existing,
-                    is_new_record,
-                    utc_now_iso(),
-                )
-                if is_new_record:
-                    stats["inserted"] += 1
-                    logger.info("  Inserted new case")
-                else:
-                    stats["updated"] += 1
-                    logger.info("  Updated existing case (first time from this source)")
+                    record = collection.find_one({"combination_registration_no": reg_no})
+                    if not record:
+                        logger.warning(
+                            "  Record missing after persist; skipping deal match / email (reg_no=%s)",
+                            reg_no,
+                        )
+                        continue
 
-                record = collection.find_one({"combination_registration_no": reg_no})
-                if not record:
-                    logger.warning(
-                        "  Record missing after persist; skipping deal match / email (reg_no=%s)",
-                        reg_no,
+                    logger.info("  Running deal match / email pipeline...")
+                    email_sent = process_deal_match_and_email(
+                        collection,
+                        record,
+                        is_new_record=is_new_record,
+                        error_items=error_items,
+                        source_label=config.source_label,
+                        list_page_url=config.list_url,
+                        source_key=config.source_key,
                     )
-                    continue
+                    logger.info(
+                        "  Deal match / email pipeline finished (email_sent=%s)",
+                        email_sent,
+                    )
+                    if email_sent:
+                        stats["emails_sent"] += 1
+                    else:
+                        stats["emails_not_sent"] += 1
 
-                logger.info("  Running deal match / email pipeline...")
-                email_sent = process_deal_match_and_email(
-                    collection,
-                    record,
-                    is_new_record=is_new_record,
-                    error_items=error_items,
-                    source_label=config.source_label,
-                    list_page_url=config.list_url,
-                    source_key=config.source_key,
-                )
-                logger.info(
-                    "  Deal match / email pipeline finished (email_sent=%s)",
-                    email_sent,
-                )
-                if email_sent:
-                    stats["emails_sent"] += 1
-                else:
-                    stats["emails_not_sent"] += 1
-
-            browser.close()
+            finally:
+                close_cci_browser(browser)
 
     except Exception as exc:
         logger.exception("Unhandled error: %s", exc)

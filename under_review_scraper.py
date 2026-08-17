@@ -30,10 +30,12 @@ from cci_common import (
     build_cci_email_html,
     build_skeleton_doc,
     build_under_review_update_fields,
+    close_cci_browser,
     ensure_cci_indexes,
     fetch_detail_pdf_url,
     get_cci_cases_collection,
     get_stage,
+    launch_cci_browser,
     load_cci_list_page,
     log_cci_db_lookup,
     paginate_under_review_list,
@@ -139,286 +141,274 @@ def run_under_review_scraper(
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=not headed,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage",
-                ],
-            )
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                ),
-            )
-            page = context.new_page()
+            browser = None
+            try:
+                browser, _context, page = launch_cci_browser(p, headed=headed)
 
-            load_cci_list_page(page, LIST_URL)
+                load_cci_list_page(page, LIST_URL)
 
-            rows = paginate_under_review_list(
-                page,
-                cutoff,
-                # Pass None in test-email/dry-run modes to skip last_seen_at writes
-                collection=collection if (not dry_run and not test_email) else None,
-            )
-            stats["list_rows"] = len(rows)
-            logger.info("Rows within cutoff: %s", len(rows))
-
-            for idx, row in enumerate(rows, 1):
-                LOG_FILE = refresh_script_log(logger, _get_log_file, LOG_FILE)
-
-                reg_no = row.get("combination_registration_no", "").strip()
-                detail_url = row.get("detail_url", "")
-                logger.info(
-                    "[%s/%s] %s — %s",
-                    idx,
-                    len(rows),
-                    reg_no,
-                    (row.get("notifying_parties") or "")[:80],
+                rows = paginate_under_review_list(
+                    page,
+                    cutoff,
+                    # Pass None in test-email/dry-run modes to skip last_seen_at writes
+                    collection=collection if (not dry_run and not test_email) else None,
                 )
+                stats["list_rows"] = len(rows)
+                logger.info("Rows within cutoff: %s", len(rows))
 
-                if not reg_no or not detail_url:
-                    logger.warning("  Missing reg_no or detail_url; skipping")
-                    continue
+                for idx, row in enumerate(rows, 1):
+                    LOG_FILE = refresh_script_log(logger, _get_log_file, LOG_FILE)
 
-                # TEST-EMAIL mode: read DB, detect status change, generate HTML preview.
-                # No DB writes, no LLM, no webhook.
-                if test_email:
-                    existing_te = collection.find_one(
-                        {"combination_registration_no": reg_no}
-                    ) if collection is not None else None
-
-                    old_status_te = (existing_te.get("cci_status") or "").strip() if existing_te else ""
-                    new_status_te = (row.get("cci_status") or "").strip()
-                    old_decision_te = (existing_te.get("decision_date") or "").strip() if existing_te else ""
-                    new_decision_te = (row.get("decision_date") or "").strip()
-
-                    is_new_te = existing_te is None
-                    status_changed_te = (
-                        not is_new_te
-                        and source_already_processed(existing_te, SOURCE_NOTICE_UNDER_REVIEW)
-                        and (old_status_te != new_status_te or old_decision_te != new_decision_te)
+                    reg_no = row.get("combination_registration_no", "").strip()
+                    detail_url = row.get("detail_url", "")
+                    logger.info(
+                        "[%s/%s] %s — %s",
+                        idx,
+                        len(rows),
+                        reg_no,
+                        (row.get("notifying_parties") or "")[:80],
                     )
 
-                    if not is_new_te and not status_changed_te:
-                        logger.info(
-                            "  [TEST-EMAIL] Skip: already processed, status unchanged (%s)",
-                            old_status_te,
-                        )
+                    if not reg_no or not detail_url:
+                        logger.warning("  Missing reg_no or detail_url; skipping")
                         continue
+
+                    # TEST-EMAIL mode: read DB, detect status change, generate HTML preview.
+                    # No DB writes, no LLM, no webhook.
+                    if test_email:
+                        existing_te = collection.find_one(
+                            {"combination_registration_no": reg_no}
+                        ) if collection is not None else None
+
+                        old_status_te = (existing_te.get("cci_status") or "").strip() if existing_te else ""
+                        new_status_te = (row.get("cci_status") or "").strip()
+                        old_decision_te = (existing_te.get("decision_date") or "").strip() if existing_te else ""
+                        new_decision_te = (row.get("decision_date") or "").strip()
+
+                        is_new_te = existing_te is None
+                        status_changed_te = (
+                            not is_new_te
+                            and source_already_processed(existing_te, SOURCE_NOTICE_UNDER_REVIEW)
+                            and (old_status_te != new_status_te or old_decision_te != new_decision_te)
+                        )
+
+                        if not is_new_te and not status_changed_te:
+                            logger.info(
+                                "  [TEST-EMAIL] Skip: already processed, status unchanged (%s)",
+                                old_status_te,
+                            )
+                            continue
+
+                        try:
+                            pdf_url = fetch_detail_pdf_url(page, detail_url)
+                        except Exception as exc:
+                            logger.exception("  Detail page error: %s", exc)
+                            stats["errors"] += 1
+                            continue
+
+                        changes_te: Optional[Dict[str, Any]] = None
+                        if status_changed_te:
+                            changes_te = {
+                                "old": {
+                                    "cci_status":              old_status_te or None,
+                                    "stage":                   existing_te.get("stage"),
+                                    "decision_date":           old_decision_te or None,
+                                    "notice_under_review_url": existing_te.get("notice_under_review_url"),
+                                },
+                                "new": {
+                                    "cci_status":              new_status_te or None,
+                                    "stage":                   get_stage(new_status_te) if new_status_te else None,
+                                    "decision_date":           new_decision_te or None,
+                                    "notice_under_review_url": pdf_url,
+                                },
+                            }
+
+                        # Build a record merging existing DB data with fresh scraped values
+                        base = dict(existing_te) if existing_te else {}
+                        base.update({
+                            "combination_registration_no": reg_no,
+                            "notifying_parties": row.get("notifying_parties") or base.get("notifying_parties"),
+                            "form": row.get("form") or base.get("form"),
+                            "date_of_notification": row.get("date_of_notification") or base.get("date_of_notification"),
+                            "cci_status": new_status_te or None,
+                            "stage": get_stage(new_status_te) if new_status_te else base.get("stage"),
+                            "decision_date": new_decision_te or base.get("decision_date"),
+                            "notice_under_review_url": pdf_url,
+                            "detail_urls": {SOURCE_NOTICE_UNDER_REVIEW: detail_url},
+                        })
+
+                        event_type_te = "new" if is_new_te else "update"
+                        deal_match_te = None
+                        if existing_te and existing_te.get("deal_id"):
+                            deal_match_te = get_deal_by_id(str(existing_te["deal_id"]))
+
+                        _, html = build_cci_email_html(
+                            base,
+                            deal_match=deal_match_te,
+                            event_type=event_type_te,
+                            source_label="Notice Under Review",
+                            list_page_url=LIST_URL,
+                            changes=changes_te,
+                        )
+                        filepath = _save_test_email_html(reg_no, html)
+                        logger.info(
+                            "  [TEST-EMAIL] %s → %s",
+                            "status-update" if status_changed_te else "new-case",
+                            filepath,
+                        )
+                        stats["test_emails_saved"] += 1
+                        continue
+
+                    now_iso = utc_now_iso()
+                    existing = None
+                    if collection is not None:
+                        existing = collection.find_one(
+                            {"combination_registration_no": reg_no}
+                        )
+                        log_cci_db_lookup(reg_no, existing, SOURCE_NOTICE_UNDER_REVIEW)
+
+                    # Detect whether this is a first-time process, a status-change
+                    # update, or a truly unchanged already-processed record.
+                    changes = None
+                    is_status_update = False
+                    if existing and source_already_processed(existing, SOURCE_NOTICE_UNDER_REVIEW):
+                        old_status = (existing.get("cci_status") or "").strip()
+                        new_status = (row.get("cci_status") or "").strip()
+                        old_decision = (existing.get("decision_date") or "").strip()
+                        new_decision = (row.get("decision_date") or "").strip()
+
+                        if old_status == new_status and old_decision == new_decision:
+                            stats["skipped_processed"] += 1
+                            logger.info(
+                                "  Skip: already processed, status unchanged (%s)",
+                                old_status,
+                            )
+                            continue
+
+                        # Something changed — re-process and send update email
+                        is_status_update = True
+                        logger.info(
+                            "  Status change detected: '%s' → '%s' | decision_date: '%s' → '%s'",
+                            old_status, new_status,
+                            old_decision, new_decision,
+                        )
+                        changes = {
+                            "old": {
+                                "cci_status":              old_status or None,
+                                "stage":                   existing.get("stage"),
+                                "decision_date":           old_decision or None,
+                                "notice_under_review_url": existing.get("notice_under_review_url"),
+                            },
+                            "new": {
+                                "cci_status":  new_status or None,
+                                "stage":       get_stage(new_status) if new_status else None,
+                                "decision_date": new_decision or None,
+                                # pdf_url filled in after fetch_detail_pdf_url below
+                            },
+                        }
 
                     try:
                         pdf_url = fetch_detail_pdf_url(page, detail_url)
                     except Exception as exc:
                         logger.exception("  Detail page error: %s", exc)
+                        collect_error(
+                            error_items,
+                            str(exc),
+                            step="fetch_detail_pdf_url",
+                            context={
+                                "combination_registration_no": reg_no,
+                                "detail_url": detail_url,
+                            },
+                        )
                         stats["errors"] += 1
                         continue
 
-                    changes_te: Optional[Dict[str, Any]] = None
-                    if status_changed_te:
-                        changes_te = {
-                            "old": {
-                                "cci_status":              old_status_te or None,
-                                "stage":                   existing_te.get("stage"),
-                                "decision_date":           old_decision_te or None,
-                                "notice_under_review_url": existing_te.get("notice_under_review_url"),
-                            },
-                            "new": {
-                                "cci_status":              new_status_te or None,
-                                "stage":                   get_stage(new_status_te) if new_status_te else None,
-                                "decision_date":           new_decision_te or None,
-                                "notice_under_review_url": pdf_url,
-                            },
-                        }
+                    # Fill in the new PDF URL now that we have it
+                    if changes is not None:
+                        changes["new"]["notice_under_review_url"] = pdf_url
 
-                    # Build a record merging existing DB data with fresh scraped values
-                    base = dict(existing_te) if existing_te else {}
-                    base.update({
-                        "combination_registration_no": reg_no,
-                        "notifying_parties": row.get("notifying_parties") or base.get("notifying_parties"),
-                        "form": row.get("form") or base.get("form"),
-                        "date_of_notification": row.get("date_of_notification") or base.get("date_of_notification"),
-                        "cci_status": new_status_te or None,
-                        "stage": get_stage(new_status_te) if new_status_te else base.get("stage"),
-                        "decision_date": new_decision_te or base.get("decision_date"),
-                        "notice_under_review_url": pdf_url,
-                        "detail_urls": {SOURCE_NOTICE_UNDER_REVIEW: detail_url},
-                    })
+                    is_new_record = existing is None
 
-                    event_type_te = "new" if is_new_te else "update"
-                    deal_match_te = None
-                    if existing_te and existing_te.get("deal_id"):
-                        deal_match_te = get_deal_by_id(str(existing_te["deal_id"]))
-
-                    _, html = build_cci_email_html(
-                        base,
-                        deal_match=deal_match_te,
-                        event_type=event_type_te,
-                        source_label="Notice Under Review",
-                        list_page_url=LIST_URL,
-                        changes=changes_te,
-                    )
-                    filepath = _save_test_email_html(reg_no, html)
-                    logger.info(
-                        "  [TEST-EMAIL] %s → %s",
-                        "status-update" if status_changed_te else "new-case",
-                        filepath,
-                    )
-                    stats["test_emails_saved"] += 1
-                    continue
-
-                now_iso = utc_now_iso()
-                existing = None
-                if collection is not None:
-                    existing = collection.find_one(
-                        {"combination_registration_no": reg_no}
-                    )
-                    log_cci_db_lookup(reg_no, existing, SOURCE_NOTICE_UNDER_REVIEW)
-
-                # Detect whether this is a first-time process, a status-change
-                # update, or a truly unchanged already-processed record.
-                changes = None
-                is_status_update = False
-                if existing and source_already_processed(existing, SOURCE_NOTICE_UNDER_REVIEW):
-                    old_status = (existing.get("cci_status") or "").strip()
-                    new_status = (row.get("cci_status") or "").strip()
-                    old_decision = (existing.get("decision_date") or "").strip()
-                    new_decision = (row.get("decision_date") or "").strip()
-
-                    if old_status == new_status and old_decision == new_decision:
-                        stats["skipped_processed"] += 1
+                    if dry_run:
+                        if is_status_update:
+                            action = "status-update"
+                        elif is_new_record:
+                            action = "insert"
+                        else:
+                            action = "update"
                         logger.info(
-                            "  Skip: already processed, status unchanged (%s)",
-                            old_status,
+                            "  [DRY-RUN] would %s — pdf=%s | changes=%s (no DB write, no LLM/email)",
+                            action, pdf_url, changes,
+                        )
+                        if is_new_record:
+                            stats["inserted"] += 1
+                        elif is_status_update:
+                            stats["status_updates"] += 1
+                        else:
+                            stats["updated"] += 1
+                        continue
+
+                    logger.info(
+                        "  Persisting to cci_cases (%s)...",
+                        "status-update" if is_status_update else ("insert" if is_new_record else "update"),
+                    )
+                    if is_new_record:
+                        doc = build_skeleton_doc(
+                            row,
+                            SOURCE_NOTICE_UNDER_REVIEW,
+                            detail_url,
+                            pdf_url,
+                            now_iso,
+                        )
+                        collection.insert_one(doc)
+                        stats["inserted"] += 1
+                        logger.info("  Inserted new case")
+                    else:
+                        update_fields = build_under_review_update_fields(
+                            row, detail_url, pdf_url, now_iso, existing
+                        )
+                        collection.update_one(
+                            {"combination_registration_no": reg_no},
+                            {"$set": update_fields},
+                        )
+                        if is_status_update:
+                            stats["status_updates"] += 1
+                            logger.info("  Updated existing case (status change)")
+                        else:
+                            stats["updated"] += 1
+                            logger.info("  Updated existing case (first time from this source)")
+
+                    record = collection.find_one(
+                        {"combination_registration_no": reg_no})
+                    if not record:
+                        logger.warning(
+                            "  Record missing after persist; skipping deal match / email (reg_no=%s)",
+                            reg_no,
                         )
                         continue
 
-                    # Something changed — re-process and send update email
-                    is_status_update = True
+                    logger.info("  Running deal match / email pipeline...")
+                    email_sent = process_deal_match_and_email(
+                        collection,
+                        record,
+                        is_new_record=is_new_record,
+                        error_items=error_items,
+                        source_label="Notice Under Review",
+                        list_page_url=LIST_URL,
+                        source_key=SOURCE_NOTICE_UNDER_REVIEW,
+                        changes=changes,
+                    )
                     logger.info(
-                        "  Status change detected: '%s' → '%s' | decision_date: '%s' → '%s'",
-                        old_status, new_status,
-                        old_decision, new_decision,
+                        "  Deal match / email pipeline finished (email_sent=%s)",
+                        email_sent,
                     )
-                    changes = {
-                        "old": {
-                            "cci_status":              old_status or None,
-                            "stage":                   existing.get("stage"),
-                            "decision_date":           old_decision or None,
-                            "notice_under_review_url": existing.get("notice_under_review_url"),
-                        },
-                        "new": {
-                            "cci_status":  new_status or None,
-                            "stage":       get_stage(new_status) if new_status else None,
-                            "decision_date": new_decision or None,
-                            # pdf_url filled in after fetch_detail_pdf_url below
-                        },
-                    }
-
-                try:
-                    pdf_url = fetch_detail_pdf_url(page, detail_url)
-                except Exception as exc:
-                    logger.exception("  Detail page error: %s", exc)
-                    collect_error(
-                        error_items,
-                        str(exc),
-                        step="fetch_detail_pdf_url",
-                        context={
-                            "combination_registration_no": reg_no,
-                            "detail_url": detail_url,
-                        },
-                    )
-                    stats["errors"] += 1
-                    continue
-
-                # Fill in the new PDF URL now that we have it
-                if changes is not None:
-                    changes["new"]["notice_under_review_url"] = pdf_url
-
-                is_new_record = existing is None
-
-                if dry_run:
-                    if is_status_update:
-                        action = "status-update"
-                    elif is_new_record:
-                        action = "insert"
+                    if email_sent:
+                        stats["emails_sent"] += 1
                     else:
-                        action = "update"
-                    logger.info(
-                        "  [DRY-RUN] would %s — pdf=%s | changes=%s (no DB write, no LLM/email)",
-                        action, pdf_url, changes,
-                    )
-                    if is_new_record:
-                        stats["inserted"] += 1
-                    elif is_status_update:
-                        stats["status_updates"] += 1
-                    else:
-                        stats["updated"] += 1
-                    continue
+                        stats["emails_not_sent"] += 1
 
-                logger.info(
-                    "  Persisting to cci_cases (%s)...",
-                    "status-update" if is_status_update else ("insert" if is_new_record else "update"),
-                )
-                if is_new_record:
-                    doc = build_skeleton_doc(
-                        row,
-                        SOURCE_NOTICE_UNDER_REVIEW,
-                        detail_url,
-                        pdf_url,
-                        now_iso,
-                    )
-                    collection.insert_one(doc)
-                    stats["inserted"] += 1
-                    logger.info("  Inserted new case")
-                else:
-                    update_fields = build_under_review_update_fields(
-                        row, detail_url, pdf_url, now_iso, existing
-                    )
-                    collection.update_one(
-                        {"combination_registration_no": reg_no},
-                        {"$set": update_fields},
-                    )
-                    if is_status_update:
-                        stats["status_updates"] += 1
-                        logger.info("  Updated existing case (status change)")
-                    else:
-                        stats["updated"] += 1
-                        logger.info("  Updated existing case (first time from this source)")
-
-                record = collection.find_one(
-                    {"combination_registration_no": reg_no})
-                if not record:
-                    logger.warning(
-                        "  Record missing after persist; skipping deal match / email (reg_no=%s)",
-                        reg_no,
-                    )
-                    continue
-
-                logger.info("  Running deal match / email pipeline...")
-                email_sent = process_deal_match_and_email(
-                    collection,
-                    record,
-                    is_new_record=is_new_record,
-                    error_items=error_items,
-                    source_label="Notice Under Review",
-                    list_page_url=LIST_URL,
-                    source_key=SOURCE_NOTICE_UNDER_REVIEW,
-                    changes=changes,
-                )
-                logger.info(
-                    "  Deal match / email pipeline finished (email_sent=%s)",
-                    email_sent,
-                )
-                if email_sent:
-                    stats["emails_sent"] += 1
-                else:
-                    stats["emails_not_sent"] += 1
-
-            browser.close()
+            finally:
+                close_cci_browser(browser)
 
     except Exception as exc:
         logger.exception("Unhandled error: %s", exc)

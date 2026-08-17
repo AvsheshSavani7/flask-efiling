@@ -67,6 +67,7 @@ from log_utils import today_ist_date_str
 import logging
 import os
 import sys
+import time
 
 # Make email_summeriser importable from this root context
 _EMAIL_SUMMARISER_DIR = os.path.join(
@@ -110,10 +111,14 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
 # --- Memory-safe background task infrastructure ---
 scraper_pool = ThreadPoolExecutor(max_workers=25)
 _running_tasks = {}
+_running_started = {}
+_running_tokens = {}
 _running_lock = Lock()
+# Hung Playwright/driver threads never finish; after this age a new submit is allowed.
+_STALE_TASK_SECONDS = int(os.getenv("SCRAPER_TASK_STALE_SECONDS", str(2 * 60 * 60)))
 
 
-def _run_and_cleanup(task_name, func):
+def _run_and_cleanup(task_name, func, token):
     """Wrapper that removes the task from the registry when done."""
     try:
         func()
@@ -121,7 +126,10 @@ def _run_and_cleanup(task_name, func):
         logger.exception(f"Background task '{task_name}' failed")
     finally:
         with _running_lock:
-            _running_tasks.pop(task_name, None)
+            if _running_tokens.get(task_name) is token:
+                _running_tasks.pop(task_name, None)
+                _running_started.pop(task_name, None)
+                _running_tokens.pop(task_name, None)
 
 
 def submit_unique_task(task_name, func, script_file=None):
@@ -131,10 +139,19 @@ def submit_unique_task(task_name, func, script_file=None):
     with _running_lock:
         future = _running_tasks.get(task_name)
         if future and not future.done():
-            label = f"{task_name} is already running"
-            if script_file:
-                label += f" (script={script_file})"
-            return False, label
+            started = _running_started.get(task_name)
+            age = (time.time() - started) if started else 0
+            if age < _STALE_TASK_SECONDS:
+                label = f"{task_name} is already running"
+                if script_file:
+                    label += f" (script={script_file})"
+                return False, label
+            logger.error(
+                "Task %s still marked running after %.0fs; treating as stale "
+                "and allowing restart",
+                task_name,
+                age,
+            )
         if script_file:
             logger.info("Worker pool submit | task=%s | script=%s",
                         task_name, script_file)
@@ -148,8 +165,11 @@ def submit_unique_task(task_name, func, script_file=None):
                 logger.info("Worker finished | task=%s | script=%s",
                             task_name, script_file)
 
-        future = scraper_pool.submit(_run_and_cleanup, task_name, job)
+        token = object()
+        future = scraper_pool.submit(_run_and_cleanup, task_name, job, token)
         _running_tasks[task_name] = future
+        _running_started[task_name] = time.time()
+        _running_tokens[task_name] = token
         msg = f"{task_name} started in background"
         if script_file:
             msg += f" (script={script_file})"
@@ -509,13 +529,20 @@ def fetch_dockets():
 def health_check():
     """Health check endpoint with active scraper visibility"""
     mongodb_status = "connected" if is_connected() else "disconnected"
+    now = time.time()
     with _running_lock:
         active = [k for k, v in _running_tasks.items() if not v.done()]
+        ages = {
+            k: int(now - _running_started[k])
+            for k in active
+            if k in _running_started
+        }
     return jsonify({
         "status": "healthy",
         "service": "Minnesota E-filing Scraper API",
         "mongodb": mongodb_status,
         "active_scrapers": active,
+        "active_scraper_ages_seconds": ages,
         "active_count": len(active),
         "pool_max_workers": scraper_pool._max_workers
     }), 200

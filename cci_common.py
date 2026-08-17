@@ -51,7 +51,44 @@ def attach_cci_common_logging(script_logger: logging.Logger) -> None:
     common.propagate = False
 
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=120.0)
+
+CCI_CHROMIUM_ARGS = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-dev-shm-usage",
+]
+CCI_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+CCI_LAUNCH_TIMEOUT_MS = 90_000
+CCI_DEFAULT_TIMEOUT_MS = 60_000
+CCI_MAX_LIST_PAGES = int(os.getenv("CCI_MAX_LIST_PAGES", "200"))
+
+
+def launch_cci_browser(playwright, headed: bool = False):
+    """Launch Chromium with bounded timeouts for CCI scrapers."""
+    browser = playwright.chromium.launch(
+        headless=not headed,
+        timeout=CCI_LAUNCH_TIMEOUT_MS,
+        args=CCI_CHROMIUM_ARGS,
+    )
+    context = browser.new_context(user_agent=CCI_USER_AGENT)
+    page = context.new_page()
+    page.set_default_timeout(CCI_DEFAULT_TIMEOUT_MS)
+    page.set_default_navigation_timeout(CCI_DEFAULT_TIMEOUT_MS)
+    return browser, context, page
+
+
+def close_cci_browser(browser) -> None:
+    if browser is None:
+        return
+    try:
+        browser.close()
+    except Exception:
+        logger.warning("CCI browser.close() failed", exc_info=True)
 
 MATCH_TEXT_LOG_MAX = 300
 
@@ -575,13 +612,22 @@ def paginate_cci_list(
     collection=None,
     source_key: str = "",
     single_page: bool = False,
+    max_pages: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Collect list rows within cutoff; update last_seen_at for every row on each page."""
     collected: List[Dict[str, Any]] = []
     page_num = 1
     now_iso = utc_now_iso()
+    prev_signature = None
+    page_limit = CCI_MAX_LIST_PAGES if max_pages is None else max_pages
 
     while True:
+        if page_num > page_limit:
+            logger.warning(
+                "Reached max list pages (%s); stopping pagination", page_limit
+            )
+            break
+
         wait_for_datatable_ready(page)
         html = page.content()
         rows = parse_fn(html)
@@ -589,6 +635,17 @@ def paginate_cci_list(
 
         if not rows:
             break
+
+        signature = tuple(
+            (r.get("combination_registration_no") or "") for r in rows[:5]
+        )
+        if page_num > 1 and signature and signature == prev_signature:
+            logger.warning(
+                "List page %s unchanged after Next click; stopping pagination",
+                page_num,
+            )
+            break
+        prev_signature = signature
 
         for row in rows:
             reg_no = row.get("combination_registration_no")
@@ -607,11 +664,24 @@ def paginate_cci_list(
             break
 
         next_li = page.locator("li#datatable_ajax_next")
-        classes = (next_li.get_attribute("class") or "").lower()
+        try:
+            classes = (next_li.get_attribute("class", timeout=10000) or "").lower()
+        except PlaywrightTimeoutError:
+            logger.warning(
+                "Next button not found on page %s; stopping pagination", page_num
+            )
+            break
         if "disabled" in classes:
             break
 
-        next_li.locator("a.page-link").click()
+        try:
+            next_li.locator("a.page-link").click(timeout=10000)
+        except PlaywrightTimeoutError:
+            logger.warning(
+                "Next page click timed out on page %s; stopping pagination",
+                page_num,
+            )
+            break
         page.wait_for_timeout(1500)
         page_num += 1
 
