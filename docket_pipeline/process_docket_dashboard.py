@@ -134,6 +134,22 @@ CANONICAL_NAMES = {
     "cox california telcom": "Cox California Telcom",
     "cox california telcom, llc": "Cox California Telcom",
     "liberty broadband": "Liberty Broadband",
+    # NJ-BPU — Commission
+    "new jersey board of public utilities": "New Jersey Board of Public Utilities",
+    "nj bpu": "New Jersey Board of Public Utilities",
+    "bpu staff": "New Jersey Board of Public Utilities",
+    "rate counsel": "NJ Division of Rate Counsel",
+    # NJ-BPU — Parties (SoftBank / DigitalBridge / Zayo variants)
+    "softbank": "SoftBank",
+    "softbank group": "SoftBank",
+    "softbank group corp.": "SoftBank",
+    "duncan holdco": "Duncan Holdco",
+    "duncan holdco llc": "Duncan Holdco",
+    "digitalbridge": "DigitalBridge",
+    "digitalbridge group": "DigitalBridge",
+    "digitalbridge group, inc.": "DigitalBridge",
+    "zayo group": "Zayo Group",
+    "zayo network services": "Zayo Group",
 }
 
 INTERVENOR_TYPE_OVERRIDES = {
@@ -167,6 +183,7 @@ JURISDICTION_BY_DASHBOARD_TYPE = {
     "ne-psc": "Nebraska Public Service Commission",
     "va-puc": "Virginia State Corporation Commission",
     "cpuc": "California Public Utilities Commission",
+    "nj-bpu": "New Jersey Board of Public Utilities",
 }
 
 CASE_NAME_BY_DASHBOARD_TYPE = {
@@ -177,6 +194,7 @@ CASE_NAME_BY_DASHBOARD_TYPE = {
     "ne-psc": "Nebraska Public Service Commission - NorthWestern / Black Hills Merger (NG-128)",
     "va-puc": "Virginia SCC - NextEra / Dominion Merger (147078d)",
     "cpuc": "CPUC - Charter / Cox Merger (A2507016)",
+    "nj-bpu": "NJ BPU - SoftBank / DigitalBridge / Zayo (TM26030047)",
 }
 
 

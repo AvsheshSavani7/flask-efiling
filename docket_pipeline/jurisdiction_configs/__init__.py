@@ -10,6 +10,7 @@ from .nm_prc import NM_PRC_CONFIG
 from .ne_psc import NE_PSC_CONFIG
 from .va_puc import VA_PUC_CONFIG
 from .cpuc import CPUC_CONFIG
+from .nj_bpu import NJ_BPU_CONFIG
 
 JURISDICTION_REGISTRY = {
     "stb": STB_CONFIG,
@@ -19,6 +20,7 @@ JURISDICTION_REGISTRY = {
     "ne-psc": NE_PSC_CONFIG,
     "va-puc": VA_PUC_CONFIG,
     "cpuc": CPUC_CONFIG,
+    "nj-bpu": NJ_BPU_CONFIG,
 }
 
 

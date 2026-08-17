@@ -969,7 +969,7 @@ def scrape_cpuc(
                         additional_info = metadata.get("additional_info", "")
                         doc_type_label = metadata.get("document_type", "")
                         subject = (
-                            f"{target_company_name} : CAPUC - {docket_number}"
+                            f"{target_company_name} : CA PUC - {docket_number}"
                             f": {additional_info} - {doc_type_label}"
                         )
                         send_docket_email(

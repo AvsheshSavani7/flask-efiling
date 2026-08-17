@@ -715,7 +715,7 @@ def scrape_nj_bpu(
                         additional_info = metadata.get("additional_info", "")
                         document_type = metadata.get("document_type", "")
                         subject = (
-                            f"{target_company_name} : NJBPU - {doc_docket_number}"
+                            f"{target_company_name} : NJ BPU - {doc_docket_number}"
                             f": {additional_info} - {document_type}"
                         )
                         send_docket_email(

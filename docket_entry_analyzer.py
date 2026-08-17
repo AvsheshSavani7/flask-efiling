@@ -122,12 +122,12 @@ DOCKET_TYPES_WITH_ENRICHMENT = frozenset({
     "ne-psc",
     "va-puc",
     "CPUC",
+    "nj-bpu",
 })
 
 # Restrict enrichment to specific docket numbers when a type has multiple dockets.
 _ENRICHMENT_DOCKET_NUMBERS: Dict[str, frozenset] = {
-    "CPUC": frozenset({"A2507016"}),
-}
+    "CPUC": frozenset({"A2507016"})}
 
 # Maps docket collection type → dashboard_docket_type for enrich_docket_entry
 _DOCKET_TO_DASHBOARD_TYPE: Dict[str, str] = {
@@ -139,6 +139,7 @@ _DOCKET_TO_DASHBOARD_TYPE: Dict[str, str] = {
     "ne-psc":                   "ne-psc",
     "va-puc":                   "va-puc",
     "CPUC":                     "CPUC",
+    "nj-bpu":                   "nj-bpu",
 }
 
 DOCKET_HISTORY_PROJECTION = {
