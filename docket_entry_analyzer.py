@@ -23,6 +23,7 @@ from pymongo import MongoClient
 from pymongo.errors import OperationFailure
 
 from log_utils import cleanup_old_logs, refresh_log_file
+from docket_pipeline.jurisdiction_configs import get_number_map
 
 ENV_FILE = ".env"
 COMPREHENSIVE_SUMMARY_MODEL = "gpt-5-mini-2025-08-07"
@@ -123,13 +124,12 @@ DOCKET_TYPES_WITH_ENRICHMENT = frozenset({
     "va-puc",
     "CPUC",
     "nj-bpu",
+    "fcc-ecfs",
 })
 
-# Restrict enrichment to specific docket numbers when a type has multiple dockets.
-_ENRICHMENT_DOCKET_NUMBERS: Dict[str, frozenset] = {
-    "CPUC": frozenset({"A2507016"})}
-
-# Maps docket collection type → dashboard_docket_type for enrich_docket_entry
+# Maps docket collection type → dashboard_docket_type for enrich_docket_entry.
+# Number-gated types with multiple configs (fcc-ecfs) resolve dashboard type
+# from ENRICHMENT_BY_NUMBER instead of this map.
 _DOCKET_TO_DASHBOARD_TYPE: Dict[str, str] = {
     "stb-document":             "stb",
     "stb-environmentalComment": "stb",
@@ -210,15 +210,29 @@ def _next_hash_id(entries: list) -> int:
 def _should_schedule_enrichment(docket_type: str, docket_number: str = "") -> bool:
     if docket_type not in DOCKET_TYPES_WITH_ENRICHMENT:
         return False
-    allowed_numbers = _ENRICHMENT_DOCKET_NUMBERS.get(docket_type)
-    if allowed_numbers is None:
+    gated = get_number_map(docket_type)
+    if gated is None:
         return True
-    return docket_number in allowed_numbers
+    return docket_number in gated
 
 
-def _schedule_docket_enrichment(record_id: str, docket_type: str) -> None:
+def _dashboard_type_for(docket_type: str, docket_number: str = "") -> str:
+    """Use per-number registry key when a type maps to multiple configs."""
+    gated = get_number_map(docket_type)
+    if gated:
+        distinct = set(gated.values())
+        if len(distinct) > 1:
+            return gated.get(docket_number) or _DOCKET_TO_DASHBOARD_TYPE.get(
+                docket_type, "stb"
+            )
+    return _DOCKET_TO_DASHBOARD_TYPE.get(docket_type, "stb")
+
+
+def _schedule_docket_enrichment(
+    record_id: str, docket_type: str, docket_number: str = ""
+) -> None:
     """Run enrichment in a background thread (does not block API response)."""
-    dashboard_type = _DOCKET_TO_DASHBOARD_TYPE.get(docket_type, "stb")
+    dashboard_type = _dashboard_type_for(docket_type, docket_number)
 
     def _run():
         try:
@@ -1259,7 +1273,9 @@ Be factual and concise. Focus on substantive content, not procedural details."""
             inserted_id = insert_result.inserted_id
             logger.info("✓ Saved entry to MongoDB _id=%s", inserted_id)
             if _should_schedule_enrichment(docket_type, docket_number):
-                _schedule_docket_enrichment(str(inserted_id), docket_type)
+                _schedule_docket_enrichment(
+                    str(inserted_id), docket_type, docket_number
+                )
                 enrichment_scheduled = True
             else:
                 logger.info(

@@ -37,7 +37,7 @@ except ImportError:
     ObjectId = None  # type: ignore
     MongoClient = None  # type: ignore
 
-from .jurisdiction_configs import get_config
+from .jurisdiction_configs import get_config, get_number_map
 from .jurisdiction_configs.base import JurisdictionConfig
 
 # ── Paths / env (same pattern as docket_entry_analyzer.py) ─────────────────────
@@ -89,8 +89,24 @@ _DOCKET_TYPE_TO_JURISDICTION: Dict[str, str] = {
 }
 
 
-def _get_config_for_docket_type(docket_type: str) -> "JurisdictionConfig":
-    """Resolve a MongoDB docket_type string to a JurisdictionConfig. Falls back to STB."""
+def _get_config_for_docket_type(
+    docket_type: str, docket_number: str = ""
+) -> "JurisdictionConfig":
+    """Resolve Mongo docket_type (+ optional number) to a JurisdictionConfig.
+
+    Number-gated types (ENRICHMENT_BY_NUMBER) require a listed docket_number
+    and never fall back to STB. Other types use the type-only map, STB default.
+    """
+    gated = get_number_map(docket_type)
+    if gated is not None:
+        key = gated.get((docket_number or "").strip())
+        if not key:
+            raise KeyError(
+                f"No jurisdiction config for docket_type={docket_type!r} "
+                f"docket_number={docket_number!r}. "
+                f"Listed numbers: {', '.join(sorted(gated))}"
+            )
+        return get_config(key)
     key = _DOCKET_TYPE_TO_JURISDICTION.get(
         (docket_type or "").strip().lower(), "stb"
     )
@@ -220,14 +236,14 @@ IMPORTANT:
 """
 
 
-def default_docket_number(docket_type: str) -> str:
-    return _get_config_for_docket_type(docket_type).docket_number
+def default_docket_number(docket_type: str, docket_number: str = "") -> str:
+    return _get_config_for_docket_type(docket_type, docket_number).docket_number
 
 
 def classify_filer_role_rule_based(
-    doc_type: str, by: str, docket_type: str = ""
+    doc_type: str, by: str, docket_type: str = "", docket_number: str = ""
 ) -> str:
-    config = _get_config_for_docket_type(docket_type)
+    config = _get_config_for_docket_type(docket_type, docket_number)
     doc_lower = (doc_type or "").lower()
     by_lower = (by or "").lower()
     if any(x in doc_lower for x in config.commission_doc_types):
@@ -379,13 +395,28 @@ def enrich(client: "anthropic.Anthropic", entry: dict, record_id: Optional[str] 
         date_str = date_raw.get("$date", "")
     else:
         date_str = str(date_raw)
-    docket_no = meta.get("docket_number") or default_docket_number(docket_type)
+    docket_no = (meta.get("docket_number") or "").strip()
+    if not docket_no:
+        try:
+            docket_no = default_docket_number(docket_type)
+        except KeyError:
+            docket_no = ""
     filename = meta.get("filename", "")
     decision_summary = meta.get("decision_summary", "")
 
     content_text, content_source = select_content(entry)
-    config = _get_config_for_docket_type(docket_type)
-    rule_role = classify_filer_role_rule_based(doc_type, by, docket_type)
+    try:
+        config = _get_config_for_docket_type(docket_type, docket_no)
+    except KeyError:
+        logger.error(
+            "No jurisdiction config for docket_type=%s docket_number=%s",
+            docket_type,
+            docket_no,
+        )
+        return None
+    rule_role = classify_filer_role_rule_based(
+        doc_type, by, docket_type, docket_no
+    )
     system_prompt = build_system_prompt(config)
 
     parts = [

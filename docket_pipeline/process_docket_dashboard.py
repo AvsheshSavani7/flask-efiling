@@ -150,6 +150,27 @@ CANONICAL_NAMES = {
     "digitalbridge group, inc.": "DigitalBridge",
     "zayo group": "Zayo Group",
     "zayo network services": "Zayo Group",
+    # FCC — Commission
+    "federal communications commission": "Federal Communications Commission",
+    "fcc": "Federal Communications Commission",
+    "fcc staff": "Federal Communications Commission",
+    "wireline competition bureau": "FCC Wireline Competition Bureau",
+    # FCC — Parties (Amazon / Globalstar)
+    "amazon": "Amazon",
+    "amazon.com": "Amazon",
+    "amazon.com, inc.": "Amazon",
+    "kuiper systems": "Amazon",
+    "amazon leo": "Amazon",
+    "globalstar": "Globalstar",
+    "globalstar, inc.": "Globalstar",
+    "globalstar inc": "Globalstar",
+    # FCC — Parties (WOW / Knology)
+    "wideopenwest": "WideOpenWest",
+    "wideopenwest, inc.": "WideOpenWest",
+    "wow parent": "WideOpenWest",
+    "knology": "Knology",
+    "knology of the valley": "Knology",
+    "valley telephone": "Valley Telephone",
 }
 
 INTERVENOR_TYPE_OVERRIDES = {
@@ -184,6 +205,9 @@ JURISDICTION_BY_DASHBOARD_TYPE = {
     "va-puc": "Virginia State Corporation Commission",
     "cpuc": "California Public Utilities Commission",
     "nj-bpu": "New Jersey Board of Public Utilities",
+    "fcc-gsat": "Federal Communications Commission",
+    "fcc-dbrg-zayo": "Federal Communications Commission",
+    "fcc-dbrg-wow": "Federal Communications Commission",
 }
 
 CASE_NAME_BY_DASHBOARD_TYPE = {
@@ -195,6 +219,9 @@ CASE_NAME_BY_DASHBOARD_TYPE = {
     "va-puc": "Virginia SCC - NextEra / Dominion Merger (147078d)",
     "cpuc": "CPUC - Charter / Cox Merger (A2507016)",
     "nj-bpu": "NJ BPU - SoftBank / DigitalBridge / Zayo (TM26030047)",
+    "fcc-gsat": "FCC - Amazon / Globalstar (26-134)",
+    "fcc-dbrg-zayo": "FCC - SoftBank / DigitalBridge / Zayo (26-56)",
+    "fcc-dbrg-wow": "FCC - SoftBank / DigitalBridge / WOW (26-40)",
 }
 
 
