@@ -73,6 +73,14 @@ MAX_RETRIES = 3
 REQUEST_TIMEOUT = 30    # seconds
 REQUEST_DELAY = 1.5     # seconds between HTTP requests (be polite)
 
+# gob.mx/Akamai 403s scraper UAs; curl-style UA returns the real payload.
+HTTP_HEADERS = {
+    "User-Agent": "curl/8.4.0",
+    "Accept": "*/*",
+}
+_http_session = requests.Session()
+_http_session.headers.update(HTTP_HEADERS)
+
 SESSION_EXCLUDE_KEYWORDS = ("extraordinaria", "excepcional")
 
 # Test-mode email — used with --test-email flag before going live
@@ -157,12 +165,7 @@ def fetch_html(url: str) -> Optional[str]:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             logger.info("  GET %s (attempt %d/%d)", url, attempt, MAX_RETRIES)
-            resp = requests.get(
-                url,
-                timeout=REQUEST_TIMEOUT,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (compatible; MexicoCNA-Scraper/1.0)"},
-            )
+            resp = _http_session.get(url, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
             return resp.text
         except Exception as exc:
