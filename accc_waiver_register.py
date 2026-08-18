@@ -93,7 +93,7 @@ ENV_PATH = ".env"
 
 # Waiver-specific list URL (filter by acquisition type = waiver, 50 items/page)
 LIST_URL = (
-    "https://www.accc.gov.au/public-registers/mergers-and-acquisitions-registers/"
+    "https://www.accc.gov.au/public-registers/acquisitions-and-mergers-registers/"
     "acquisitions-register"
     "?items_per_page=50&f%5B0%5D=acccgov_acquisition_type%3Aacccgov_acquisition_waiver"
 )
@@ -157,7 +157,7 @@ def parse_list_items(html_content: str) -> List[Dict[str, Any]]:
                 item["title"] = title_elem.get_text(strip=True)
 
             link_elem = row.select_one(
-                "a[href*='/public-registers/mergers-and-acquisitions-registers/acquisitions-register/']"
+                "a[href*='/acquisitions-register/']"
             )
             if link_elem and link_elem.get("href"):
                 href = link_elem["href"]

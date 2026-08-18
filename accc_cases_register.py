@@ -98,7 +98,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # Constants
 ENV_PATH = ".env"
 LIST_URL = (
-    "https://www.accc.gov.au/public-registers/mergers-and-acquisitions-registers/"
+    "https://www.accc.gov.au/public-registers/acquisitions-and-mergers-registers/"
     "acquisitions-register"
     "?f[0]=acccgov_merger_matter_status:under_assessment&items_per_page=50"
 )
@@ -151,7 +151,7 @@ def parse_list_items(html_content: str) -> List[Dict[str, Any]]:
 
             # Detail URL
             link_elem = row.select_one(
-                "a[href*='/public-registers/mergers-and-acquisitions-registers/acquisitions-register/']"
+                "a[href*='/acquisitions-register/']"
             )
             if link_elem and link_elem.get("href"):
                 href = link_elem["href"]
