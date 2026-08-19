@@ -56,7 +56,7 @@ def verify_country_relation(
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5.2",
+                model="gpt-5.6-terra",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
@@ -105,7 +105,7 @@ def verify_country_relation(
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5.2",
+                model="gpt-5.6-terra",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
@@ -151,7 +151,7 @@ def verify_country_relation(
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5.2",
+                model="gpt-5.6-terra",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
@@ -199,7 +199,7 @@ def verify_country_relation(
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5.2",
+                model="gpt-5.6-terra",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Return ONLY a JSON array of company names related to {country}."},
@@ -275,7 +275,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5.2",
+                model="gpt-5.6-terra",
                 messages=[
                     {
                         "role": "system",
@@ -320,7 +320,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5.2",
+                model="gpt-5.6-terra",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
@@ -368,7 +368,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5.2",
+                model="gpt-5.6-terra",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
@@ -418,7 +418,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5.2",
+                model="gpt-5.6-terra",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
@@ -464,7 +464,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5.2",
+                model="gpt-5.6-terra",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
@@ -508,7 +508,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5.2",
+                model="gpt-5.6-terra",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
@@ -555,7 +555,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5.2",
+                model="gpt-5.6-terra",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
@@ -599,7 +599,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5.2",
+                model="gpt-5.6-terra",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
@@ -650,7 +650,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5.2",
+                model="gpt-5.6-terra",
                 messages=[
                     {
                         "role": "system",
@@ -698,7 +698,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5.2",
+                model="gpt-5.6-terra",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},
@@ -739,7 +739,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5.2",
+                model="gpt-5.6-terra",
                 messages=[
                     {"role": "system",
                         "content": f"You are an expert analyst. Respond with only 'true' or 'false' (lowercase) to indicate if companies are related to {country}."},

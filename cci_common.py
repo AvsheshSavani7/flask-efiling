@@ -90,6 +90,7 @@ def close_cci_browser(browser) -> None:
     except Exception:
         logger.warning("CCI browser.close() failed", exc_info=True)
 
+
 MATCH_TEXT_LOG_MAX = 300
 
 
@@ -665,7 +666,8 @@ def paginate_cci_list(
 
         next_li = page.locator("li#datatable_ajax_next")
         try:
-            classes = (next_li.get_attribute("class", timeout=10000) or "").lower()
+            classes = (next_li.get_attribute(
+                "class", timeout=10000) or "").lower()
         except PlaywrightTimeoutError:
             logger.warning(
                 "Next button not found on page %s; stopping pagination", page_num
@@ -988,9 +990,10 @@ RESPONSE FORMAT:
 -If no deal satisfies this rule, respond exactly: None
 """
 
-        logger.info("%sCalling LLM for deal match (model=gpt-5.2)...", prefix)
+        logger.info(
+            "%sCalling LLM for deal match (model=gpt-5.6-terra)...", prefix)
         res = client.chat.completions.create(
-            model="gpt-5.2",
+            model="gpt-5.6-terra",
             messages=[
                 {
                     "role": "system",

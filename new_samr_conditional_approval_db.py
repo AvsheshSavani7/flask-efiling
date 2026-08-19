@@ -46,6 +46,7 @@ LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
+
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
     log_dir = os.path.join(base, SCRIPT_NAME)
@@ -464,7 +465,7 @@ RESPONSE:
 
     try:
         response = client.chat.completions.create(
-            model="gpt-5.2",
+            model="gpt-5.6-terra",
             messages=[
                 {"role": "system", "content": "You match M&A case records. Reply with 'Match: <ID>' or 'None'."},
                 {"role": "user", "content": prompt},
@@ -539,6 +540,7 @@ def match_samr_case_to_deals(samr_case) -> Tuple[Optional[dict], bool]:
     logger.warning(
         f"  Match returned deal_id '{deal_id}' but not found in loaded deals")
     return None, False
+
 
 def convert_datetime_to_string(obj):
     if isinstance(obj, datetime.datetime):
@@ -939,7 +941,8 @@ def process_record(record, samr_cases_list, error_items: list[dict[str, Any]] | 
         logger.info("  No deal_id on samr_case, trying LLM deal match...")
         logger.info(f"  samr_case title: {title_en} {title_cn}")
         try:
-            deal_match, matched_by_regex = match_samr_case_to_deals(matched_case)
+            deal_match, matched_by_regex = match_samr_case_to_deals(
+                matched_case)
         except Exception as e:
             logger.exception(f"  Deal match failed: {e}")
             if error_items is not None:
@@ -947,7 +950,8 @@ def process_record(record, samr_cases_list, error_items: list[dict[str, Any]] | 
                     error_items,
                     str(e),
                     step="match_samr_case_to_deals",
-                    context={"title": case_title[:80], "url": record.get("url", "")},
+                    context={"title": case_title[:80],
+                             "url": record.get("url", "")},
                 )
             deal_match = None
             matched_by_regex = False
@@ -990,7 +994,8 @@ def process_record(record, samr_cases_list, error_items: list[dict[str, Any]] | 
                         error_items,
                         str(e),
                         step="verify_usa_relation",
-                        context={"title": case_title[:80], "url": record.get("url", "")},
+                        context={
+                            "title": case_title[:80], "url": record.get("url", "")},
                     )
 
 
@@ -1126,7 +1131,8 @@ def main(headless=True):
                 title_en = record.get("title_en", "")
                 date_str = record.get("date", "")
 
-                logger.info(f"[{idx}/{len(new_records)}] {date_str} - {title_en[:70]}")
+                logger.info(
+                    f"[{idx}/{len(new_records)}] {date_str} - {title_en[:70]}")
 
                 if title_en == "[Translation failed]":
                     logger.info("  Skipped (translation failed)")
@@ -1138,7 +1144,8 @@ def main(headless=True):
                     })
                     continue
 
-                process_record(record, samr_cases_list, error_items=error_items)
+                process_record(record, samr_cases_list,
+                               error_items=error_items)
 
                 save_to_samr_conditional({
                     "url": record.get("url", ""),
@@ -1183,7 +1190,8 @@ def main(headless=True):
         logger.info(f"Total records extracted: {len(all_extracted_records)}")
         logger.info(f"New records processed: {len(new_records)}")
         logger.info(f"Total matches found: {len(matched_data)}")
-        elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
+        elapsed = round((datetime.datetime.now() -
+                        run_start).total_seconds(), 1)
         logger.info("=" * 60)
         logger.info("SUMMARY")
         logger.info(

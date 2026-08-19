@@ -277,7 +277,7 @@ RESPONSE FORMAT:
 """
     try:
         response = client.chat.completions.create(
-            model="gpt-5.2",
+            model="gpt-5.6-terra",
             messages=[
                 {"role": "system", "content": "You are an expert in M&A deal recognition. Return Match: DEAL_ID|COMPANY|target|acquirer or None."},
                 {"role": "user", "content": prompt},

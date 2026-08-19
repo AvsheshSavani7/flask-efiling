@@ -59,7 +59,7 @@ load_dotenv(".env")
 
 logger = logging.getLogger(__name__)
 
-MODEL = "gpt-5.2"
+MODEL = "gpt-5.6-terra"
 
 SYSTEM_MESSAGE = (
     "You are an expert M&A deal identifier and matcher. "
@@ -120,7 +120,7 @@ def format_deals_text(deals: list[dict[str, Any]]) -> str:
 # ---------------------------------------------------------------------------
 
 def call_llm(prompt: str, system_message: str = SYSTEM_MESSAGE) -> str:
-    """Call gpt-5.2 and return the raw stripped response string."""
+    """Call gpt-5.6-terra and return the raw stripped response string."""
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")

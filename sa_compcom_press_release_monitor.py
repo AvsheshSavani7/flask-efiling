@@ -60,7 +60,7 @@ REMOVED_STATUS = "removed from pending list"
 COMPLETED_STATUS = "completed"
 STATEMENT_TITLE_PREFIX = "statement on the latest decisions by the competition commission"
 TEST_RECIPIENT = "avshesh.savani@teqnodux.com"
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.2")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-terra")
 
 PERSISTENT_LOG_DIR = "/var/data/logs"
 SCRIPT_NAME = "sa_compcom_press_release_monitor"

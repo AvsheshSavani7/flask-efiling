@@ -518,9 +518,9 @@ def match_title_with_deals(title):
         deals=deals,
     )
 
+
 def find_deal_by_id(deal_id):
-    deal_by_id = {str(d.get("deal_id", ""))
-                      : d for d in deals if d.get("deal_id")}
+    deal_by_id = {str(d.get("deal_id", "")): d for d in deals if d.get("deal_id")}
     return deal_by_id.get(deal_id)
 
 
@@ -547,7 +547,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 """
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-5.2",
+            model="gpt-5.6-terra",
             messages=[
                 {
                     "role": "system",
@@ -796,7 +796,8 @@ def process_record(record, existing_urls, error_items: List[Dict[str, Any]]):
                 error_items,
                 str(e),
                 step="match_title_with_deals",
-                context={"title": case_record["title"][:80], "detail_url": detail_url},
+                context={"title": case_record["title"]
+                         [:80], "detail_url": detail_url},
             )
             deal_id = None
 
@@ -841,12 +842,14 @@ def process_record(record, existing_urls, error_items: List[Dict[str, Any]]):
                     error_items,
                     "Failed to send matched-case email",
                     step="send_email",
-                    context={"title": case_record["title"][:80], "detail_url": detail_url},
+                    context={
+                        "title": case_record["title"][:80], "detail_url": detail_url},
                 )
             print(f"STEP 1.5.8: Email sent: {subj}")
         else:
             if deal_id:
-                print(f"  ⚠️ Deal ID from LLM not found in deals list: {deal_id}")
+                print(
+                    f"  ⚠️ Deal ID from LLM not found in deals list: {deal_id}")
             print(f"  ➖ No deal match for: {case_record['title'][:60]}")
             try:
                 is_usa = verify_usa_relation(case_record["title"])
@@ -868,7 +871,8 @@ def process_record(record, existing_urls, error_items: List[Dict[str, Any]]):
                             error_items,
                             "Failed to send USA-related email",
                             step="send_email",
-                            context={"title": case_record["title"][:80], "detail_url": detail_url},
+                            context={
+                                "title": case_record["title"][:80], "detail_url": detail_url},
                         )
                     print(f"STEP 1.5.12: Email sent: {subj}")
                 else:
@@ -881,7 +885,8 @@ def process_record(record, existing_urls, error_items: List[Dict[str, Any]]):
                     error_items,
                     str(e),
                     step="verify_usa_relation",
-                    context={"title": case_record["title"][:80], "detail_url": detail_url},
+                    context={
+                        "title": case_record["title"][:80], "detail_url": detail_url},
                 )
 
         if not insert_uk_cma_case(case_record):
@@ -889,11 +894,13 @@ def process_record(record, existing_urls, error_items: List[Dict[str, Any]]):
                 error_items,
                 "Failed to insert case into uk_cma_cases",
                 step="insert_uk_cma_case",
-                context={"title": case_record["title"][:80], "detail_url": detail_url},
+                context={"title": case_record["title"]
+                         [:80], "detail_url": detail_url},
             )
             return None, match_type
 
-        print(f"STEP 1.5.14: Inserted into uk_cma_cases collection: {case_record}")
+        print(
+            f"STEP 1.5.14: Inserted into uk_cma_cases collection: {case_record}")
         return case_record, match_type
     except Exception as e:
         logger.exception(f"Error processing record: {e}")
@@ -968,7 +975,8 @@ def main():
             title = record.get("title", "N/A")
             print(f"\n[{idx}/{len(atom_records)}] {title[:70]}")
 
-            result, match_type = process_record(record, existing_urls, error_items)
+            result, match_type = process_record(
+                record, existing_urls, error_items)
             if result:
                 new_count += 1
                 existing_urls.add(record.get("url", ""))
@@ -997,16 +1005,21 @@ def main():
         print(f"STEP 1.6.2: New records processed: {new_count}")
         print(f"STEP 1.6.3: Skipped (already in DB): {skipped_count}")
         print(f"{'='*60}\n")
-        elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
+        elapsed = round((datetime.datetime.now() -
+                        run_start).total_seconds(), 1)
         logger.info("=" * 60)
         logger.info("SUMMARY")
         logger.info(
             f"STEP 1.6.4: Total feed entries           : {len(atom_records)}")
         logger.info(f"STEP 1.6.5: New records processed        : {new_count}")
-        logger.info(f"STEP 1.6.5a: LLM deal matches           : {llm_match_count}")
-        logger.info(f"STEP 1.6.5b: Regex fallback matches     : {regex_match_count}")
-        logger.info(f"STEP 1.6.6: Skipped                      : {skipped_count}")
-        logger.info(f"STEP 1.6.7: Errors encountered           : {len(error_items)}")
+        logger.info(
+            f"STEP 1.6.5a: LLM deal matches           : {llm_match_count}")
+        logger.info(
+            f"STEP 1.6.5b: Regex fallback matches     : {regex_match_count}")
+        logger.info(
+            f"STEP 1.6.6: Skipped                      : {skipped_count}")
+        logger.info(
+            f"STEP 1.6.7: Errors encountered           : {len(error_items)}")
         logger.info(f"STEP 1.6.8: Total time                   : {elapsed}s")
         logger.info("=" * 60)
 

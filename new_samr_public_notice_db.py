@@ -53,6 +53,7 @@ LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
+
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
     log_dir = os.path.join(base, SCRIPT_NAME)
@@ -436,6 +437,7 @@ def match_deal_with_llm(title_en, title_cn):
         source_label="the public notice title",
         deals=deals,
     )
+
 
 def convert_datetime_to_string(obj):
     """Recursively convert datetime objects to strings for JSON serialization."""
@@ -868,7 +870,8 @@ def main(headless=True):
                         logger.info(
                             f"  Regex fallback matched deal_id={matched_deal_id}")
                     else:
-                        logger.info("  No match (LLM + regex both returned None)")
+                        logger.info(
+                            "  No match (LLM + regex both returned None)")
 
                 if matched_deal_id:
                     deal_id = matched_deal_id
@@ -925,17 +928,20 @@ def main(headless=True):
                             try:
                                 send_unmatched_samr_email_via_webhook(record)
                             except Exception as e:
-                                logger.exception(f"  Error sending USA email: {e}")
+                                logger.exception(
+                                    f"  Error sending USA email: {e}")
                                 collect_error(
                                     error_items,
                                     str(e),
                                     step="send_email",
-                                    context={"title": title_en[:80], "url": url},
+                                    context={
+                                        "title": title_en[:80], "url": url},
                                 )
                         else:
                             logger.info("  Not USA-related - no action taken")
                     except Exception as e:
-                        logger.exception(f"  Error verifying USA relation: {e}")
+                        logger.exception(
+                            f"  Error verifying USA relation: {e}")
                         collect_error(
                             error_items,
                             str(e),
@@ -981,7 +987,8 @@ def main(headless=True):
         logger.info(f"Total records extracted: {len(all_extracted_records)}")
         logger.info(f"New records processed: {len(new_records)}")
         logger.info(f"Total matches found: {len(matched_data)}")
-        elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
+        elapsed = round((datetime.datetime.now() -
+                        run_start).total_seconds(), 1)
         logger.info("=" * 60)
         logger.info("SUMMARY")
         logger.info(

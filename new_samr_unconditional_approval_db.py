@@ -44,6 +44,7 @@ LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
+
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
     log_dir = os.path.join(base, SCRIPT_NAME)
@@ -552,7 +553,7 @@ RESPONSE:
 
     try:
         response = client.chat.completions.create(
-            model="gpt-5.2",
+            model="gpt-5.6-terra",
             messages=[
                 {"role": "system", "content": "You match M&A case records. Reply with 'Match: <ID>' or 'None'."},
                 {"role": "user", "content": prompt},
@@ -623,6 +624,7 @@ def match_samr_case_to_deals(samr_case) -> Tuple[Optional[dict], bool]:
     logger.warning(
         f"  Match returned deal_id '{deal_id}' but not found in loaded deals")
     return None, False
+
 
 def convert_datetime_to_string(obj):
     if isinstance(obj, datetime.datetime):
@@ -970,7 +972,8 @@ def process_table_row(table_row, samr_cases_list, listing_record, error_items: l
     }
 
     try:
-        matched_case = match_table_row_to_samr_cases(table_row, samr_cases_list)
+        matched_case = match_table_row_to_samr_cases(
+            table_row, samr_cases_list)
     except Exception as e:
         logger.exception(f"  samr_cases match failed for {row_label}: {e}")
         if error_items is not None:
@@ -1025,7 +1028,8 @@ def process_table_row(table_row, samr_cases_list, listing_record, error_items: l
         # Case B: no deal_id → try LLM deal matching
         logger.info("  No deal_id on samr_case, trying LLM deal match...")
         try:
-            deal_match, matched_by_regex = match_samr_case_to_deals(matched_case)
+            deal_match, matched_by_regex = match_samr_case_to_deals(
+                matched_case)
         except Exception as e:
             logger.exception(f"  Deal match failed for {row_label}: {e}")
             if error_items is not None:
@@ -1249,7 +1253,8 @@ def main(headless=True):
                         continue
 
                     if title_en == "[Translation failed]":
-                        logger.info("  Skipped detail page (translation failed)")
+                        logger.info(
+                            "  Skipped detail page (translation failed)")
                         save_to_samr_unconditional({
                             "url": detail_url,
                             "title_cn": listing_record.get("title_cn", ""),
@@ -1313,7 +1318,8 @@ def main(headless=True):
             f"Total listing records extracted: {len(all_extracted_records)}")
         logger.info(f"New listings processed: {len(new_records)}")
         logger.info(f"Total matches found: {len(matched_data)}")
-        elapsed = round((datetime.datetime.now() - run_start).total_seconds(), 1)
+        elapsed = round((datetime.datetime.now() -
+                        run_start).total_seconds(), 1)
         logger.info("=" * 60)
         logger.info("SUMMARY")
         logger.info(

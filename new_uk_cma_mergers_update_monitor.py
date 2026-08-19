@@ -1,3 +1,4 @@
+from deal_match_regex import regex_match_uk_cma_deal
 from dotenv import load_dotenv
 import datetime
 import os
@@ -35,6 +36,7 @@ LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(2 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
 BASE_URL = os.getenv("BASE_URL")
+
 
 def _get_log_file() -> str:
     base = PERSISTENT_LOG_DIR if os.path.isdir("/var/data") else "."
@@ -459,9 +461,9 @@ def match_title_with_deals(title):
         deals=deals,
     )
 
+
 def find_deal_by_id(deal_id):
-    deal_by_id = {str(d.get("deal_id", ""))
-                      : d for d in deals if d.get("deal_id")}
+    deal_by_id = {str(d.get("deal_id", ""))                  : d for d in deals if d.get("deal_id")}
     return deal_by_id.get(deal_id)
 
 
@@ -469,7 +471,6 @@ def find_deal_by_id(deal_id):
 # Regex fallback deal matching (UK CMA)
 # — shared function imported from the scraper; deals passed explicitly
 # ===================================================================
-from deal_match_regex import regex_match_uk_cma_deal
 
 
 # ===================================================================
@@ -495,7 +496,7 @@ Respond with ONLY one word: "true" or "false" (lowercase, no quotes, no explanat
 """
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-5.2",
+            model="gpt-5.6-terra",
             messages=[
                 {
                     "role": "system",
@@ -868,12 +869,14 @@ def process_case(db_record, error_items: List[Dict[str, Any]], match_stats: Opti
                 if match_stats is not None:
                     match_stats["llm"] += 1
             else:
-                matched_deal_id = regex_match_uk_cma_deal(case_info["title"], deals)
+                matched_deal_id = regex_match_uk_cma_deal(
+                    case_info["title"], deals)
                 if matched_deal_id:
                     matched_by_regex = True
                     if match_stats is not None:
                         match_stats["regex"] += 1
-                    print(f"  🔍 Regex fallback matched deal_id={matched_deal_id}")
+                    print(
+                        f"  🔍 Regex fallback matched deal_id={matched_deal_id}")
                 else:
                     print(f"  ➖ No match (LLM + regex both returned None)")
 
@@ -1039,7 +1042,8 @@ def main():
             title = case.get("title", "N/A")
             print(f"\n[{idx}/{len(open_cases)}] {title[:70]}")
 
-            had_changes = process_case(case, error_items, match_stats=match_stats)
+            had_changes = process_case(
+                case, error_items, match_stats=match_stats)
             print(f"STEP 1.5.3: Had changes: {had_changes}")
             if had_changes:
                 updated_count += 1
