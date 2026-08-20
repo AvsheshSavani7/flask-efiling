@@ -128,7 +128,6 @@ def call_llm(prompt: str, system_message: str = SYSTEM_MESSAGE) -> str:
     client = OpenAI(api_key=api_key)
     res = client.chat.completions.create(
         model=MODEL,
-        temperature=0,
         messages=[
             {"role": "system", "content": system_message},
             {"role": "user", "content": prompt},
