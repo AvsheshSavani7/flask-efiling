@@ -38,6 +38,7 @@ from ftc_cases_scraper import run_ftc_cases_scraper
 from nz_comcom_case_register_to_db import run as nz_comcom_case_register_to_db_run
 from turkey_rekabet_cases_to_db import run as turkey_rekabet_cases_run
 from jftc_cases_register import run as jftc_cases_register_run
+from kftc_cases_register import run as kftc_cases_register_run
 from mexico_cna_scraper import run_mexico_cna_scraper
 from mexico_cna_update_monitor import run_mexico_cna_update_monitor
 from canada_cases_register import run_canada_cases_register
@@ -2465,6 +2466,66 @@ def new_jftc_cases_register_endpoint():
         }), 500
 
 
+@app.route('/new-kftc-cases-register', methods=['GET'])
+def new_kftc_cases_register_endpoint():
+    """
+    Scrape KFTC Korea English press releases and save new records into the
+    'korea_cases' MongoDB collection (dedupe by detail_url). Runs merger gate,
+    then LLM + regex deal matching, USA check, and email alerts.
+    Process runs in background.
+
+    Query params:
+        test_email (bool): if true, emails go only to avshesh.savani@teqnodux.com
+                           via send_direct_email (N8N_WEBHOOK_ONLY_ME).
+        backfill (bool): if true, fetch pageUnit=50 on page 1 instead of 30.
+    """
+    try:
+        test_email = request.args.get(
+            "test_email", "false").lower() in ("true", "1", "yes")
+        backfill = request.args.get(
+            "backfill", "false").lower() in ("true", "1", "yes")
+
+        def run_register():
+            try:
+                logger.info(
+                    "Starting KFTC Korea cases register in background "
+                    f"(test_email={test_email}, backfill={backfill})"
+                )
+                kftc_cases_register_run(
+                    test_mode=test_email, backfill=backfill)
+                logger.info(
+                    "✅ KFTC Korea cases register completed successfully")
+            except Exception as e:
+                logger.exception("Error in KFTC Korea cases register")
+
+        task_name = (
+            "kftc-cases-register-test-email" if test_email
+            else "kftc-cases-register"
+        )
+        if backfill:
+            task_name += "-backfill"
+        submitted, msg = submit_unique_task(task_name, run_register)
+        if not submitted:
+            return jsonify({
+                "success": False, "error": msg, "status": "already_running"
+            }), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running",
+            "test_email": test_email,
+            "backfill": backfill,
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting KFTC Korea cases register: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 @app.route('/new-nz-cases-update-monitor', methods=['GET'])
 def new_nz_cases_update_monitor_endpoint():
     """
@@ -3076,6 +3137,7 @@ KNOWN_LOG_SCRIPTS = {
     "cpuc_scraper",
     "turkey_rekabet_cases",
     "jftc_cases_register",
+    "kftc_cases_register",
     "mexico_cna_scraper",
     "mexico_cna_update_monitor",
     "comesa_cases_register",

@@ -4,7 +4,7 @@ deal_match_regex.py — Shared regex fallback deal-matching engine.
 Two matching strategies:
 
   1. regex_match_split_orient — titles with a left/right separator (ACCC, FTC, UK CMA, SA CompCom)
-  2. regex_match_flat_scan   — flat party lists with no reliable split (CADE, BKA, Canada, NZ, EC, FS, SAMR, JFTC)
+  2. regex_match_flat_scan   — flat party lists with no reliable split (CADE, BKA, Canada, NZ, EC, FS, SAMR, JFTC, KFTC)
 
 Regulator wrappers handle title parsing; core logic lives here.
 
@@ -97,6 +97,13 @@ JFTC_SUFFIXES = re.compile(
     r"holdings|group|co|company|nv|ag|se|gmbh|sa|s\.a|s\.a\.|"
     r"kk|k\.k|kabushiki|kaisha|godo|yugen|yk|"
     r"trust|fund|partners|foundation|pbc|pty)\b",
+    re.IGNORECASE,
+)
+
+KFTC_SUFFIXES = re.compile(
+    r"\b(inc|incorporated|corp|corporation|plc|llc|lp|l\.p|ltd|limited|"
+    r"holdings|group|co|company|nv|ag|se|gmbh|sa|s\.a|s\.a\.|"
+    r"kk|k\.k|trust|fund|partners|foundation|pbc|pty)\b",
     re.IGNORECASE,
 )
 
@@ -472,6 +479,14 @@ def regex_match_jftc_deal(
     )
 
 
+def regex_match_kftc_deal(
+    title: str,
+    deals: List[Dict[str, Any]],
+) -> Optional[str]:
+    """KFTC press release: English title (flat scan; both sides must hit)."""
+    return regex_match_flat_scan(title, deals, suffixes=KFTC_SUFFIXES)
+
+
 # Aliases for test scripts
 def _normalise_accc(t): return normalise_company_name(t, ACCC_SUFFIXES)
 def _normalise_cade(t): return normalise_company_name(t, CADE_SUFFIXES)
@@ -481,3 +496,4 @@ def _normalise_fs(t): return normalise_company_name(t, EC_SUFFIXES)
 def _normalise_samr(t): return normalise_company_name(t, SAMR_SUFFIXES)
 def _normalise_sa(t): return normalise_company_name(t, SA_SUFFIXES)
 def _normalise_jftc(t): return normalise_company_name(_fold_jftc_text(t), JFTC_SUFFIXES)
+def _normalise_kftc(t): return normalise_company_name(t, KFTC_SUFFIXES)

@@ -17,6 +17,7 @@ Collections queried:
   german_cases      – German Bundeskartellamt
   sa_compcom_cases  – South Africa CompCom
   japan_cases       – Japan JFTC press releases
+  korea_cases       – Korea KFTC press releases
   samr_cases        – China SAMR (public notices)       ← processed_at string
   samr_unconditional– China SAMR (unconditional)        ← processed_at string
   samr_conditional  – China SAMR (conditional)          ← processed_at string
@@ -63,6 +64,7 @@ STRING_DATE_SOURCES = [
     {"key": "german", "collection": "german_cases"},
     {"key": "sa_compcom", "collection": "sa_compcom_cases"},
     {"key": "jftc", "collection": "japan_cases"},
+    {"key": "kftc", "collection": "korea_cases"},
 ]
 
 # Collections where created_at / updated_at are stored as BSON Date objects
