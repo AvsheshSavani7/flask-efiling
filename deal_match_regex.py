@@ -4,7 +4,7 @@ deal_match_regex.py — Shared regex fallback deal-matching engine.
 Two matching strategies:
 
   1. regex_match_split_orient — titles with a left/right separator (ACCC, FTC, UK CMA, SA CompCom)
-  2. regex_match_flat_scan   — flat party lists with no reliable split (CADE, BKA, Canada, NZ, EC, FS, SAMR)
+  2. regex_match_flat_scan   — flat party lists with no reliable split (CADE, BKA, Canada, NZ, EC, FS, SAMR, JFTC)
 
 Regulator wrappers handle title parsing; core logic lives here.
 
@@ -88,6 +88,14 @@ SAMR_SUFFIXES = re.compile(
 TURKEY_SUFFIXES = re.compile(
     r"\b(a\.?ş|anonim|şirketi|limited|ltd|inc|incorporated|corp|corporation|"
     r"plc|llc|lp|l\.p|holdings|group|co|company|nv|ag|se|gmbh|sa|s\.a|"
+    r"trust|fund|partners|foundation|pbc|pty)\b",
+    re.IGNORECASE,
+)
+
+JFTC_SUFFIXES = re.compile(
+    r"\b(inc|incorporated|corp|corporation|plc|llc|lp|l\.p|ltd|limited|"
+    r"holdings|group|co|company|nv|ag|se|gmbh|sa|s\.a|s\.a\.|"
+    r"kk|k\.k|kabushiki|kaisha|godo|yugen|yk|"
     r"trust|fund|partners|foundation|pbc|pty)\b",
     re.IGNORECASE,
 )
@@ -447,6 +455,23 @@ def regex_match_bwb_deal(
     return regex_match_flat_scan(parties_en, deals, suffixes=DEFAULT_SUFFIXES)
 
 
+def _fold_jftc_text(text: str) -> str:
+    """Convert fullwidth punctuation used in older JFTC titles to ASCII."""
+    if not text:
+        return text
+    return text.replace("．", ".").replace("，", ",").replace("、", ",")
+
+
+def regex_match_jftc_deal(
+    title: str,
+    deals: List[Dict[str, Any]],
+) -> Optional[str]:
+    """JFTC press release: English title (flat scan; both sides must hit)."""
+    return regex_match_flat_scan(
+        _fold_jftc_text(title), deals, suffixes=JFTC_SUFFIXES
+    )
+
+
 # Aliases for test scripts
 def _normalise_accc(t): return normalise_company_name(t, ACCC_SUFFIXES)
 def _normalise_cade(t): return normalise_company_name(t, CADE_SUFFIXES)
@@ -455,3 +480,4 @@ def _normalise_ec(t): return normalise_company_name(t, EC_SUFFIXES)
 def _normalise_fs(t): return normalise_company_name(t, EC_SUFFIXES)
 def _normalise_samr(t): return normalise_company_name(t, SAMR_SUFFIXES)
 def _normalise_sa(t): return normalise_company_name(t, SA_SUFFIXES)
+def _normalise_jftc(t): return normalise_company_name(_fold_jftc_text(t), JFTC_SUFFIXES)

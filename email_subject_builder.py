@@ -41,6 +41,7 @@ AGENCY_NAMES: dict[str, str] = {
     "comesa":             "COMESA Competition Commission",
     "bwb":                "Austrian BWB",
     "sa_compcom":         "South Africa CompCom",
+    "jftc":               "JFTC Japan",
 }
 
 # ---------------------------------------------------------------------------
