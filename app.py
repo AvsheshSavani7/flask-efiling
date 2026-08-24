@@ -41,6 +41,7 @@ from jftc_cases_register import run as jftc_cases_register_run
 from kftc_cases_register import run as kftc_cases_register_run
 from mexico_cna_scraper import run_mexico_cna_scraper
 from mexico_cna_update_monitor import run_mexico_cna_update_monitor
+from chile_fne_cases_register import run_chile_fne_cases_register
 from canada_cases_register import run_canada_cases_register
 from canada_cases_update_monitor import process_canada_cases_updates
 from comesa_cases_register import run_comesa_cases_register
@@ -3140,6 +3141,7 @@ KNOWN_LOG_SCRIPTS = {
     "kftc_cases_register",
     "mexico_cna_scraper",
     "mexico_cna_update_monitor",
+    "chile_fne_cases_register",
     "comesa_cases_register",
     "comesa_cases_update_monitor",
     "sa_compcom_cases_register",
@@ -3421,6 +3423,57 @@ def mexico_cna_scraper_endpoint():
 
     except Exception as e:
         logger.error(f"Error starting Mexico CNA scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/chile-fne-scraper', methods=['GET'])
+def chile_fne_scraper_endpoint():
+    """
+    Scrape Chile FNE merger filings, match cases with deals,
+    and store results in the 'chili_cases' collection.
+    Process runs in background - returns immediately.
+
+    Query parameters:
+        backfill: string (optional, "true" or "false", default: "false")
+                  When true, fetches up to 5 pages instead of 1.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        backfill = request.args.get(
+            'backfill', 'false').lower() in ('true', '1', 'yes')
+
+        def run_scraper():
+            try:
+                logger.info(
+                    f"Starting Chile FNE scraper in background (backfill={backfill})")
+                run_chile_fne_cases_register(backfill=backfill)
+                logger.info("Chile FNE scraper completed successfully.")
+            except Exception as e:
+                logger.exception("Error in background Chile FNE scraper")
+
+        task_name = "chile-fne-scraper-backfill" if backfill else "chile-fne-scraper"
+        submitted, msg = submit_unique_task(task_name, run_scraper)
+        if not submitted:
+            return jsonify({"success": False, "error": msg, "status": "already_running"}), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running",
+            "backfill": backfill,
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting Chile FNE scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)

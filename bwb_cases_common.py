@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from html import unescape
@@ -20,6 +21,8 @@ BASE_URL = "https://www.bwb.gv.at"
 COLLECTION_NAME = "bwb_cases"
 CLOSED_STATUSES = frozenset({"Fristablauf", "Prüfungsverzicht"})
 TRANSLATION_FAILED_MARKER = "[Translation failed]"
+TRANSLATE_MAX_ATTEMPTS = 3
+TRANSLATE_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 logger = logging.getLogger(__name__)
 
@@ -101,22 +104,87 @@ def translate_to_english(text: str) -> str:
     if not text or not text.strip():
         return ""
     text = text.strip()
-    try:
-        url = "https://translate.googleapis.com/translate_a/single"
-        params = {"client": "gtx", "sl": "de", "tl": "en", "dt": "t", "q": text}
-        response = requests.get(url, params=params, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            segments = data[0] if data and isinstance(data[0], list) else []
-            parts = [
-                seg[0].strip()
-                for seg in segments
-                if isinstance(seg, (list, tuple)) and seg and seg[0]
-            ]
-            if parts:
-                return " ".join(parts).strip()
-    except Exception as e:
-        logger.warning("Translation failed for %s... → %s", text[:50], e)
+    url = "https://translate.googleapis.com/translate_a/single"
+    params = {"client": "gtx", "sl": "de", "tl": "en", "dt": "t", "q": text}
+    last_status = None
+    last_snippet = ""
+
+    for attempt in range(1, TRANSLATE_MAX_ATTEMPTS + 1):
+        try:
+            response = requests.get(url, params=params, timeout=30)
+            last_status = response.status_code
+            last_snippet = (response.text or "").replace("\n", " ")[:200]
+            if response.status_code == 200:
+                data = response.json()
+                segments = data[0] if data and isinstance(data[0], list) else []
+                parts = [
+                    seg[0].strip()
+                    for seg in segments
+                    if isinstance(seg, (list, tuple)) and seg and seg[0]
+                ]
+                if parts:
+                    return " ".join(parts).strip()
+                logger.warning(
+                    "Translation empty parse for %s... status=%s body=%s",
+                    text[:50],
+                    last_status,
+                    last_snippet,
+                )
+                return TRANSLATION_FAILED_MARKER
+            can_retry = (
+                response.status_code in TRANSLATE_RETRY_STATUSES
+                and attempt < TRANSLATE_MAX_ATTEMPTS
+            )
+            if can_retry:
+                wait_s = 2 ** attempt
+                logger.warning(
+                    "Translation HTTP %s for %s... (attempt %s/%s); "
+                    "retrying in %ss. body=%s",
+                    response.status_code,
+                    text[:50],
+                    attempt,
+                    TRANSLATE_MAX_ATTEMPTS,
+                    wait_s,
+                    last_snippet,
+                )
+                time.sleep(wait_s)
+                continue
+            logger.warning(
+                "Translation failed for %s... status=%s body=%s",
+                text[:50],
+                last_status,
+                last_snippet,
+            )
+            return TRANSLATION_FAILED_MARKER
+        except Exception as e:
+            if attempt < TRANSLATE_MAX_ATTEMPTS:
+                wait_s = 2 ** attempt
+                logger.warning(
+                    "Translation error for %s... → %s (attempt %s/%s); "
+                    "retrying in %ss",
+                    text[:50],
+                    e,
+                    attempt,
+                    TRANSLATE_MAX_ATTEMPTS,
+                    wait_s,
+                )
+                time.sleep(wait_s)
+                continue
+            logger.warning(
+                "Translation failed for %s... status=%s body=%s → %s",
+                text[:50],
+                last_status,
+                last_snippet,
+                e,
+            )
+            return TRANSLATION_FAILED_MARKER
+
+    logger.warning(
+        "Translation failed for %s... status=%s body=%s",
+        text[:50],
+        last_status,
+        last_snippet,
+    )
     return TRANSLATION_FAILED_MARKER
 
 

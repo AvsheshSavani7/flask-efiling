@@ -107,6 +107,14 @@ KFTC_SUFFIXES = re.compile(
     re.IGNORECASE,
 )
 
+CHILE_SUFFIXES = re.compile(
+    r"\b(spa|s\.?\s*p\.?\s*a\.?|limitada|ltda|s\.?\s*a\.?|eirl|"
+    r"inc|incorporated|corp|corporation|plc|llc|lp|l\.p|ltd|limited|"
+    r"holdings|group|co|company|nv|ag|se|gmbh|"
+    r"trust|fund|partners|foundation|pbc|pty)\b",
+    re.IGNORECASE,
+)
+
 # ---------------------------------------------------------------------------
 # Title separators (split-orient wrappers)
 # ---------------------------------------------------------------------------
@@ -485,6 +493,14 @@ def regex_match_kftc_deal(
 ) -> Optional[str]:
     """KFTC press release: English title (flat scan; both sides must hit)."""
     return regex_match_flat_scan(title, deals, suffixes=KFTC_SUFFIXES)
+
+
+def regex_match_chile_deal(
+    title_en: str,
+    deals: List[Dict[str, Any]],
+) -> Optional[str]:
+    """Chile FNE: English title (flat scan; both sides must hit)."""
+    return regex_match_flat_scan(title_en, deals, suffixes=CHILE_SUFFIXES)
 
 
 # Aliases for test scripts

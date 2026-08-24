@@ -617,13 +617,19 @@ def process_bwb_cases_updates(headless: Optional[bool] = None) -> None:
                             context={"file_number": file_number},
                         )
                 except BwbWorkflowError as e:
-                    logger.error("Workflow stopped: %s", e)
                     collect_error(
                         error_items,
                         str(e),
                         step=e.step,
                         context=e.context,
                     )
+                    if e.step == "translate":
+                        logger.error(
+                            "Translation failed for this case; skipping: %s",
+                            e,
+                        )
+                        continue
+                    logger.error("Workflow stopped: %s", e)
                     raise
                 except Exception as e:
                     logger.exception("Error processing case #%d: %s", idx, e)
