@@ -7,24 +7,24 @@ from __future__ import annotations
 import logging
 import os
 import re
-import time
 from contextlib import contextmanager
 from datetime import datetime
 from html import unescape
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
-import requests
 from bs4 import BeautifulSoup
+from openai import OpenAI
 
 BASE_URL = "https://www.bwb.gv.at"
 COLLECTION_NAME = "bwb_cases"
 CLOSED_STATUSES = frozenset({"Fristablauf", "Prüfungsverzicht"})
 TRANSLATION_FAILED_MARKER = "[Translation failed]"
-TRANSLATE_MAX_ATTEMPTS = 3
-TRANSLATE_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+TRANSLATE_MODEL = "gpt-5.2"
+TRANSLATE_MAX_CHARS = 12000
 
 logger = logging.getLogger(__name__)
+_openai_client: Optional[OpenAI] = None
 
 
 class BwbWorkflowError(Exception):
@@ -100,92 +100,69 @@ def determine_is_open(status: str) -> bool:
     return (status or "").strip() not in CLOSED_STATUSES
 
 
+def _get_openai_client() -> OpenAI:
+    global _openai_client
+    if _openai_client is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise BwbWorkflowError(
+                "OPENAI_API_KEY is not set",
+                step="openai_config",
+            )
+        _openai_client = OpenAI(api_key=api_key)
+    return _openai_client
+
+
 def translate_to_english(text: str) -> str:
-    if not text or not text.strip():
+    """Translate German BWB text to English via OpenAI (Chile FNE approach)."""
+    if not text or not isinstance(text, str) or not text.strip():
         return ""
     text = text.strip()
-    url = "https://translate.googleapis.com/translate_a/single"
-    params = {"client": "gtx", "sl": "de", "tl": "en", "dt": "t", "q": text}
-    last_status = None
-    last_snippet = ""
+    to_translate = text
+    if len(to_translate) > TRANSLATE_MAX_CHARS:
+        logger.warning(
+            "Translation input truncated from %d to %d chars",
+            len(to_translate),
+            TRANSLATE_MAX_CHARS,
+        )
+        to_translate = to_translate[:TRANSLATE_MAX_CHARS]
 
-    for attempt in range(1, TRANSLATE_MAX_ATTEMPTS + 1):
-        try:
-            response = requests.get(url, params=params, timeout=30)
-            last_status = response.status_code
-            last_snippet = (response.text or "").replace("\n", " ")[:200]
-            if response.status_code == 200:
-                data = response.json()
-                segments = data[0] if data and isinstance(data[0], list) else []
-                parts = [
-                    seg[0].strip()
-                    for seg in segments
-                    if isinstance(seg, (list, tuple)) and seg and seg[0]
-                ]
-                if parts:
-                    return " ".join(parts).strip()
-                logger.warning(
-                    "Translation empty parse for %s... status=%s body=%s",
-                    text[:50],
-                    last_status,
-                    last_snippet,
-                )
-                return TRANSLATION_FAILED_MARKER
-            can_retry = (
-                response.status_code in TRANSLATE_RETRY_STATUSES
-                and attempt < TRANSLATE_MAX_ATTEMPTS
-            )
-            if can_retry:
-                wait_s = 2 ** attempt
-                logger.warning(
-                    "Translation HTTP %s for %s... (attempt %s/%s); "
-                    "retrying in %ss. body=%s",
-                    response.status_code,
-                    text[:50],
-                    attempt,
-                    TRANSLATE_MAX_ATTEMPTS,
-                    wait_s,
-                    last_snippet,
-                )
-                time.sleep(wait_s)
-                continue
-            logger.warning(
-                "Translation failed for %s... status=%s body=%s",
-                text[:50],
-                last_status,
-                last_snippet,
-            )
-            return TRANSLATION_FAILED_MARKER
-        except Exception as e:
-            if attempt < TRANSLATE_MAX_ATTEMPTS:
-                wait_s = 2 ** attempt
-                logger.warning(
-                    "Translation error for %s... → %s (attempt %s/%s); "
-                    "retrying in %ss",
-                    text[:50],
-                    e,
-                    attempt,
-                    TRANSLATE_MAX_ATTEMPTS,
-                    wait_s,
-                )
-                time.sleep(wait_s)
-                continue
-            logger.warning(
-                "Translation failed for %s... status=%s body=%s → %s",
-                text[:50],
-                last_status,
-                last_snippet,
-                e,
-            )
-            return TRANSLATION_FAILED_MARKER
-
-    logger.warning(
-        "Translation failed for %s... status=%s body=%s",
-        text[:50],
-        last_status,
-        last_snippet,
+    response = _get_openai_client().chat.completions.create(
+        model=TRANSLATE_MODEL,
+        temperature=0,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a professional German-to-English translator for Austrian BWB "
+                    "(Bundeswettbewerbsbehörde) merger-control filings.\n"
+                    "Rules:\n"
+                    "1. Return ONLY the translated English text.\n"
+                    "2. Use well-known official English company names where possible.\n"
+                    "3. Do NOT explain or add alternatives.\n"
+                    "4. Preserve legal and regulatory meaning "
+                    "(status, deadlines, merger description).\n"
+                    "5. Keep file numbers, dates, and legal citations intact."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Translate this BWB German merger-control text to English:\n"
+                    f"{to_translate}"
+                ),
+            },
+        ],
     )
-    return TRANSLATION_FAILED_MARKER
+    translated = (response.choices[0].message.content or "").strip()
+    if translated:
+        logger.info(
+            "Translated OK (OpenAI %s): %.120s",
+            TRANSLATE_MODEL,
+            translated,
+        )
+        return translated
+    raise RuntimeError("OpenAI translation returned empty text")
 
 
 def translate_to_english_required(
@@ -194,8 +171,31 @@ def translate_to_english_required(
     field: str,
     file_number: str,
 ) -> str:
-    """Translate German text; raise BwbWorkflowError on failure."""
-    result = translate_to_english(text)
+    """Translate German text via GPT. On failure, raise so the case is skipped."""
+    source = (text or "").strip()
+    if not source:
+        return ""
+    try:
+        result = translate_to_english(source)
+    except BwbWorkflowError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Translation failed for field '%s' (file_number=%s): %s",
+            field,
+            file_number,
+            exc,
+        )
+        raise BwbWorkflowError(
+            f"Translation failed for field '{field}' (file_number={file_number}): {exc}",
+            step="translate",
+            context={
+                "file_number": file_number,
+                "field": field,
+                "source_text_snippet": source[:300],
+                "error_detail": str(exc),
+            },
+        ) from exc
     if not result or result.strip() == TRANSLATION_FAILED_MARKER:
         raise BwbWorkflowError(
             f"Translation failed for field '{field}' (file_number={file_number})",
@@ -203,7 +203,7 @@ def translate_to_english_required(
             context={
                 "file_number": file_number,
                 "field": field,
-                "source_text_snippet": (text or "")[:300],
+                "source_text_snippet": source[:300],
             },
         )
     return result
