@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from openai import OpenAI
 
 from mongodb_connection import (
     get_database,
@@ -43,8 +44,11 @@ BASE_URL = "https://www.rekabet.gov.tr"
 LISTING_URL = f"{BASE_URL}/tr/SonKurulKararlari"
 MA_DECISION_TYPE = "Birleşme ve Devralma"
 MAX_PAGES = 10
+TRANSLATE_MODEL = "gpt-5.2"
+TRANSLATE_MAX_CHARS = 12000
 
 logger, get_log_file = ensure_script_logger(SCRIPT_NAME)
+_openai_client: Optional[OpenAI] = None
 
 FETCH_HEADERS = {
     "User-Agent": (
@@ -119,30 +123,147 @@ def _extract_after_colon(cell_text: str) -> str:
     return cell_text.strip()
 
 
+class TurkeyTranslateError(Exception):
+    """Per-record translation failure — skip insert so the case stays new."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        field: str,
+        decision_number: str,
+        source_text: str = "",
+        error_detail: str = "",
+    ):
+        super().__init__(message)
+        self.field = field
+        self.decision_number = decision_number
+        self.source_text = source_text
+        self.error_detail = error_detail
+
+
+def _get_openai_client() -> OpenAI:
+    global _openai_client
+    if _openai_client is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set")
+        _openai_client = OpenAI(api_key=api_key)
+    return _openai_client
+
+
 def translate_tr_to_en(text: str) -> str:
-    """Translate Turkish text to English via Google Translate (free endpoint)."""
-    if not text or not text.strip():
+    """Translate Turkish Rekabet text to English via OpenAI."""
+    if not text or not isinstance(text, str) or not text.strip():
         return ""
-    try:
-        resp = requests.get(
-            "https://translate.googleapis.com/translate_a/single",
-            params={"client": "gtx", "sl": "tr",
-                    "tl": "en", "dt": "t", "q": text.strip()},
-            timeout=15,
+    text = text.strip()
+    to_translate = text
+    if len(to_translate) > TRANSLATE_MAX_CHARS:
+        logger.warning(
+            "Translation input truncated from %d to %d chars",
+            len(to_translate),
+            TRANSLATE_MAX_CHARS,
         )
-        if resp.status_code == 200:
-            data = resp.json()
-            segments = data[0] if data and isinstance(data[0], list) else []
-            parts = [
-                seg[0].strip()
-                for seg in segments
-                if isinstance(seg, (list, tuple)) and seg and seg[0]
-            ]
-            if parts:
-                return " ".join(parts).strip()
-    except Exception as e:
-        logger.warning(f"Translation failed: {text[:60]}... → {e}")
-    return "[Translation failed]"
+        to_translate = to_translate[:TRANSLATE_MAX_CHARS]
+
+    response = _get_openai_client().chat.completions.create(
+        model=TRANSLATE_MODEL,
+        temperature=0,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a professional Turkish-to-English translator for Turkey "
+                    "Rekabet Kurumu merger-control decisions.\n"
+                    "Rules:\n"
+                    "1. Return ONLY the translated English text.\n"
+                    "2. Use well-known official English company names where possible.\n"
+                    "3. Do NOT explain or add alternatives.\n"
+                    "4. Preserve legal and regulatory meaning "
+                    "(decision type, merger description).\n"
+                    "5. Keep decision numbers, dates, and legal citations intact."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Translate this Turkey Rekabet Turkish decision text to English:\n"
+                    f"{to_translate}"
+                ),
+            },
+        ],
+    )
+    translated = (response.choices[0].message.content or "").strip()
+    if translated:
+        return translated
+    raise RuntimeError("OpenAI translation returned empty text")
+
+
+def translate_tr_to_en_required(
+    text: str,
+    *,
+    field: str,
+    decision_number: str,
+) -> str:
+    """Translate Turkish text via GPT. On failure, raise so the case is skipped."""
+    source = (text or "").strip()
+    if not source:
+        logger.info(
+            "  [%s] TRANSLATE %s IN: (empty) — skipping GPT",
+            decision_number,
+            field,
+        )
+        return ""
+    logger.info(
+        "  [%s] TRANSLATE %s IN (%d chars): %s",
+        decision_number,
+        field,
+        len(source),
+        source,
+    )
+    try:
+        result = translate_tr_to_en(source)
+    except TurkeyTranslateError:
+        raise
+    except RuntimeError as exc:
+        if "OPENAI_API_KEY" in str(exc):
+            raise
+        raise TurkeyTranslateError(
+            f"Translation failed for field '{field}' (decision_number={decision_number}): {exc}",
+            field=field,
+            decision_number=decision_number,
+            source_text=source[:300],
+            error_detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        logger.warning(
+            "Translation failed for field '%s' (decision_number=%s): %s",
+            field,
+            decision_number,
+            exc,
+        )
+        raise TurkeyTranslateError(
+            f"Translation failed for field '{field}' (decision_number={decision_number}): {exc}",
+            field=field,
+            decision_number=decision_number,
+            source_text=source[:300],
+            error_detail=str(exc),
+        ) from exc
+    if not result:
+        raise TurkeyTranslateError(
+            f"Translation failed for field '{field}' (decision_number={decision_number})",
+            field=field,
+            decision_number=decision_number,
+            source_text=source[:300],
+        )
+    logger.info(
+        "  [%s] TRANSLATE %s OUT (%d chars): %s",
+        decision_number,
+        field,
+        len(result),
+        result,
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -429,19 +550,71 @@ def run():
                     continue
 
                 all_already_in_db = False
-                logger.info(f"  {dn} — new, processing...")
+                logger.info("=" * 50)
+                logger.info("  %s — NEW RECORD", dn)
+                logger.info("    decision_date     : %s (%s)",
+                            record.get("decision_date"),
+                            record.get("decision_date_iso"))
+                logger.info("    decision_type     : %s",
+                            record.get("decision_type"))
+                logger.info("    detail_url        : %s",
+                            record.get("detail_url"))
+                logger.info("    record_uuid       : %s",
+                            record.get("record_uuid"))
+                logger.info("    title_tr          : %s",
+                            record.get("title_tr"))
+                logger.info("    description_tr    : %s",
+                            record.get("description_tr"))
 
                 # --- Translate ---
-                record["title_en"] = translate_tr_to_en(record["title_tr"])
-                record["description_en"] = translate_tr_to_en(
-                    record["description_tr"])
-                record["decision_type_en"] = translate_tr_to_en(
-                    record["decision_type"])
-                time.sleep(0.4)
+                try:
+                    record["title_en"] = translate_tr_to_en_required(
+                        record["title_tr"],
+                        field="title_tr",
+                        decision_number=dn,
+                    )
+                    record["description_en"] = translate_tr_to_en_required(
+                        record["description_tr"],
+                        field="description_tr",
+                        decision_number=dn,
+                    )
+                    record["decision_type_en"] = translate_tr_to_en_required(
+                        record["decision_type"],
+                        field="decision_type",
+                        decision_number=dn,
+                    )
+                except TurkeyTranslateError as e:
+                    logger.error(
+                        "  Translation failed for %s; skipping insert: %s",
+                        dn,
+                        e,
+                    )
+                    collect_error(
+                        error_items,
+                        str(e),
+                        step="translate",
+                        case_number=dn,
+                        context={
+                            "decision_number": dn,
+                            "field": e.field,
+                            "source_text_snippet": e.source_text,
+                            "error_detail": e.error_detail,
+                        },
+                    )
+                    continue
+
+                logger.info("  [%s] TRANSLATE DONE", dn)
+                logger.info("    title_en          : %s", record.get("title_en"))
+                logger.info("    description_en    : %s",
+                            record.get("description_en"))
+                logger.info("    decision_type_en  : %s",
+                            record.get("decision_type_en"))
 
                 # --- LLM deal match ---
                 deal_id: Optional[str] = None
                 matched_by_regex = False
+                logger.info("  [%s] DEAL MATCH IN title_en=%s",
+                            dn, (record.get("title_en") or "")[:200])
                 try:
                     deal_id = llm_match_deal_id(
                         regulator_name="Turkey Rekabet Kurumu",
@@ -462,17 +635,19 @@ def run():
 
                 if deal_id:
                     stats["llm_matched"] += 1
-                    logger.info(f"  LLM matched deal_id={deal_id}")
+                    logger.info("  [%s] DEAL MATCH OUT llm deal_id=%s", dn, deal_id)
                 else:
                     # --- Regex fallback ---
                     combined_en = f"{record['title_en']} {record['description_en']}"
+                    logger.info("  [%s] DEAL MATCH llm miss — trying regex", dn)
                     deal_id = regex_match_turkey_deal(combined_en, deals)
                     if deal_id:
                         matched_by_regex = True
                         stats["regex_matched"] += 1
-                        logger.info(f"  Regex matched deal_id={deal_id}")
+                        logger.info(
+                            "  [%s] DEAL MATCH OUT regex deal_id=%s", dn, deal_id)
                     else:
-                        logger.info(f"  No deal match (LLM + regex)")
+                        logger.info("  [%s] DEAL MATCH OUT none (LLM + regex)", dn)
 
                 if deal_id:
                     record["deal_id"] = deal_id
@@ -509,8 +684,15 @@ def run():
                             "decision_number": dn,
                         }
                         try:
+                            logger.info(
+                                "  [%s] USA CHECK IN title_en=%s",
+                                dn,
+                                (record.get("title_en") or "")[:200],
+                            )
                             usa = bool(verify_usa_relation(
                                 usa_details, case_type="TURKEY"))
+                            logger.info(
+                                "  [%s] USA CHECK OUT usa_related=%s", dn, usa)
                         except Exception as e:
                             logger.warning(f"  USA check error: {e}")
                             usa = False
@@ -545,7 +727,12 @@ def run():
                     ok = insert_turkey_case(collection, record)
                     if ok:
                         stats["inserted"] += 1
-                        logger.info(f"  Inserted {dn} into turkey_cases")
+                        logger.info(
+                            "  [%s] INSERTED into turkey_cases deal_id=%s url=%s",
+                            dn,
+                            record.get("deal_id") or "-",
+                            record.get("detail_url"),
+                        )
                     else:
                         collect_error(
                             error_items, "DB insert returned False",
