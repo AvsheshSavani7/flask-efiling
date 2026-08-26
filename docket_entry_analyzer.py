@@ -2,7 +2,7 @@
 """
 Docket Entry Analyzer
 =====================
-Analyzes docket entries with tier 1, tier 2, and tier 3 summaries.
+Analyzes docket entries with tier 1 and tier 2 summaries.
 If entry already exists in database, skips it and returns skip status.
 Otherwise generates new analysis using all historical summaries and adds to database.
 Only returns new entries that are analyzed and added to the database.
@@ -31,7 +31,6 @@ COMPREHENSIVE_SUMMARY_MODEL = "gpt-5-mini-2025-08-07"
 ASSISTANTS_API_MODEL = "gpt-4o-mini"
 TIER1_MODEL = "claude-haiku-4-5-20251001"
 TIER2_MODEL = "claude-sonnet-5"
-TIER3_MODEL = "claude-sonnet-4-6"
 # Haiku Tier1 is ~200k context; summarize via OpenAI file upload when estimate exceeds this.
 TIER1_MAX_ESTIMATED_TOKENS = 200_000
 
@@ -547,7 +546,7 @@ def analyze_docket_entry(
         test_mode: Whether to run in test mode
         test_mode:
     Returns:
-        Dictionary containing analysis results with tier1, tier2 and tier3 responses
+        Dictionary containing analysis results with tier1 and tier2 responses
     """
     global LOG_FILE
 
@@ -1009,86 +1008,7 @@ Be specific and cite entry numbers when referencing prior events."""
                 "metadata": entry_metadata
             }
 
-    tier3_prompt = f"""You are a senior legal analyst providing risk assessment for an M&A transaction regulatory review.
-
-    Always prioritize procedural and legal consequences over rhetorical intensity or the mere volume of comments when assessing risk. Focus on filings and orders that actually change the regulatory posture, timing, or available remedies.
-
-
-    COMPLETE DOCKET HISTORY (Entries 1-{next_entry_number}):
-    {historical_context}
-
-    MOST RECENT ENTRY (#{next_entry_number}):
-    {tier2_response}
-
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    Based on ALL evidence from Entry #1 through #{next_entry_number}, provide comprehensive risk assessment:
-
-    1. DEAL CHALLENGE RISK SCORE (0-100):
-
-    Score: [X]
-
-    Where:
-    • 0-30: Limited opposition, mostly procedural concerns, deal structure sound
-    • 31-60: Multiple substantive intervenors, significant concerns but deal viable with conditions
-    • 61-100: Widespread strong opposition, fundamental public interest concerns, approval unlikely
-
-    Reasoning (4-5 sentences):
-    Ground this score in filings and actions that create concrete legal or procedural exposure,
-    such as complaints, enforcement activity, adverse staff recommendations, motions directed
-    at blocking or conditioning the deal, formal opposition from enforcement agencies or
-    state regulators, or clear signals of potential litigation. Do not inflate the score based
-    solely on the volume or emotional intensity of public comments or political rhetoric unless
-    they have already produced identifiable procedural consequences (e.g., expanded discovery,
-    new hearings, schedule changes). Cite specific entries by number to support your score.
-
-    2. TIMING RISK SCORE (0-100):
-
-    Score: [X]
-
-    Where:
-    • 0-30: Standard review timeline, few intervenors, proceeding smoothly
-    • 31-60: Contested case, multiple intervenors, 6-12 month timeline
-    • 61-100: Highly contested, procedural disputes, likely 12+ month delay
-
-    Reasoning (4-5 sentences):
-    Ground this score in events that directly affect timing, such as schedule changes,
-    extensions of statutory deadlines, motions for more time, expanded discovery,
-    additional hearing days, or procedural complications that make timely resolution
-    unlikely. Do not infer high timing risk solely from controversy or public interest;
-    tie it to actual orders, motions, or procedural bottlenecks in the docket.
-    Cite specific entries by number to support your score.
-
-    3. KEY RISK FACTORS 
-    List the 3-5 most significant risk factors that have emerged, focusing on those that
-    realistically affect (i) probability of deal challenge or litigation, (ii) likelihood or
-    severity of remedies/conditions, and (iii) timing of closing.
-
-    4. TRAJECTORY ASSESSMENT (3-4 sentences): 
-    Looking at the arc from Entry #1 to #{next_entry_number}, explain whether the deal is
-        strengthening or weakening from a regulatory risk perspective. Identify the key
-        inflection points where the posture meaningfully changed (e.g., major enforcement
-        filings, significant political interventions with procedural consequences, schedule
-        changes, or major commitments by the parties), and cite those entries by number.
-
-CRITICAL: You must provide numerical scores (0-100) for both risks. Be decisive and ground all assessments in specific entries from the docket history."""
-
-    tier3_message = client.messages.create(
-        model=TIER3_MODEL,
-        max_tokens=2000,
-        temperature=0.2,
-        messages=[{"role": "user", "content": tier3_prompt}]
-    )
-    logger.info("Tier 3 prompt: %s", tier3_prompt)
-    logger.info("Tier 3 response: %s", tier3_message)
-
-    tier3_response = tier3_message.content[0].text
-    tier3_input_tokens = tier3_message.usage.input_tokens
-    tier3_output_tokens = tier3_message.usage.output_tokens
-    tier3_cost = _estimate_cost(
-        tier3_input_tokens, tier3_output_tokens, TIER3_MODEL)
-
-    # Tier1 uses Haiku (~200k). Tier2/Tier3 stay unchanged.
+    # Tier1 uses Haiku (~200k). Tier2 stays unchanged.
     # Prefer an existing Tier2-fallback comprehensive summary when present.
     # Otherwise, if estimated tokens exceed the limit, generate one via OpenAI
     # file upload for Tier1 only — then store/return it as comprehensive_summary.
@@ -1221,7 +1141,7 @@ Be factual and concise. Focus on substantive content, not procedural details."""
         tier1_input_tokens, tier1_output_tokens, TIER1_MODEL)
 
     # Calculate total cost including comprehensive summary if generated
-    total_cost = tier1_cost + tier2_cost + tier3_cost
+    total_cost = tier1_cost + tier2_cost
     if comprehensive_summary_data:
         total_cost += comprehensive_summary_data["cost"]
 
@@ -1246,14 +1166,6 @@ Be factual and concise. Focus on substantive content, not procedural details."""
                 "output": tier2_output_tokens
             },
             "cost": tier2_cost
-        },
-        "tier3_risk_assessment": {
-            "response": tier3_response,
-            "tokens": {
-                "input": tier3_input_tokens,
-                "output": tier3_output_tokens
-            },
-            "cost": tier3_cost
         },
         "total_analysis_cost": total_cost,
         "created_at": datetime.now().isoformat(),
@@ -1316,14 +1228,6 @@ Be factual and concise. Focus on substantive content, not procedural details."""
                 "output": tier2_output_tokens
             },
             "cost": tier2_cost
-        },
-        "tier3_risk_assessment": {
-            "response": tier3_response,
-            "tokens": {
-                "input": tier3_input_tokens,
-                "output": tier3_output_tokens
-            },
-            "cost": tier3_cost
         },
         "total_cost": total_cost,
         "comprehensive_summary": comprehensive_summary_out,
