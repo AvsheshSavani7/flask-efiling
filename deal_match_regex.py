@@ -115,6 +115,14 @@ CHILE_SUFFIXES = re.compile(
     re.IGNORECASE,
 )
 
+TAIWAN_SUFFIXES = re.compile(
+    r"(股份有限公司|有限公司|株式會社|株式会社|"
+    r"\b(inc|incorporated|corp|corporation|plc|llc|lp|l\.p|ltd|limited|"
+    r"holdings|group|co|company|nv|ag|se|gmbh|sa|s\.a|pte|"
+    r"trust|fund|partners|foundation|pbc|pty)\b)",
+    re.IGNORECASE,
+)
+
 # ---------------------------------------------------------------------------
 # Title separators (split-orient wrappers)
 # ---------------------------------------------------------------------------
@@ -503,6 +511,14 @@ def regex_match_chile_deal(
     return regex_match_flat_scan(title_en, deals, suffixes=CHILE_SUFFIXES)
 
 
+def regex_match_taiwan_deal(
+    title_en: str,
+    deals: List[Dict[str, Any]],
+) -> Optional[str]:
+    """Taiwan FTC: English topic title (flat scan; both sides must hit)."""
+    return regex_match_flat_scan(title_en, deals, suffixes=TAIWAN_SUFFIXES)
+
+
 # Aliases for test scripts
 def _normalise_accc(t): return normalise_company_name(t, ACCC_SUFFIXES)
 def _normalise_cade(t): return normalise_company_name(t, CADE_SUFFIXES)
@@ -513,3 +529,4 @@ def _normalise_samr(t): return normalise_company_name(t, SAMR_SUFFIXES)
 def _normalise_sa(t): return normalise_company_name(t, SA_SUFFIXES)
 def _normalise_jftc(t): return normalise_company_name(_fold_jftc_text(t), JFTC_SUFFIXES)
 def _normalise_kftc(t): return normalise_company_name(t, KFTC_SUFFIXES)
+def _normalise_taiwan(t): return normalise_company_name(t, TAIWAN_SUFFIXES)
