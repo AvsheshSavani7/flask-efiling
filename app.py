@@ -43,6 +43,7 @@ from mexico_cna_scraper import run_mexico_cna_scraper
 from mexico_cna_update_monitor import run_mexico_cna_update_monitor
 from chile_fne_cases_register import run_chile_fne_cases_register
 from taiwan_ftc_cases_register import run_taiwan_ftc_cases_register
+from taiwan_ftc_update_monitor import run_taiwan_ftc_update_monitor
 from canada_cases_register import run_canada_cases_register
 from canada_cases_update_monitor import process_canada_cases_updates
 from comesa_cases_register import run_comesa_cases_register
@@ -3144,6 +3145,7 @@ KNOWN_LOG_SCRIPTS = {
     "mexico_cna_update_monitor",
     "chile_fne_cases_register",
     "taiwan_ftc_cases_register",
+    "taiwan_ftc_update_monitor",
     "comesa_cases_register",
     "comesa_cases_update_monitor",
     "sa_compcom_cases_register",
@@ -3533,6 +3535,64 @@ def taiwan_ftc_scraper_endpoint():
 
     except Exception as e:
         logger.error(f"Error starting Taiwan FTC scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/taiwan-ftc-update-monitor', methods=['GET'])
+def taiwan_ftc_update_monitor_endpoint():
+    """
+    Monitor Taiwan FTC merger news, link to open taiwan_cases, close matched cases,
+    and store processed news in taiwan_update.
+    Process runs in background - returns immediately.
+
+    Query parameters:
+        backfill: string (optional, "true" or "false", default: "false")
+                  When true, fetches up to 2 pages instead of 1 (test email only).
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        backfill = request.args.get(
+            'backfill', 'false').lower() in ('true', '1', 'yes')
+
+        def run_monitor():
+            try:
+                logger.info(
+                    f"Starting Taiwan FTC update monitor (backfill={backfill})")
+                run_taiwan_ftc_update_monitor(backfill=backfill)
+                logger.info("Taiwan FTC update monitor completed successfully.")
+            except Exception as e:
+                logger.exception("Error in background Taiwan FTC update monitor")
+
+        task_name = (
+            "taiwan-ftc-update-monitor-backfill"
+            if backfill else "taiwan-ftc-update-monitor"
+        )
+        submitted, msg = submit_unique_task(task_name, run_monitor)
+        if not submitted:
+            return jsonify({
+                "success": False,
+                "error": msg,
+                "status": "already_running",
+            }), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running",
+            "backfill": backfill,
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting Taiwan FTC update monitor: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)

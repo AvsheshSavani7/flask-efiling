@@ -1050,6 +1050,7 @@ def process_record(
         "summary": record.get("summary"),
         "deal_id": matched_deal_id,
         "match_type": match_type,
+        "is_open": True,
         "created_at": now,
         "updated_at": now,
     }
