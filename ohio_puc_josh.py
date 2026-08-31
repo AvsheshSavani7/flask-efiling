@@ -161,7 +161,12 @@ def _session_id(proxy: dict | None) -> str:
 
 def _is_waf_error(exc: Exception) -> bool:
     msg = str(exc)
-    return "WAF rejected" in msg or "F5 challenge" in msg
+    return any(k in msg for k in (
+        "WAF rejected", "WAF blocked", "F5 challenge",
+        "ERR_TIMED_OUT",
+        "navigating and changing the content",
+        "ms exceeded",  # Playwright: "Timeout 30000ms exceeded."
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -197,9 +202,26 @@ def create_browser(playwright_instance, proxy: dict | None = None):
     return context, user_data_dir
 
 
+def _safe_content(page: Page, timeout: float = 15) -> str:
+    """page.content() that retries while F5 is still redirecting the document."""
+    deadline = time.time() + timeout
+    last_err: Exception | None = None
+    while time.time() < deadline:
+        try:
+            return page.content()
+        except Exception as e:
+            if "navigating" not in str(e).lower():
+                raise
+            last_err = e
+            time.sleep(0.5)
+    if last_err:
+        raise last_err
+    return page.content()
+
+
 def _wait_for_challenge(page: Page, timeout: float = 15):
     """If the page shows an F5 JS challenge, wait for it to resolve."""
-    content = page.content()
+    content = _safe_content(page)
     if "bobcmn" not in content:
         return content
 
@@ -207,13 +229,13 @@ def _wait_for_challenge(page: Page, timeout: float = 15):
     deadline = time.time() + timeout
     while time.time() < deadline:
         time.sleep(2)
-        content = page.content()
+        content = _safe_content(page)
         if "bobcmn" not in content:
             return content
 
     page.reload(wait_until="networkidle", timeout=30_000)
     time.sleep(3)
-    return page.content()
+    return _safe_content(page)
 
 
 def navigate(page: Page, url: str, wait_seconds: float = 3, max_retries: int = 5) -> str:
@@ -296,6 +318,46 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
 # ---------------------------------------------------------------------------
 # Docket extraction helpers
 # ---------------------------------------------------------------------------
+
+def wait_for_case_record(page: Page, timeout: float = 45_000) -> None:
+    """Wait until the CaseRecord page has rendered. Does not parse entries.
+
+    Raises RuntimeError containing 'F5 challenge' if the document never
+    becomes a real case page (blank/interstitial). A genuine case with 0
+    filings (header-only table, or title/status present) is allowed.
+    """
+    try:
+        page.wait_for_selector(
+            "#ContentPlaceHolderMaster_gvDocketInformation, "
+            "#ContentPlaceHolderMaster_mlblCaseDesc",
+            timeout=timeout,
+        )
+    except Exception as e:
+        raise RuntimeError(
+            f"F5 challenge: CaseRecord did not render listing/metadata ({e})"
+        ) from e
+
+    # ASP.NET may fill rows a moment after the table/title appear.
+    try:
+        page.wait_for_selector(
+            "#ContentPlaceHolderMaster_gvDocketInformation "
+            "tr td a[href*='DocumentRecord']",
+            timeout=8_000,
+        )
+    except Exception:
+        pass
+
+    meta = extract_case_metadata(page)
+    table = page.query_selector("#ContentPlaceHolderMaster_gvDocketInformation")
+    if (
+        not table
+        and not (meta.get("case_title") or "").strip()
+        and not (meta.get("status") or "").strip()
+    ):
+        raise RuntimeError(
+            "F5 challenge: CaseRecord loaded without case metadata/table"
+        )
+
 
 def extract_case_metadata(page: Page) -> dict:
     """Pull case-level metadata from the case record page."""
@@ -470,6 +532,7 @@ def scrape_case(
             # --- Case record page ---
             logger.info(f"Fetching case record: {case_url}")
             navigate(page, case_url)
+            wait_for_case_record(page)
 
             metadata = extract_case_metadata(page)
             logger.info(f"  Case: {metadata.get('case_title', 'N/A')}")

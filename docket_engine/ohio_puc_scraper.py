@@ -119,7 +119,12 @@ def _oldest_first(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _is_waf_error(exc: Exception) -> bool:
     msg = str(exc)
-    return any(k in msg for k in ("WAF rejected", "WAF blocked", "F5 challenge"))
+    return any(k in msg for k in (
+        "WAF rejected", "WAF blocked", "F5 challenge",
+        "ERR_TIMED_OUT",
+        "navigating and changing the content",
+        "ms exceeded",  # Playwright: "Timeout 30000ms exceeded."
+    ))
 
 
 def _error_email(message: str, context: Optional[dict] = None) -> None:
@@ -422,6 +427,7 @@ def _run_docket_session(
         case_url = f"{oh.BASE_URL}/CaseRecord.aspx?CaseNo={docket_number}"
         logger.info(f"Fetching case record: {case_url}")
         oh.navigate(page, case_url)  # raises RuntimeError on WAF
+        oh.wait_for_case_record(page)
 
         case_meta = oh.extract_case_metadata(page)
         logger.info(f"  Case: {case_meta.get('case_title', 'N/A')} | "
@@ -532,9 +538,10 @@ def scrape_oh_puc(
                     )
                     break
                 except Exception as e:
-                    is_waf = isinstance(e, RuntimeError) and _is_waf_error(e)
-                    # Rotate to a fresh residential IP only for WAF blocks that
-                    # still have attempts left.
+                    is_waf = _is_waf_error(e)
+                    # Rotate to a fresh residential IP for WAF/challenge/timeout
+                    # fetch failures that still have attempts left. Dedup
+                    # resumes where we left off.
                     if is_waf and attempt < attempts:
                         logger.warning(
                             f"WAF/fetch failure on session={session_id} "
