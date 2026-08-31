@@ -281,6 +281,7 @@ def scrape_documents_post():
         type = data.get('type', 'html')
         url = data.get(
             'url', 'https://efiling.web.commerce.state.mn.us/documents?doSearch=true&dockets=24-198')
+        comments = (data.get('comments') or '').strip()
 
         if type == 'html':
             html_content = fetch_with_playwright_2captcha(url)
@@ -291,6 +292,19 @@ def scrape_documents_post():
                 "html_content": html_content
             }), 200
         elif type == 'document':
+            # Optional: n8n may send inline comment text when there is no attachment URL.
+            # If comments is omitted, scraping runs exactly as before.
+            if not (url or '').strip() and comments:
+                return jsonify({
+                    "success": True,
+                    "content_type": "text",
+                    "text_content": comments,
+                    "url": "",
+                    "content_length": len(comments),
+                    "file_size_bytes": 0,
+                    "direct_text": True
+                }), 200
+
             result = parse_mn_documents(wait_time=wait_time, url=url)
             return jsonify(result), 200 if result.get("success") else 500
 
