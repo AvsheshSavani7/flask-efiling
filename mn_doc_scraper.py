@@ -72,9 +72,6 @@ def extract_text_from_document(file_content, file_extension):
                 'utf-8', errors='ignore'), 'html.parser')
             return soup.get_text().strip()
 
-        else:
-            return file_content.decode('utf-8', errors='ignore')
-
     except Exception as e:
         try:
             return file_content.decode('utf-8', errors='ignore')
@@ -148,10 +145,22 @@ async def solve_captcha(sitekey, page_url):
     return token
 
 
+def _direct_download_extension(url):
+    """Return extractor type for direct file URLs, or None to use Playwright."""
+    path = (url or "").lower().split("?", 1)[0]
+    if path.endswith(".pdf"):
+        return "pdf"
+    if path.endswith(".docx") or path.endswith(".doc"):
+        return "docx"
+    if path.endswith(".txt"):
+        return "txt"
+    return None
+
+
 async def parse_mn_documents_async(wait_time=20, url="", use_proxy=True):
     """
     Download and parse Minnesota e-filing documents using Playwright with proxy and 2captcha.
-    For direct PDF URLs, downloads and extracts text directly without browser automation.
+    For direct PDF/DOCX/TXT URLs, downloads and extracts text without browser automation.
 
     Args:
         wait_time (int): Time to wait for page load in seconds
@@ -162,15 +171,17 @@ async def parse_mn_documents_async(wait_time=20, url="", use_proxy=True):
         dict: Dictionary containing extracted text and metadata
     """
 
-    # Check if URL is a direct PDF link - handle it directly without browser automation
-    if url.lower().endswith('.pdf'):
-        print(f"Direct PDF URL detected: {url}")
+    # Direct file links (PDF/DOCX/TXT) — download with requests. Playwright
+    # page.goto() aborts on S3/file downloads (net::ERR_ABORTED).
+    file_ext = _direct_download_extension(url)
+    if file_ext:
+        print(f"Direct {file_ext.upper()} URL detected: {url}")
         try:
             # Prepare request parameters
             request_params = {
                 'headers': {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                    'Accept': 'application/pdf,application/octet-stream,*/*',
+                    'Accept': 'application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword,application/octet-stream,*/*',
                     'Accept-Language': 'en-US,en;q=0.5',
                     'Accept-Encoding': 'gzip, deflate',
                     'Connection': 'keep-alive',
@@ -178,9 +189,10 @@ async def parse_mn_documents_async(wait_time=20, url="", use_proxy=True):
                 'timeout': 30
             }
 
-            # For direct PDF downloads, try without proxy first as many PDF servers don't require it
+            # Try without proxy first — many file servers (S3) don't require it
             # and proxy can cause authentication issues
-            print("Downloading PDF directly (without proxy)...")
+            print(
+                f"Downloading {file_ext.upper()} directly (without proxy)...")
             response = requests.get(url, **request_params)
 
             # If direct download fails and proxy is enabled, try with proxy as fallback
@@ -192,44 +204,53 @@ async def parse_mn_documents_async(wait_time=20, url="", use_proxy=True):
                     'https': f'http://{proxy_username}:{proxy_password}@{proxy_host}:{proxy_port}'
                 }
                 print(
-                    f"Using proxy for PDF download: {proxy_host}:{proxy_port}")
+                    f"Using proxy for {file_ext.upper()} download: {proxy_host}:{proxy_port}")
                 response = requests.get(url, **request_params)
+
+            is_pdf = file_ext == "pdf"
+            extra_flag = {"direct_pdf_download": True} if is_pdf else {
+                "direct_download": True}
 
             if response.status_code == 200:
                 print(
-                    f"PDF downloaded successfully. Size: {len(response.content)} bytes")
+                    f"{file_ext.upper()} downloaded successfully. Size: {len(response.content)} bytes")
 
-                # Extract text from PDF
                 text_content = extract_text_from_document(
-                    response.content, 'pdf')
+                    response.content, file_ext)
 
-                return {
+                result = {
                     "success": True,
-                    "content_type": "pdf",
+                    "content_type": file_ext,
                     "text_content": text_content,
                     "url": url,
                     "content_length": len(text_content),
                     "file_size_bytes": len(response.content),
-                    "direct_pdf_download": True
                 }
+                result.update(extra_flag)
+                return result
             else:
                 print(
-                    f"Failed to download PDF. Status code: {response.status_code}")
-                return {
+                    f"Failed to download {file_ext.upper()}. Status code: {response.status_code}")
+                error_result = {
                     "success": False,
-                    "error": f"Failed to download PDF. Status code: {response.status_code}",
+                    "error": f"Failed to download {file_ext.upper()}. Status code: {response.status_code}",
                     "url": url,
-                    "direct_pdf_download": True
                 }
+                error_result.update(extra_flag)
+                return error_result
 
         except Exception as e:
-            print(f"Error downloading PDF directly: {str(e)}")
-            return {
+            print(f"Error downloading {file_ext.upper()} directly: {str(e)}")
+            error_result = {
                 "success": False,
-                "error": f"Error downloading PDF directly: {str(e)}",
+                "error": f"Error downloading {file_ext.upper()} directly: {str(e)}",
                 "url": url,
-                "direct_pdf_download": True
             }
+            if file_ext == "pdf":
+                error_result["direct_pdf_download"] = True
+            else:
+                error_result["direct_download"] = True
+            return error_result
     async with Stealth().use_async(async_playwright()) as p:
         # Configure browser launch args
         launch_args = [
@@ -720,7 +741,8 @@ def parse_mn_documents(wait_time=20, url="", use_proxy=True):
 
 if __name__ == "__main__":
     # For testing the function directly
-    result = parse_mn_documents()
+    result = parse_mn_documents(
+        url="https://dcms-external.s3.amazonaws.com/DCMS_External_PROD/1787752259009/EI-34279.pdf")
 
     if result.get("success"):
         with open("extracted_text.txt", "w", encoding="utf-8") as f:
