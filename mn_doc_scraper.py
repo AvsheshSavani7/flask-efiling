@@ -27,6 +27,22 @@ CAPTCHA_SOLVER_URL = "http://2captcha.com/in.php"
 CAPTCHA_RESULT_URL = "http://2captcha.com/res.php"
 
 
+def _ocr_pdf_bytes(pdf_bytes):
+    """OCR fallback for scanned/image-only PDFs. Returns '' on failure."""
+    try:
+        from docket_engine.ocr_extract import extract_text_from_scanned_pdf_bytes
+        print("No embedded PDF text — attempting OCR...")
+        text = (extract_text_from_scanned_pdf_bytes(pdf_bytes) or "").strip()
+        if text:
+            print(f"OCR extracted {len(text)} characters")
+        else:
+            print("OCR produced no text")
+        return text
+    except Exception as e:
+        print(f"OCR extraction failed: {e}")
+        return ""
+
+
 def extract_text_from_document(file_content, file_extension):
     """
     Extract text from different document types.
@@ -38,45 +54,62 @@ def extract_text_from_document(file_content, file_extension):
     Returns:
         str: Extracted text content
     """
-    try:
-        # Check if content is HTML (error page)
-        content_str = file_content.decode('utf-8', errors='ignore')
-        if '<html' in content_str.lower() or '<!doctype' in content_str.lower():
-            soup = BeautifulSoup(content_str, 'html.parser')
-            return soup.get_text().strip()
+    text, _ocr_used = _extract_text_from_document(file_content, file_extension)
+    return text
 
-        if file_extension.lower() == 'pdf':
-            # Validate and extract PDF content
+
+def _extract_text_from_document(file_content, file_extension):
+    """Return (text, ocr_used). OCR runs only when a PDF has no embedded text."""
+    ext = (file_extension or "").lower()
+    try:
+        if ext == 'pdf':
             if not file_content.startswith(b'%PDF'):
-                return f"Invalid PDF file - content doesn't start with PDF header"
+                return (
+                    "Invalid PDF file - content doesn't start with PDF header",
+                    False,
+                )
 
             pdf_reader = PyPDF2.PdfReader(BytesIO(file_content))
             text = ""
             for page in pdf_reader.pages:
                 text += page.extract_text() + "\n"
-            return text.strip()
+            text = text.strip()
+            if text:
+                return text, False
 
-        elif file_extension.lower() in ['docx', 'doc']:
-            # Extract text from Word document
+            ocr_text = _ocr_pdf_bytes(file_content)
+            if ocr_text:
+                return ocr_text, True
+            return "", False
+
+        # Check if content is HTML (error page) for non-PDF files
+        content_str = file_content.decode('utf-8', errors='ignore')
+        if '<html' in content_str.lower() or '<!doctype' in content_str.lower():
+            soup = BeautifulSoup(content_str, 'html.parser')
+            return soup.get_text().strip(), False
+
+        if ext in ['docx', 'doc']:
             doc = docx.Document(BytesIO(file_content))
             text = ""
             for paragraph in doc.paragraphs:
                 text += paragraph.text + "\n"
-            return text.strip()
+            return text.strip(), False
 
-        elif file_extension.lower() == 'txt':
-            return file_content.decode('utf-8', errors='ignore')
+        elif ext == 'txt':
+            return file_content.decode('utf-8', errors='ignore'), False
 
-        elif file_extension.lower() in ['html', 'htm']:
+        elif ext in ['html', 'htm']:
             soup = BeautifulSoup(file_content.decode(
                 'utf-8', errors='ignore'), 'html.parser')
-            return soup.get_text().strip()
+            return soup.get_text().strip(), False
 
     except Exception as e:
         try:
-            return file_content.decode('utf-8', errors='ignore')
-        except:
-            return f"Error extracting text: {str(e)}"
+            return file_content.decode('utf-8', errors='ignore'), False
+        except Exception:
+            return f"Error extracting text: {str(e)}", False
+
+    return "", False
 
 
 async def get_sitekey(page):
@@ -215,7 +248,7 @@ async def parse_mn_documents_async(wait_time=20, url="", use_proxy=True):
                 print(
                     f"{file_ext.upper()} downloaded successfully. Size: {len(response.content)} bytes")
 
-                text_content = extract_text_from_document(
+                text_content, ocr_used = _extract_text_from_document(
                     response.content, file_ext)
 
                 result = {
@@ -227,6 +260,8 @@ async def parse_mn_documents_async(wait_time=20, url="", use_proxy=True):
                     "file_size_bytes": len(response.content),
                 }
                 result.update(extra_flag)
+                if ocr_used:
+                    result["ocr_used"] = True
                 return result
             else:
                 print(
@@ -671,10 +706,10 @@ async def parse_mn_documents_async(wait_time=20, url="", use_proxy=True):
                         }
 
                     # Extract text from the document
-                    text_content = extract_text_from_document(
+                    text_content, ocr_used = _extract_text_from_document(
                         response.content, file_extension)
                     await browser.close()
-                    return {
+                    result = {
                         "success": True,
                         "content_type": file_extension,
                         "text_content": text_content,
@@ -682,6 +717,9 @@ async def parse_mn_documents_async(wait_time=20, url="", use_proxy=True):
                         "content_length": len(text_content),
                         "file_size_bytes": len(response.content)
                     }
+                    if ocr_used:
+                        result["ocr_used"] = True
+                    return result
                 else:
                     await browser.close()
                     return {
