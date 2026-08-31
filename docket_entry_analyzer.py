@@ -27,12 +27,12 @@ from docket_pipeline.jurisdiction_configs import get_number_map
 
 ENV_FILE = ".env"
 COMPREHENSIVE_SUMMARY_MODEL = "gpt-5-mini-2025-08-07"
-# Model for Assistants API (must support file_search)
+# Model for Responses API file_search overflow summaries
 ASSISTANTS_API_MODEL = "gpt-4o-mini"
-TIER1_MODEL = "claude-haiku-4-5-20251001"
+TIER1_MODEL = "claude-sonnet-5"
 TIER2_MODEL = "claude-sonnet-5"
-# Haiku Tier1 is ~200k context; summarize via OpenAI file upload when estimate exceeds this.
-TIER1_MAX_ESTIMATED_TOKENS = 200_000
+# Sonnet 5 is ~1M context; summarize via OpenAI file upload when estimate exceeds this.
+TIER1_MAX_ESTIMATED_TOKENS = 800_000
 
 
 def _load_env_file(env_path: str) -> None:
@@ -334,6 +334,26 @@ def _is_context_length_error(error: Exception) -> bool:
     return any(marker in error_str for marker in markers)
 
 
+def _poll_vector_store_file(
+    openai_client: OpenAI, vector_store_id: str, file_id: str
+) -> None:
+    """Wait until a vector-store file is indexed (or fail)."""
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        vs_file = openai_client.vector_stores.files.retrieve(
+            vector_store_id=vector_store_id,
+            file_id=file_id,
+        )
+        status = getattr(vs_file, "status", None)
+        logger.info("  vector_store file status=%s", status)
+        if status == "completed":
+            return
+        if status == "failed":
+            raise RuntimeError(f"Vector store indexing failed: {vs_file}")
+        time.sleep(2)
+    raise TimeoutError("Vector store file indexing timed out")
+
+
 def _generate_comprehensive_summary_with_file_upload(
     openai_client: OpenAI,
     full_text: str,
@@ -342,7 +362,7 @@ def _generate_comprehensive_summary_with_file_upload(
     next_entry_number: int
 ) -> Dict[str, Any]:
     """
-    Generate comprehensive summary by uploading file to OpenAI.
+    Generate comprehensive summary via Responses API file_search.
     Use this when content is too large for direct API calls.
 
     Args:
@@ -355,44 +375,9 @@ def _generate_comprehensive_summary_with_file_upload(
     Returns:
         Dictionary with summary, tokens, and cost information
     """
-    logger.info("Using file upload approach for comprehensive summary...")
+    logger.info("Using Responses file_search for comprehensive summary...")
 
-    # Create a temporary text file
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tmp_file:
-        tmp_file.write(full_text)
-        tmp_file_path = tmp_file.name
-
-    try:
-        # Upload file to OpenAI
-        logger.info(
-            f"Uploading file to OpenAI ({len(full_text):,} characters)...")
-        with open(tmp_file_path, 'rb') as file:
-            uploaded_file = openai_client.files.create(
-                file=file,
-                purpose='assistants'
-            )
-
-        file_id = uploaded_file.id
-        logger.info(f"✓ File uploaded with ID: {file_id}")
-
-        # Create an assistant
-        logger.info("Creating assistant...")
-        assistant = openai_client.beta.assistants.create(
-            name="Document Summarizer",
-            instructions="""You are a legal document summarizer. Create comprehensive summaries that preserve all important details for further analysis.""",
-            model=ASSISTANTS_API_MODEL,
-            tools=[{"type": "file_search"}]
-        )
-
-        logger.info(f"✓ Assistant created with ID: {assistant.id}")
-
-        # Create a thread with the file
-        logger.info("Creating thread with file...")
-        thread = openai_client.beta.threads.create(
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"""You are summarizing a legal docket entry for further analysis. Create a comprehensive summary that preserves all important details.
+    prompt = f"""You are summarizing a legal docket entry for further analysis. Create a comprehensive summary that preserves all important details.
 
 ENTRY METADATA:
 Entry Number: {next_entry_number}
@@ -412,7 +397,7 @@ The full document content is in the attached file. Please read it and create a C
 7. Legal citations or regulatory references
 8. Timeline information or deadlines mentioned
 
-Be thorough and detailed. Preserve specific facts, numbers, names, and legal arguments. 
+Be thorough and detailed. Preserve specific facts, numbers, names, and legal arguments.
 This summary must contain enough detail for downstream analysis of legal significance and risk assessment.
 
 In summary with other details, you must include the following:
@@ -421,112 +406,123 @@ In summary with other details, you must include the following:
 - Summary: 1-2 sentence content summary
 - Relevance: High/Medium/Low - short justification
 
-Target length: 1000-2000 words depending on complexity.""",
-                    "attachments": [
-                        {
-                            "file_id": file_id,
-                            "tools": [{"type": "file_search"}]
-                        }
-                    ]
-                }
-            ]
+Target length: 1000-2000 words depending on complexity."""
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+    ) as tmp_file:
+        tmp_file.write(full_text)
+        tmp_file_path = tmp_file.name
+
+    file_id = None
+    vector_store_id = None
+    try:
+        logger.info(
+            "Uploading file to OpenAI (%s characters)...",
+            f"{len(full_text):,}",
         )
-
-        logger.info(f"✓ Thread created with ID: {thread.id}")
-
-        # Run the assistant
-        logger.info("Running assistant...")
-        run = openai_client.beta.threads.runs.create(
-            thread_id=thread.id,
-            assistant_id=assistant.id
-        )
-
-        # Wait for completion
-        max_wait_time = 600  # 5 minutes max
-        start_time = time.time()
-
-        while run.status in ['queued', 'in_progress']:
-            if time.time() - start_time > max_wait_time:
-                raise TimeoutError("Assistant run exceeded maximum wait time")
-
-            time.sleep(2)
-            run = openai_client.beta.threads.runs.retrieve(
-                thread_id=thread.id,
-                run_id=run.id
+        with open(tmp_file_path, "rb") as file:
+            uploaded_file = openai_client.files.create(
+                file=file,
+                purpose="assistants",
             )
-            logger.info(f"  Status: {run.status}")
 
-        if run.status != 'completed':
-            raise Exception(f"Assistant run failed with status: {run.status}")
+        file_id = uploaded_file.id
+        logger.info("✓ File uploaded with ID: %s", file_id)
 
-        logger.info("✓ Assistant run completed")
+        vector_store = openai_client.vector_stores.create(
+            name="docket-comprehensive-summary"
+        )
+        vector_store_id = vector_store.id
+        logger.info("✓ Vector store created with ID: %s", vector_store_id)
 
-        # Get the messages
-        messages = openai_client.beta.threads.messages.list(
-            thread_id=thread.id
+        create_and_poll = getattr(
+            openai_client.vector_stores.files, "create_and_poll", None
+        )
+        if create_and_poll:
+            create_and_poll(vector_store_id=vector_store_id, file_id=file_id)
+            logger.info("✓ Vector store file indexed")
+        else:
+            openai_client.vector_stores.files.create(
+                vector_store_id=vector_store_id,
+                file_id=file_id,
+            )
+            _poll_vector_store_file(openai_client, vector_store_id, file_id)
+
+        logger.info(
+            "Calling responses.create file_search model=%s ...",
+            ASSISTANTS_API_MODEL,
+        )
+        response = openai_client.responses.create(
+            model=ASSISTANTS_API_MODEL,
+            instructions=(
+                "You are a legal document summarizer. Create comprehensive "
+                "summaries that preserve all important details for further analysis."
+            ),
+            tools=[
+                {
+                    "type": "file_search",
+                    "vector_store_ids": [vector_store_id],
+                    "max_num_results": 50,
+                }
+            ],
+            input=prompt,
         )
 
-        # Extract the assistant's response
-        assistant_message = None
-        for message in messages.data:
-            if message.role == 'assistant':
-                assistant_message = message
-                break
+        comprehensive_summary_text = (
+            getattr(response, "output_text", None) or ""
+        ).strip()
+        if not comprehensive_summary_text:
+            raise RuntimeError("No summary returned from responses.create")
 
-        if not assistant_message or not assistant_message.content:
-            raise Exception("No response from assistant")
-
-        comprehensive_summary_text = assistant_message.content[0].text.value
-
-        # Estimate token usage (since Assistants API doesn't provide exact counts)
-        comprehensive_summary_input_tokens = estimated_tokens + \
-            500  # Add buffer for instructions
-        comprehensive_summary_output_tokens = len(
-            comprehensive_summary_text) // 4
+        usage = getattr(response, "usage", None)
+        comprehensive_summary_input_tokens = (
+            getattr(usage, "input_tokens", None) if usage is not None else None
+        ) or (estimated_tokens + 500)
+        comprehensive_summary_output_tokens = (
+            getattr(usage, "output_tokens", None) if usage is not None else None
+        ) or (len(comprehensive_summary_text) // 4)
         comprehensive_summary_cost = _estimate_cost(
             comprehensive_summary_input_tokens,
             comprehensive_summary_output_tokens,
-            ASSISTANTS_API_MODEL
+            ASSISTANTS_API_MODEL,
         )
 
         logger.info(
-            f"✓ Generated comprehensive summary: {len(comprehensive_summary_text):,} characters")
-
-        # Clean up
-        try:
-            openai_client.files.delete(file_id)
-            logger.info("✓ Cleaned up uploaded file")
-        except Exception as e:
-            logger.warning(
-                "Could not delete uploaded file: %s", str(e))
-
-        try:
-            openai_client.beta.assistants.delete(assistant.id)
-            logger.info("✓ Cleaned up assistant")
-        except Exception as e:
-            logger.warning(
-                "Could not delete assistant: %s", str(e))
+            "✓ Generated comprehensive summary: %s characters",
+            f"{len(comprehensive_summary_text):,}",
+        )
 
         return {
             "summary": comprehensive_summary_text,
             "tokens": {
                 "input": comprehensive_summary_input_tokens,
                 "output": comprehensive_summary_output_tokens,
-                "estimated_original": estimated_tokens
+                "estimated_original": estimated_tokens,
             },
             "cost": comprehensive_summary_cost,
             "generated": True,
-            "method": "file_upload",
-            "reason": f"Content too large ({estimated_tokens:,} tokens)"
+            "method": "file_search",
+            "reason": f"Content too large ({estimated_tokens:,} tokens)",
         }
 
     finally:
-        # Clean up temp file
+        if vector_store_id:
+            try:
+                openai_client.vector_stores.delete(vector_store_id)
+                logger.info("✓ Cleaned up vector store")
+            except Exception as e:
+                logger.warning("Could not delete vector store: %s", str(e))
+        if file_id:
+            try:
+                openai_client.files.delete(file_id)
+                logger.info("✓ Cleaned up uploaded file")
+            except Exception as e:
+                logger.warning("Could not delete uploaded file: %s", str(e))
         try:
             os.unlink(tmp_file_path)
         except Exception as e:
-            logger.warning(
-                "Could not delete temp file: %s", str(e))
+            logger.warning("Could not delete temp file: %s", str(e))
 
 
 def analyze_docket_entry(
@@ -1008,7 +1004,7 @@ Be specific and cite entry numbers when referencing prior events."""
                 "metadata": entry_metadata
             }
 
-    # Tier1 uses Haiku (~200k). Tier2 stays unchanged.
+    # Tier1 uses Sonnet 5 (~1M). Tier2 stays unchanged.
     # Prefer an existing Tier2-fallback comprehensive summary when present.
     # Otherwise, if estimated tokens exceed the limit, generate one via OpenAI
     # file upload for Tier1 only — then store/return it as comprehensive_summary.
@@ -1273,6 +1269,7 @@ def _estimate_cost(input_tokens: int, output_tokens: int, model: str) -> float:
         "claude-haiku-4-5-20251001": {"input": 1.0, "output": 5.0},
         "claude-haiku-4-5": {"input": 1.0, "output": 5.0},
         "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
+        "claude-sonnet-5": {"input": 3.0, "output": 15.0},
         # OpenAI pricing (per 1M tokens)
         "gpt-4o": {"input": 2.50, "output": 10.00},
         "gpt-4o-mini": {"input": 0.150, "output": 0.600},
