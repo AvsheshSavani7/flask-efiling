@@ -1074,7 +1074,7 @@ Be factual and concise. Focus on substantive content, not procedural details."""
         message = client.messages.create(
             model=TIER1_MODEL,
             max_tokens=1000,
-            temperature=0.1,
+            thinking={"type": "disabled"},
             messages=[{"role": "user", "content": tier1_prompt}]
         )
         logger.info("Tier1 message: %s", message)

@@ -217,6 +217,11 @@ def parse_case_html(html: str, case_num: str) -> Dict[str, Any]:
 
     record["companies"] = companies if companies else None
     record["economic_activities"] = economic_activities if economic_activities else None
+    # Always emit every summary field so a blank label becomes None instead of
+    # omitting the key (omitted keys are not cleared by Mongo $set).
+    for field in _LABEL_MAP.values():
+        record.setdefault(field, None)
+    record.setdefault("instrument", None)
 
     # --- Decisions section ---
     decisions: List[Dict[str, Any]] = []

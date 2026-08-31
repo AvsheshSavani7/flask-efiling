@@ -141,6 +141,20 @@ _EXCLUDE_FROM_COMPARE = frozenset({
     "_id", "is_open", "created_at", "updated_at", "deal_id", "case_title"
 })
 
+# DB-only / identity fields — never $unset these when a scrape omits a key.
+_PROTECT_FROM_UNSET = frozenset({
+    "_id", "is_open", "created_at", "updated_at", "deal_id", "case_number",
+    "case_title",
+})
+
+# Scraped schema fields. $unset only these if they exist in DB but not in scrape.
+_SCRAPE_FIELDS = frozenset({
+    "instrument", "status", "case_url", "companies", "last_decision_date",
+    "case_type", "investigation_phase", "regulation", "notification_date",
+    "provisional_deadline", "economic_activities", "decisions",
+    "other_case_related_information",
+})
+
 SPA_CONTENT_INDICATORS = [
     "text=Companies:",
     "text=Case type:",
@@ -315,6 +329,17 @@ def scrape_case_page(context, case_number: str, max_retries: int = 2) -> Optiona
 # Deep comparison
 # ---------------------------------------------------------------------------
 
+def _is_empty(value: Any) -> bool:
+    """True for None, blank strings, and empty collections — not a real change."""
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    if isinstance(value, (list, tuple, dict, set)) and len(value) == 0:
+        return True
+    return False
+
+
 def normalize_for_comparison(data: Any) -> Any:
     if isinstance(data, dict):
         return {k: normalize_for_comparison(v) for k, v in data.items()}
@@ -336,7 +361,8 @@ def deep_compare(old_data: Any, new_data: Any, path: str = "") -> List[Tuple[str
     old_n = normalize_for_comparison(old_data)
     new_n = normalize_for_comparison(new_data)
 
-    if old_n is None and new_n is None:
+    # Missing key, null, "", and [] are the same "empty" — do not treat as a change.
+    if _is_empty(old_n) and _is_empty(new_n):
         return differences
     if old_n is None:
         differences.append((path, None, new_data))
@@ -353,15 +379,8 @@ def deep_compare(old_data: Any, new_data: Any, path: str = "") -> List[Tuple[str
         all_keys = set(old_n.keys()) | set(new_n.keys())
         for key in all_keys:
             new_path = f"{path}.{key}" if path else key
-            if key not in old_n:
-                differences.append((new_path, None, new_data.get(
-                    key) if isinstance(new_data, dict) else None))
-            elif key not in new_n:
-                differences.append((new_path, old_data.get(
-                    key) if isinstance(old_data, dict) else None, None))
-            else:
-                differences.extend(deep_compare(
-                    old_n[key], new_n[key], new_path))
+            differences.extend(deep_compare(
+                old_n.get(key), new_n.get(key), new_path))
     elif isinstance(old_n, list):
         if len(old_n) != len(new_n):
             differences.append((path, old_data, new_data))
@@ -481,7 +500,18 @@ def update_case_document(
         if "is_open" not in updated:
             updated["is_open"] = case_doc.get("is_open", True)
 
-        result = collection.update_one({"_id": _id}, {"$set": updated})
+        # $set does not remove omitted keys. Clear scrape fields that vanished
+        # so a date→empty change is persisted and does not re-fire every run.
+        ops: Dict[str, Any] = {"$set": updated}
+        missing = [
+            k for k in _SCRAPE_FIELDS
+            if k in case_doc and k not in updated and k not in _PROTECT_FROM_UNSET
+        ]
+        if missing:
+            ops["$unset"] = {k: "" for k in missing}
+            logger.info(f"    [{case_num}] Unsetting vanished scrape fields: {missing}")
+
+        result = collection.update_one({"_id": _id}, ops)
         if result.modified_count > 0:
             logger.info(f"    [{case_num}] Updated case document in DB")
         else:
