@@ -519,6 +519,14 @@ def regex_match_taiwan_deal(
     return regex_match_flat_scan(title_en, deals, suffixes=TAIWAN_SUFFIXES)
 
 
+def regex_match_ukraine_deal(
+    parties_and_text: str,
+    deals: List[Dict[str, Any]],
+) -> Optional[str]:
+    """Ukraine AMCU: party names + item text (flat scan; both sides must hit)."""
+    return regex_match_flat_scan(parties_and_text, deals, suffixes=DEFAULT_SUFFIXES)
+
+
 # Aliases for test scripts
 def _normalise_accc(t): return normalise_company_name(t, ACCC_SUFFIXES)
 def _normalise_cade(t): return normalise_company_name(t, CADE_SUFFIXES)

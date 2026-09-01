@@ -45,6 +45,7 @@ AGENCY_NAMES: dict[str, str] = {
     "kftc":               "KFTC Korea",
     "chile_fne":          "Chile FNE",
     "taiwan_ftc":         "Taiwan FTC",
+    "ukraine_amcu":       "Ukraine AMCU",
 }
 
 # ---------------------------------------------------------------------------

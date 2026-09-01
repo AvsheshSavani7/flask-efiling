@@ -32,7 +32,13 @@ def _load_env_file(env_path: str = ".env") -> None:
                 os.environ[key] = value
 
 
-def init_mongodb_connection(env_path: str = ".env") -> Tuple[bool, str]:
+def init_mongodb_connection(
+    env_path: str = ".env",
+    *,
+    serverSelectionTimeoutMS: int = 5000,
+    connectTimeoutMS: int = 5000,
+    socketTimeoutMS: int = 30000,
+) -> Tuple[bool, str]:
     """
     Initialize global MongoDB connection.
 
@@ -54,9 +60,9 @@ def init_mongodb_connection(env_path: str = ".env") -> Tuple[bool, str]:
         # Create connection with timeouts
         _mongo_client = MongoClient(
             mongodb_uri,
-            serverSelectionTimeoutMS=5000,  # 5 second timeout for server selection/DNS
-            connectTimeoutMS=5000,  # 5 second timeout for connection
-            socketTimeoutMS=30000,  # 30 second timeout for socket operations
+            serverSelectionTimeoutMS=serverSelectionTimeoutMS,
+            connectTimeoutMS=connectTimeoutMS,
+            socketTimeoutMS=socketTimeoutMS,
             retryWrites=True,
             retryReads=True
         )
