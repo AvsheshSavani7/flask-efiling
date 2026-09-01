@@ -44,7 +44,6 @@ from mexico_cna_update_monitor import run_mexico_cna_update_monitor
 from chile_fne_cases_register import run_chile_fne_cases_register
 from taiwan_ftc_cases_register import run_taiwan_ftc_cases_register
 from taiwan_ftc_update_monitor import run_taiwan_ftc_update_monitor
-from ukraine_amcu_cases import run_ukraine_amcu_cases
 from canada_cases_register import run_canada_cases_register
 from canada_cases_update_monitor import process_canada_cases_updates
 from comesa_cases_register import run_comesa_cases_register
@@ -121,7 +120,8 @@ _running_started = {}
 _running_tokens = {}
 _running_lock = Lock()
 # Hung Playwright/driver threads never finish; after this age a new submit is allowed.
-_STALE_TASK_SECONDS = int(os.getenv("SCRAPER_TASK_STALE_SECONDS", str(2 * 60 * 60)))
+_STALE_TASK_SECONDS = int(
+    os.getenv("SCRAPER_TASK_STALE_SECONDS", str(2 * 60 * 60)))
 
 
 def _run_and_cleanup(task_name, func, token):
@@ -245,7 +245,6 @@ def home():
             "/cpuc-scraper": "GET/POST - Scrape CPUC Documents table via Playwright, download PDFs, run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/cpuc_dockets.json (params: docket_number, headless, test_mode, save_json, cutoff_days)",
             "/va-puc-scraper": "GET/POST - Scrape VA SCC/PUC Breeze documents API, download PDFs via residential proxy, run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/va_puc_dockets.json (params: docket_number, no_proxy, test_mode, save_json, cutoff_days)",
             "/ohio-puc-scraper": "GET/POST - Scrape Ohio PUC (PUCO DIS) docket entries via headed browser + residential proxy, download PDFs (OCR fallback), run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/ohio_puc_dockets.json (params: docket_number, no_proxy, test_mode, save_json)",
-            "/ukraine-amcu-scraper": "GET - Ukraine AMCU merger tracker (live last 2 days). Deal match then USA-related email to avshesh only. Query: backfill, no_deal_match. Logs: /logs?script=ukraine_amcu_cases",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -2458,7 +2457,8 @@ def new_jftc_cases_register_endpoint():
                     f"(test_email={test_email})"
                 )
                 jftc_cases_register_run(test_mode=test_email)
-                logger.info("✅ JFTC Japan cases register completed successfully")
+                logger.info(
+                    "✅ JFTC Japan cases register completed successfully")
             except Exception as e:
                 logger.exception("Error in JFTC Japan cases register")
 
@@ -3162,7 +3162,6 @@ KNOWN_LOG_SCRIPTS = {
     "chile_fne_cases_register",
     "taiwan_ftc_cases_register",
     "taiwan_ftc_update_monitor",
-    "ukraine_amcu_cases",
     "comesa_cases_register",
     "comesa_cases_update_monitor",
     "sa_compcom_cases_register",
@@ -3585,9 +3584,11 @@ def taiwan_ftc_update_monitor_endpoint():
                 logger.info(
                     f"Starting Taiwan FTC update monitor (backfill={backfill})")
                 run_taiwan_ftc_update_monitor(backfill=backfill)
-                logger.info("Taiwan FTC update monitor completed successfully.")
+                logger.info(
+                    "Taiwan FTC update monitor completed successfully.")
             except Exception as e:
-                logger.exception("Error in background Taiwan FTC update monitor")
+                logger.exception(
+                    "Error in background Taiwan FTC update monitor")
 
         task_name = (
             "taiwan-ftc-update-monitor-backfill"
@@ -3610,71 +3611,6 @@ def taiwan_ftc_update_monitor_endpoint():
 
     except Exception as e:
         logger.error(f"Error starting Taiwan FTC update monitor: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
-@app.route('/ukraine-amcu-scraper', methods=['GET'])
-def ukraine_amcu_scraper_endpoint():
-    """
-    Live Ukraine AMCU merger tracker. Polls the news timeline (last 2 days),
-    splits concentration items, updates ukraine_cases, and emails new/update
-    alerts to avshesh.savani@teqnodux.com (deal match → FRMD, else USA → FRUD).
-    Runs in the background.
-
-    Query parameters:
-        backfill: if true, scrape from 2026-01-01 (no email).
-        no_deal_match: if true, skip deal_id LLM/regex (USA/FRUD still runs on live).
-    """
-    try:
-        backfill = request.args.get(
-            "backfill", "false").lower() in ("true", "1", "yes")
-        no_deal_match = request.args.get(
-            "no_deal_match", "false").lower() in ("true", "1", "yes")
-        if backfill:
-            no_deal_match = True
-
-        def run_scraper():
-            try:
-                logger.info(
-                    "Starting Ukraine AMCU scraper in background "
-                    "(backfill=%s no_deal_match=%s)",
-                    backfill, no_deal_match,
-                )
-                run_ukraine_amcu_cases(
-                    backfill=backfill,
-                    no_deal_match=no_deal_match,
-                )
-                logger.info("Ukraine AMCU scraper completed successfully.")
-            except Exception:
-                logger.exception("Error in background Ukraine AMCU scraper")
-
-        task_name = (
-            "ukraine-amcu-scraper-backfill" if backfill else "ukraine-amcu-scraper"
-        )
-        submitted, msg = submit_unique_task(
-            task_name, run_scraper, script_file="ukraine_amcu_cases.py"
-        )
-        if not submitted:
-            return jsonify({
-                "success": False,
-                "error": msg,
-                "status": "already_running",
-            }), 409
-
-        return jsonify({
-            "success": True,
-            "message": msg,
-            "status": "running",
-            "backfill": backfill,
-            "no_deal_match": no_deal_match,
-            "email_recipient": "avshesh.savani@teqnodux.com" if not backfill else None,
-        }), 200
-
-    except Exception as e:
-        logger.error("Error starting Ukraine AMCU scraper: %s", e)
         return jsonify({
             "success": False,
             "error": str(e)

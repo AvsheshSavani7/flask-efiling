@@ -15,10 +15,6 @@ Usage:
   python ukraine_amcu_cases.py --backfill --no-deal-match --dry-run
   python ukraine_amcu_cases.py --no-deal-match
 
-Live (cron / API, last 2 days, email Avshesh):
-  GET /ukraine-amcu-scraper
-  python ukraine_amcu_cases.py
-
 Live email (Avshesh only, never org routing):
   deal match → [FRMD] / [FRRMD]; else USA-related → [FRUD].
   New case vs case update uses the matching subject.
@@ -33,7 +29,6 @@ import hashlib
 import io
 import os
 import re
-import time
 from collections import Counter
 from html import escape as escape_html
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -42,7 +37,6 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from openai import OpenAI
-from pymongo.errors import AutoReconnect, NetworkTimeout, ServerSelectionTimeoutError
 from PyPDF2 import PdfReader
 
 from deal_match_llm import fetch_open_deals, llm_match_deal_id
@@ -95,9 +89,6 @@ LINKER_KINDS = {"decision", "commitments", "press"}
 LINK_MODEL = "gpt-4o-mini"
 TEST_RECIPIENT = "avshesh.savani@teqnodux.com"
 EMAIL_UPDATE_KINDS = {"case_opening", "commitments"}
-MONGO_LOAD_ATTEMPTS = 4
-MONGO_BATCH_SIZE = 50
-MONGO_RETRY_ERRORS = (NetworkTimeout, AutoReconnect, ServerSelectionTimeoutError)
 
 logger, get_log_file = ensure_script_logger(SCRIPT_NAME)
 _openai_client: Optional[OpenAI] = None
@@ -437,21 +428,13 @@ class CaseStore:
     def load(self) -> None:
         if self.collection is None:
             return
-
-        def _read() -> None:
-            self.by_key.clear()
-            self.claimed.clear()
-            for doc in self.collection.find({}).batch_size(MONGO_BATCH_SIZE):
-                key = doc.get("key")
-                if not key:
-                    continue
-                self.by_key[key] = doc
-                for step in doc.get("timeline") or []:
-                    self.claimed.add(
-                        step_signature(step.get("url") or "", step.get("text") or "")
-                    )
-
-        mongo_retry("ukraine_cases load", _read)
+        for doc in self.collection.find({}):
+            key = doc.get("key")
+            if not key:
+                continue
+            self.by_key[key] = doc
+            for step in doc.get("timeline") or []:
+                self.claimed.add(step_signature(step.get("url") or "", step.get("text") or ""))
 
     def find_by_app(self, app_id: str) -> Optional[Dict[str, Any]]:
         for case in self.by_key.values():
@@ -1002,45 +985,10 @@ def process_npa(
     logger.info("NPA attached → %s %s", found["key"], page_url)
 
 
-def mongo_retry(label: str, fn):
-    last = None
-    for attempt in range(1, MONGO_LOAD_ATTEMPTS + 1):
-        try:
-            return fn()
-        except MONGO_RETRY_ERRORS as exc:
-            last = exc
-            wait = min(2 ** attempt, 16)
-            logger.warning(
-                "%s attempt %s/%s failed: %s; retry in %ss",
-                label, attempt, MONGO_LOAD_ATTEMPTS, exc, wait,
-            )
-            time.sleep(wait)
-    raise last
-
-
-def connect_ukraine_mongo():
-    ok, msg = init_mongodb_connection(
-        serverSelectionTimeoutMS=20000,
-        connectTimeoutMS=20000,
-        socketTimeoutMS=120000,
-    )
-    if not ok:
-        raise SystemExit(msg)
-    db = get_database()
-    return db[CASES_COLLECTION], db[SEEN_COLLECTION]
-
-
 def seen_urls(collection) -> Set[str]:
     if collection is None:
         return set()
-
-    def _read() -> Set[str]:
-        return {
-            d["_id"]
-            for d in collection.find({}, {"_id": 1}).batch_size(MONGO_BATCH_SIZE)
-        }
-
-    return mongo_retry("ukraine_amcu_seen load", _read)
+    return {d["_id"] for d in collection.find({}, {"_id": 1})}
 
 
 def mark_seen(collection, url: str, kind: str, dry_run: bool) -> None:
@@ -1114,41 +1062,17 @@ def run_ukraine_amcu_cases(
     cases_coll = None
     seen_coll = None
     if not dry_run:
-        cases_coll, seen_coll = connect_ukraine_mongo()
+        ok, msg = init_mongodb_connection()
+        if not ok:
+            raise SystemExit(msg)
+        db = get_database()
+        cases_coll = db[CASES_COLLECTION]
+        seen_coll = db[SEEN_COLLECTION]
         cases_coll.create_index("key", unique=True)
         cases_coll.create_index("is_open")
         cases_coll.create_index("application_ids")
         cases_coll.create_index("case_numbers")
 
-    return _run_ukraine_body(
-        date_from=date_from,
-        date_to=date_to,
-        pages=pages,
-        backfill=backfill,
-        dry_run=dry_run,
-        no_deal_match=no_deal_match,
-        force=force,
-        wipe=wipe,
-        cases_coll=cases_coll,
-        seen_coll=seen_coll,
-        stats=stats,
-    )
-
-
-def _run_ukraine_body(
-    *,
-    date_from: str,
-    date_to: str,
-    pages: int,
-    backfill: bool,
-    dry_run: bool,
-    no_deal_match: bool,
-    force: bool,
-    wipe: bool,
-    cases_coll,
-    seen_coll,
-    stats,
-) -> Dict[str, int]:
     if wipe:
         wipe_ukraine_collections(cases_coll, seen_coll, dry_run=dry_run)
 
