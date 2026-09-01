@@ -44,6 +44,7 @@ from mexico_cna_update_monitor import run_mexico_cna_update_monitor
 from chile_fne_cases_register import run_chile_fne_cases_register
 from taiwan_ftc_cases_register import run_taiwan_ftc_cases_register
 from taiwan_ftc_update_monitor import run_taiwan_ftc_update_monitor
+from ukraine_amcu_cases import run_ukraine_amcu_cases
 from canada_cases_register import run_canada_cases_register
 from canada_cases_update_monitor import process_canada_cases_updates
 from comesa_cases_register import run_comesa_cases_register
@@ -3162,6 +3163,7 @@ KNOWN_LOG_SCRIPTS = {
     "chile_fne_cases_register",
     "taiwan_ftc_cases_register",
     "taiwan_ftc_update_monitor",
+    "ukraine_amcu_cases",
     "comesa_cases_register",
     "comesa_cases_update_monitor",
     "sa_compcom_cases_register",
@@ -3611,6 +3613,81 @@ def taiwan_ftc_update_monitor_endpoint():
 
     except Exception as e:
         logger.error(f"Error starting Taiwan FTC update monitor: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/ukraine-amcu-scraper', methods=['GET'])
+def ukraine_amcu_scraper_endpoint():
+    """
+    Scrape Ukraine AMCU news timeline, split concentration items, match to
+    ukraine_cases, and close on Approved/Rejected.
+    Process runs in background - returns immediately.
+
+    Query parameters:
+        backfill: string (optional, "true" or "false", default: "false")
+                  When true, scrapes from 2026-01-01 (no email).
+        no_deal_match: string (optional). Default true on backfill, false on live.
+        force: string (optional, "true" or "false") re-process seen URLs.
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        backfill = request.args.get(
+            'backfill', 'false').lower() in ('true', '1', 'yes')
+        force = request.args.get(
+            'force', 'false').lower() in ('true', '1', 'yes')
+        if 'no_deal_match' in request.args:
+            no_deal_match = request.args.get(
+                'no_deal_match', 'true').lower() in ('true', '1', 'yes')
+        else:
+            no_deal_match = bool(backfill)
+
+        def run_scraper():
+            try:
+                logger.info(
+                    "Starting Ukraine AMCU scraper in background "
+                    "(backfill=%s no_deal_match=%s force=%s)",
+                    backfill, no_deal_match, force,
+                )
+                run_ukraine_amcu_cases(
+                    backfill=backfill,
+                    no_deal_match=no_deal_match,
+                    force=force,
+                )
+                logger.info("Ukraine AMCU scraper completed successfully.")
+            except Exception:
+                logger.exception("Error in background Ukraine AMCU scraper")
+
+        task_name = (
+            "ukraine-amcu-scraper-backfill" if backfill else "ukraine-amcu-scraper"
+        )
+        submitted, msg = submit_unique_task(task_name, run_scraper)
+        if not submitted:
+            return jsonify({
+                "success": False,
+                "error": msg,
+                "status": "already_running",
+            }), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running",
+            "backfill": backfill,
+            "no_deal_match": no_deal_match,
+            "force": force,
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error starting Ukraine AMCU scraper: {str(e)}")
         return jsonify({
             "success": False,
             "error": str(e)
