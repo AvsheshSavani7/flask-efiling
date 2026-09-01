@@ -44,6 +44,7 @@ from mexico_cna_update_monitor import run_mexico_cna_update_monitor
 from chile_fne_cases_register import run_chile_fne_cases_register
 from taiwan_ftc_cases_register import run_taiwan_ftc_cases_register
 from taiwan_ftc_update_monitor import run_taiwan_ftc_update_monitor
+from ukraine_amcu_cases import run_ukraine_amcu_cases
 from canada_cases_register import run_canada_cases_register
 from canada_cases_update_monitor import process_canada_cases_updates
 from comesa_cases_register import run_comesa_cases_register
@@ -245,6 +246,7 @@ def home():
             "/cpuc-scraper": "GET/POST - Scrape CPUC Documents table via Playwright, download PDFs, run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/cpuc_dockets.json (params: docket_number, headless, test_mode, save_json, cutoff_days)",
             "/va-puc-scraper": "GET/POST - Scrape VA SCC/PUC Breeze documents API, download PDFs via residential proxy, run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/va_puc_dockets.json (params: docket_number, no_proxy, test_mode, save_json, cutoff_days)",
             "/ohio-puc-scraper": "GET/POST - Scrape Ohio PUC (PUCO DIS) docket entries via headed browser + residential proxy, download PDFs (OCR fallback), run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/ohio_puc_dockets.json (params: docket_number, no_proxy, test_mode, save_json)",
+            "/ukraine-amcu-scraper": "GET - Live Ukraine AMCU merger tracker (last 2 days). Query: backfill, no_deal_match, force. Emails to avshesh only. Logs: /logs?script=ukraine_amcu_cases",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -3162,6 +3164,7 @@ KNOWN_LOG_SCRIPTS = {
     "chile_fne_cases_register",
     "taiwan_ftc_cases_register",
     "taiwan_ftc_update_monitor",
+    "ukraine_amcu_cases",
     "comesa_cases_register",
     "comesa_cases_update_monitor",
     "sa_compcom_cases_register",
@@ -3611,6 +3614,72 @@ def taiwan_ftc_update_monitor_endpoint():
 
     except Exception as e:
         logger.error(f"Error starting Taiwan FTC update monitor: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/ukraine-amcu-scraper', methods=['GET'])
+def ukraine_amcu_scraper_endpoint():
+    """
+    Live Ukraine AMCU merger tracker (news timeline → ukraine_cases).
+    Default: last 2 days, deal match then USA check, email Avshesh only.
+    Process runs in background - returns immediately.
+
+    Query parameters:
+        backfill: "true" to scrape from 2026-01-01 (no email)
+        no_deal_match: "true" to skip deal_id matching (USA/FRUD still runs on live)
+        force: "true" to re-fetch URLs already in ukraine_amcu_seen
+    """
+    try:
+        backfill = request.args.get(
+            'backfill', 'false').lower() in ('true', '1', 'yes')
+        no_deal_match = request.args.get(
+            'no_deal_match', 'false').lower() in ('true', '1', 'yes')
+        force = request.args.get(
+            'force', 'false').lower() in ('true', '1', 'yes')
+
+        def run_scraper():
+            try:
+                logger.info(
+                    "Starting Ukraine AMCU scraper (backfill=%s no_deal_match=%s force=%s)",
+                    backfill, no_deal_match, force,
+                )
+                run_ukraine_amcu_cases(
+                    backfill=backfill,
+                    dry_run=False,
+                    no_deal_match=no_deal_match,
+                    force=force,
+                    wipe=False,
+                )
+                logger.info("Ukraine AMCU scraper completed successfully.")
+            except Exception:
+                logger.exception("Error in background Ukraine AMCU scraper")
+
+        task_name = (
+            "ukraine-amcu-scraper-backfill" if backfill else "ukraine-amcu-scraper"
+        )
+        submitted, msg = submit_unique_task(
+            task_name, run_scraper, script_file="ukraine_amcu_cases.py")
+        if not submitted:
+            return jsonify({
+                "success": False,
+                "error": msg,
+                "status": "already_running",
+            }), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running",
+            "backfill": backfill,
+            "no_deal_match": no_deal_match,
+            "force": force,
+        }), 200
+
+    except Exception as e:
+        logger.error("Error starting Ukraine AMCU scraper: %s", e)
         return jsonify({
             "success": False,
             "error": str(e)

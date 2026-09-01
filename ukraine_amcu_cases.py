@@ -13,7 +13,11 @@ as documents and never flip is_open.
 Usage:
   python ukraine_amcu_cases.py --wipe --backfill --no-deal-match
   python ukraine_amcu_cases.py --backfill --no-deal-match --dry-run
-  python ukraine_amcu_cases.py --no-deal-match
+  python ukraine_amcu_cases.py
+
+API (live, last 2 days, deal match + Avshesh email):
+  GET /ukraine-amcu-scraper
+  GET /ukraine-amcu-scraper?backfill=true&no_deal_match=true
 
 Live email (Avshesh only, never org routing):
   deal match → [FRMD] / [FRRMD]; else USA-related → [FRUD].
