@@ -7,6 +7,7 @@ import re
 import base64
 import datetime
 from datetime import timezone, timedelta
+from io import BytesIO
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
@@ -47,6 +48,7 @@ CAPTCHA_RESULT_URL = "http://2captcha.com/res.php"
 CAPTCHA_API_KEY = os.getenv("CAPTCHA_API_KEY")
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+TRANSLATE_MODEL = "gpt-4o-mini"
 
 # ---------------------------------------------------------------------------
 # Logging — production setup (RotatingFileHandler, IST, env-based settings)
@@ -129,8 +131,6 @@ def get_brazil_cases_collection():
 def translate_to_english(text: str) -> str:
     if not text or not isinstance(text, str) or text.strip() == "":
         return text
-    if len(text) > 500:
-        return text
     try:
         url = "https://translate.googleapis.com/translate_a/single"
         params = {"client": "gtx", "sl": "pt",
@@ -143,6 +143,83 @@ def translate_to_english(text: str) -> str:
     except Exception:
         return text
     return text
+
+
+def translate_pt_to_en(text: str) -> str:
+    """Translate Portuguese CADE text to English via GPT-4o-mini."""
+    if not text or not isinstance(text, str) or not text.strip():
+        return ""
+    src = text.strip()
+    try:
+        resp = client.chat.completions.create(
+            model=TRANSLATE_MODEL,
+            temperature=0,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a professional Portuguese-to-English translator "
+                        "for CADE (Brazil) merger-control filings.\n"
+                        "Return ONLY the English translation. "
+                        "Preserve legal meaning, file numbers, and dates. "
+                        "Do not explain."
+                    ),
+                },
+                {"role": "user", "content": f"Translate to English:\n{src}"},
+            ],
+        )
+        translated = (resp.choices[0].message.content or "").strip()
+        return translated or text
+    except Exception:
+        logger.exception("GPT translation failed")
+        return text
+
+
+def _resolve_doc_type_pt_en(rec: Dict[str, Any]) -> None:
+    """
+    Type column = Portuguese (tipo_documento).
+    Type EN column = English (document_type). Always GPT-translated.
+    """
+    source = (
+        (rec.get("tipo_documento") or "").strip()
+        or (rec.get("document_type") or "").strip()
+    )
+    if not source:
+        rec["tipo_documento"] = ""
+        rec["document_type"] = ""
+        return
+    rec["tipo_documento"] = (rec.get("tipo_documento") or "").strip() or source
+    rec["document_type"] = translate_pt_to_en(source)
+
+
+def summarize_document_text(text: str, doc_type: str = "") -> str:
+    """Summarize extracted CADE document text in English. Does not persist source text."""
+    if not text or not str(text).strip():
+        return ""
+    source = str(text).strip()
+    try:
+        resp = client.chat.completions.create(
+            model=TRANSLATE_MODEL,
+            temperature=0,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Summarize this CADE (Brazil) case document in 3-5 concise "
+                        "English sentences for a merger-control analyst. "
+                        "Do not invent facts. Keep parties, dates, and decisions."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Document type: {doc_type}\n\n{source}",
+                },
+            ],
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception:
+        logger.exception("GPT document summary failed")
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -726,6 +803,158 @@ def detect_changes(
     return changes
 
 
+def _pdf_bytes_to_text(pdf_bytes: bytes) -> str:
+    """Extract text from PDF bytes — PyPDF2 first, pymupdf fallback. Caller discards bytes."""
+    if not pdf_bytes:
+        return ""
+    try:
+        from PyPDF2 import PdfReader
+        reader = PdfReader(BytesIO(pdf_bytes))
+        parts = []
+        for page in reader.pages:
+            try:
+                text = page.extract_text()
+                if text:
+                    parts.append(text)
+            except Exception:
+                continue
+        result = "\n".join(parts).strip()
+        if result:
+            return result
+    except Exception as e:
+        logger.warning(f"    PyPDF2 extraction failed: {e}")
+
+    try:
+        import fitz
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        parts = [page.get_text() or "" for page in doc]
+        doc.close()
+        return "\n".join(parts).strip()
+    except Exception as e:
+        logger.warning(f"    pymupdf extraction failed: {e}")
+        return ""
+
+
+def extract_document_text(context, url: str) -> str:
+    """Open a CADE SEI document URL in the existing browser context and return text."""
+    if not url:
+        return ""
+    page = None
+    try:
+        try:
+            api_resp = context.request.get(url, timeout=90_000)
+            body = api_resp.body()
+            ctype = (api_resp.headers.get("content-type") or "").lower()
+            if body[:4] == b"%PDF" or "pdf" in ctype:
+                return _pdf_bytes_to_text(body)
+        except Exception as e:
+            logger.info(f"    Document request.get failed, opening page: {e}")
+
+        page = context.new_page()
+        download_chunks: List[bytes] = []
+
+        def _on_download(download):
+            try:
+                path = download.path()
+                if path:
+                    with open(path, "rb") as fh:
+                        download_chunks.append(fh.read())
+            except Exception:
+                pass
+
+        page.on("download", _on_download)
+        resp = page.goto(url, wait_until="networkidle", timeout=90000)
+        handle_image_captcha_if_present(page)
+        time.sleep(2)
+
+        if download_chunks:
+            data = download_chunks[0]
+            if data[:4] == b"%PDF":
+                return _pdf_bytes_to_text(data)
+
+        if resp:
+            body = resp.body()
+            ctype = (resp.headers.get("content-type") or "").lower()
+            if body[:4] == b"%PDF" or "pdf" in ctype:
+                return _pdf_bytes_to_text(body)
+
+        html = page.content()
+        soup = BeautifulSoup(html, "html.parser")
+        return soup.get_text(" ", strip=True)
+    except Exception:
+        logger.exception(f"    Failed to extract document text: {url}")
+        return ""
+    finally:
+        if page:
+            try:
+                page.close()
+            except Exception:
+                pass
+
+
+def enrich_new_change_items(context, changes: List[Tuple[str, Any, Any, str]]) -> None:
+    """
+    GPT-4o-mini Type EN / Description EN, plus document summary for new rows.
+
+    Mutates change new_val lists in place. Extracted document text is discarded.
+    Per-row failures skip Type EN / Description EN / Summary only.
+    """
+    for field, _old, new_val, _ctype in changes:
+        if field == "table_records":
+            for rec in new_val or []:
+                rec["summary"] = rec.get("summary") or ""
+                rec.pop("extracted_text", None)
+                try:
+                    _resolve_doc_type_pt_en(rec)
+                    original_type = rec.get("tipo_documento") or rec.get(
+                        "document_type") or ""
+                    url = rec.get("document_url") or ""
+                    if not url:
+                        continue
+                    logger.info(
+                        f"    Summarizing document {rec.get('documento_processo', '')}..."
+                    )
+                    text = extract_document_text(context, url)
+                    rec["summary"] = summarize_document_text(
+                        text, rec.get("document_type") or original_type
+                    )
+                except Exception:
+                    logger.exception(
+                        "Skip Type EN/summary for doc %s",
+                        rec.get("documento_processo", ""),
+                    )
+                    rec.setdefault("document_type", "")
+                    rec["summary"] = rec.get("summary") or ""
+        elif field == "historico_records":
+            for rec in new_val or []:
+                try:
+                    rec["description_en"] = translate_pt_to_en(
+                        rec.get("description") or ""
+                    )
+                except Exception:
+                    logger.exception("Skip Description EN for a history row")
+                    rec.setdefault("description_en", "")
+
+
+def _enrich_notified_changes(context, changes: List[Tuple[str, Any, Any, str]]) -> None:
+    """Run GPT enrich only when an update email will be sent (matched or USA-related).
+
+    Never raises — email/DB must proceed even if translation or summary fails.
+    """
+    try:
+        if any(
+            field in ("table_records", "historico_records")
+            for field, *_ in changes
+        ):
+            logger.info(
+                "[STEP 2.13a] Enriching new documents/history (GPT-4o-mini)")
+            enrich_new_change_items(context, changes)
+    except Exception:
+        logger.exception(
+            "Enrichment failed — sending email without Type EN/summary")
+
+
+
 # ---------------------------------------------------------------------------
 # DB update
 # ---------------------------------------------------------------------------
@@ -765,25 +994,17 @@ def update_case_in_db(
                     new_val)
 
             elif field == "table_records":
-                # Merge: existing + new, translate new tipo_documento
                 existing = list(case_doc.get("table_records") or [])
                 for rec in new_val:
                     tr = rec.copy()
-                    if "tipo_documento" in tr:
-                        tr["document_type"] = translate_to_english(
-                            tr["tipo_documento"])
-                        tr.pop("tipo_documento", None)
+                    tr.pop("extracted_text", None)
                     existing.append(tr)
                 update_fields["table_records"] = existing
 
             elif field == "historico_records":
-                # Merge: existing + new, translate descriptions
                 existing = list(case_doc.get("historico_records") or [])
                 for rec in new_val:
-                    tr = rec.copy()
-                    tr["description_en"] = translate_to_english(
-                        tr.get("description", ""))
-                    existing.append(tr)
+                    existing.append(rec.copy())
                 update_fields["historico_records"] = existing
 
         result = collection.update_one(
@@ -861,14 +1082,12 @@ def generate_update_email_html(
         target = deal.get("target") or deal.get("target_name", "N/A")
         acquirer = deal.get("acquirer") or deal.get("acquire_name", "N/A")
         deal_id = str(deal.get("_id", "N/A"))
-        prefix = "[FRMD]"
         deal_banner = f"""
 <div style="background:#dbeafe;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #2563eb;">
   <div style="font-weight:800;color:#1e40af;margin-bottom:4px;">Matched Deal</div>
   <div style="font-size:14px;color:#1e3a8a;"><b>Acquirer:</b> {escape_html(acquirer)} | <b>Target:</b> {escape_html(target)} | <b>Deal ID:</b> {escape_html(deal_id)}</div>
 </div>"""
     else:
-        prefix = "[FRUD]"
         deal_banner = """
 <div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
   <div style="font-weight:800;color:#92400e;">USA-Related (Unmatched)</div>
@@ -885,17 +1104,28 @@ def generate_update_email_html(
         for idx, rec in enumerate(new_table_items):
             bg = "#fffacd" if idx % 2 == 0 else "#fff9b3"
             dp = escape_html(str(rec.get("documento_processo", "")))
-            dt = escape_html(
-                str(rec.get("document_type", rec.get("tipo_documento", ""))))
+            dt = escape_html(str(rec.get("tipo_documento") or ""))
+            dt_en = escape_html(str(rec.get("document_type") or ""))
             dd = escape_html(str(rec.get("data_documento", "")))
             dr = escape_html(str(rec.get("data_registro", "")))
             un = escape_html(str(rec.get("unidade", "")))
+            sm = escape_html(str(rec.get("summary", "")))
             du = rec.get("document_url", "")
             dp_h = f'<a href="{escape_html(du)}" style="color:#4a90e2;">{dp}</a>' if du else dp
-            rows += f'<tr style="background:{bg};"><td style="padding:6px;border:1px solid #ddd;">{dp_h}</td><td style="padding:6px;border:1px solid #ddd;">{dt}</td><td style="padding:6px;border:1px solid #ddd;">{dd}</td><td style="padding:6px;border:1px solid #ddd;">{dr}</td><td style="padding:6px;border:1px solid #ddd;">{un}</td></tr>'
+            rows += (
+                f'<tr style="background:{bg};">'
+                f'<td style="padding:6px;border:1px solid #ddd;">{dp_h}</td>'
+                f'<td style="padding:6px;border:1px solid #ddd;">{dt}</td>'
+                f'<td style="padding:6px;border:1px solid #ddd;">{dt_en}</td>'
+                f'<td style="padding:6px;border:1px solid #ddd;">{dd}</td>'
+                f'<td style="padding:6px;border:1px solid #ddd;">{dr}</td>'
+                f'<td style="padding:6px;border:1px solid #ddd;">{un}</td>'
+                f'<td style="padding:6px;border:1px solid #ddd;max-width:280px;">{sm}</td>'
+                f'</tr>'
+            )
         doc_table_html = f"""
 <h3 style="margin-top:18px;">New Document Records ({len(new_table_items)})</h3>
-<table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#f5f5f5;"><th style="padding:6px;border:1px solid #ddd;text-align:left;">Doc Process</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Type</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Doc Date</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Reg Date</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Unit</th></tr></thead><tbody>{rows}</tbody></table>"""
+<table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#f5f5f5;"><th style="padding:6px;border:1px solid #ddd;text-align:left;">Doc Process</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Type</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Type EN</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Doc Date</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Reg Date</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Unit</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Summary</th></tr></thead><tbody>{rows}</tbody></table>"""
 
     # New history records table
     hist_table_html = ""
@@ -906,12 +1136,18 @@ def generate_update_email_html(
             dt_val = escape_html(str(rec.get("date_time", "")))
             un_val = escape_html(str(rec.get("unit", "")))
             desc = escape_html(str(rec.get("description", "")))
-            desc_en = escape_html(
-                str(rec.get("description_en", rec.get("description", ""))))
-            rows += f'<tr style="background:{bg};"><td style="padding:6px;border:1px solid #ddd;">{dt_val}</td><td style="padding:6px;border:1px solid #ddd;">{un_val}</td><td style="padding:6px;border:1px solid #ddd;">{desc_en}</td></tr>'
+            desc_en = escape_html(str(rec.get("description_en", "")))
+            rows += (
+                f'<tr style="background:{bg};">'
+                f'<td style="padding:6px;border:1px solid #ddd;">{dt_val}</td>'
+                f'<td style="padding:6px;border:1px solid #ddd;">{un_val}</td>'
+                f'<td style="padding:6px;border:1px solid #ddd;">{desc}</td>'
+                f'<td style="padding:6px;border:1px solid #ddd;">{desc_en}</td>'
+                f'</tr>'
+            )
         hist_table_html = f"""
 <h3 style="margin-top:18px;">New History Records ({len(new_hist_items)})</h3>
-<table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#f5f5f5;"><th style="padding:6px;border:1px solid #ddd;text-align:left;">Date/Time</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Unit</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Description</th></tr></thead><tbody>{rows}</tbody></table>"""
+<table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#f5f5f5;"><th style="padding:6px;border:1px solid #ddd;text-align:left;">Date/Time</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Unit</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Description</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Description EN</th></tr></thead><tbody>{rows}</tbody></table>"""
 
     html = f"""
 <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;max-width:900px;margin:0 auto;">
@@ -1161,6 +1397,7 @@ def process_brazil_cases_updates(headless: bool = True):
                             if deal:
                                 logger.info(
                                     "[STEP 2.14] Deal linked — sending email")
+                                _enrich_notified_changes(context, changes)
                                 if not send_update_email(case_doc, changes, deal):
                                     collect_error(
                                         error_items,
@@ -1240,6 +1477,7 @@ def process_brazil_cases_updates(headless: bool = True):
                                         context={"process": process_num},
                                     )
 
+                            _enrich_notified_changes(context, changes)
                             if not send_update_email(case_doc, changes, matched_deal, matched_by_regex=matched_by_regex):
                                 collect_error(
                                     error_items,
@@ -1291,6 +1529,7 @@ def process_brazil_cases_updates(headless: bool = True):
                             if is_usa:
                                 logger.info(
                                     "[STEP 2.19] USA-related — sending email")
+                                _enrich_notified_changes(context, changes)
                                 if not send_update_email(case_doc, changes, None):
                                     collect_error(
                                         error_items,
