@@ -20,17 +20,12 @@ from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
-import re
 import time
 
-import requests
-import urllib3
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from openai import OpenAI
 from playwright.sync_api import sync_playwright
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 # Load environment variables
@@ -109,10 +104,6 @@ PROXY_HOST = "108.59.242.138"
 PROXY_PORT = 46885
 PROXY_USERNAME = "GSenAgrfKhuNWkd"
 PROXY_PASSWORD = "8lmVa5yl0pKp9MI"
-PROXY_DICT = {
-    "http": f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}",
-    "https": f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}",
-}
 
 
 def utc_now_iso() -> str:
@@ -764,6 +755,8 @@ def run_accc_cases_register(test_mode: bool = False):
     error_items: List[Dict[str, Any]] = []
     items: List[Dict[str, Any]] = []
     new_cases: List[Dict[str, Any]] = []
+    llm_match_count = 0
+    regex_match_count = 0
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"
     logger.info("=" * 60)
     logger.info(f"[STEP 1] Starting ACCC Cases Register ({mode_label})")
@@ -806,65 +799,14 @@ def run_accc_cases_register(test_mode: bool = False):
         deals = fetch_open_deals()
         logger.info(f"Loaded {len(deals)} open/unknown deals for matching")
 
-        llm_match_count = 0
-        regex_match_count = 0
-
         # ------------------------------------------------------------------
-        # Step 1: Fetch list page HTML via residential proxy (requests)
+        # Fetch list + detail pages via Playwright (same Chrome TLS as
+        # accc_cases_update_monitor). requests is blocked by Akamai 403.
         # ------------------------------------------------------------------
         logger.info(
             f"Loading ACCC acquisitions register list page: {LIST_URL}")
         logger.info(f"Using residential proxy: {PROXY_HOST}:{PROXY_PORT}")
 
-        list_headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-
-        max_retries = 3
-        list_error: Optional[str] = None
-        for attempt in range(1, max_retries + 1):
-            try:
-                resp = requests.get(
-                    LIST_URL,
-                    headers=list_headers,
-                    proxies=PROXY_DICT,
-                    timeout=(10, 60),
-                    verify=False,
-                    allow_redirects=True,
-                )
-                resp.raise_for_status()
-                items = parse_list_items(resp.text)
-                logger.info(f"[STEP 1.3] Items: {items}")
-                if not items:
-                    raise Exception(
-                        "HTML fetched but no .views-row items found")
-                logger.info(
-                    f"Found {len(items)} list items from acquisitions register")
-                break
-            except Exception as e:
-                list_error = str(e)
-                logger.warning(
-                    f"Attempt {attempt}/{max_retries} failed loading list page: {e}")
-                if attempt == max_retries:
-                    collect_error(
-                        error_items,
-                        f"Failed to load list page after {max_retries} attempts: {list_error}",
-                        step="fetch_list_page",
-                        context={"url": LIST_URL, "attempts": max_retries},
-                    )
-                    return
-                wait_time = 5 * attempt
-                logger.info(f"Retrying in {wait_time}s...")
-                time.sleep(wait_time)
-
-        # ------------------------------------------------------------------
-        # Step 2: Process each item's detail page via Playwright
-        # ------------------------------------------------------------------
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
@@ -876,184 +818,224 @@ def run_accc_cases_register(test_mode: bool = False):
                     f"--proxy-server=http://{PROXY_HOST}:{PROXY_PORT}",
                 ],
             )
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                ),
-                proxy={
-                    "server": f"http://{PROXY_HOST}:{PROXY_PORT}",
-                    "username": PROXY_USERNAME,
-                    "password": PROXY_PASSWORD,
-                },
-            )
-            page = context.new_page()
-            logger.info(f"[STEP 2.1] Page: {page}")
-            for idx, item in enumerate(items, 1):
-                try:
-                    case_number = item.get("case_number")
-                    url = item.get("url")
-                    title = item.get("title", "")
+            try:
+                context = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                    ),
+                    proxy={
+                        "server": f"http://{PROXY_HOST}:{PROXY_PORT}",
+                        "username": PROXY_USERNAME,
+                        "password": PROXY_PASSWORD,
+                    },
+                )
+                page = context.new_page()
 
-                    logger.info(
-                        f"[{idx}/{len(items)}] Case {case_number}: {title}")
-
-                    if not case_number or not url:
-                        logger.warning(
-                            "  Missing case_number or url; skipping")
-                        continue
-
-                    if not test_mode and case_exists(collection, case_number):
-                        logger.info(
-                            "  Case already exists in accc_cases; skipping")
-                        continue
-
-                    case_info = extract_detail_page_case(page, url)
-                    logger.info(f"Accc daily check: case_info: {case_info}")
-                    if not case_info:
-                        collect_error(
-                            error_items,
-                            "Could not extract case info from detail page",
-                            step="scrape_detail_page",
-                            case_number=case_number,
-                            context={"url": url},
-                        )
-                        continue
-
-                    for key in [
-                        "acquisition_status",
-                        "type",
-                        "effective_notification_date",
-                        "title",
-                    ]:
-                        if key not in case_info and key in item:
-                            case_info[key] = item[key]
-
-                    now_iso = utc_now_iso()
-                    case_info.setdefault("created_at", now_iso)
-                    case_info["updated_at"] = now_iso
-
-                    case_title = case_info.get("title", "") or title
+                max_retries = 3
+                list_error: Optional[str] = None
+                for attempt in range(1, max_retries + 1):
                     try:
-                        matched_deal_id = match_case_to_deal(
-                            case_title, deals=deals)
-                    except Exception as e:
-                        logger.exception(f"Error during deal matching: {e}")
-                        collect_error(
-                            error_items,
-                            str(e),
-                            step="match_case_to_deal",
-                            case_number=case_number,
+                        page.goto(
+                            LIST_URL,
+                            wait_until="domcontentloaded",
+                            timeout=60000,
                         )
-                        matched_deal_id = None
-
-                    # Regex fallback — only when LLM found nothing
-                    matched_by_regex = False
-                    if matched_deal_id:
-                        llm_match_count += 1
-                    else:
-                        matched_deal_id = regex_match_deal_by_title(
-                            case_title, deals)
-                        if matched_deal_id:
-                            matched_by_regex = True
-                            regex_match_count += 1
-                            logger.info(
-                                f"  Regex fallback matched deal_id={matched_deal_id}")
-                        else:
-                            logger.info(
-                                "  No match (LLM + regex both returned None)")
-
-                    if test_mode:
-                        if matched_deal_id:
-                            case_info["deal_id"] = matched_deal_id
-                            logger.info(
-                                f"  Deal match found (deal_id={matched_deal_id})"
-                            )
-
-                        action = upsert_case_by_case_number(
-                            collection, case_info)
+                        try:
+                            page.wait_for_selector(".views-row", timeout=15000)
+                        except Exception:
+                            page.wait_for_timeout(5000)
+                        items = parse_list_items(page.content())
+                        logger.info(f"[STEP 1.3] Items: {items}")
+                        if not items:
+                            raise Exception(
+                                "HTML fetched but no .views-row items found")
                         logger.info(
-                            f"  [TEST MODE] Upserted case into accc_cases ({action})"
-                        )
+                            f"Found {len(items)} list items from acquisitions register")
+                        break
+                    except Exception as e:
+                        list_error = str(e)
+                        logger.warning(
+                            f"Attempt {attempt}/{max_retries} failed loading list page: {e}")
+                        if attempt == max_retries:
+                            collect_error(
+                                error_items,
+                                f"Failed to load list page after {max_retries} attempts: {list_error}",
+                                step="fetch_list_page",
+                                context={"url": LIST_URL, "attempts": max_retries},
+                            )
+                            return
+                        wait_time = 5 * attempt
+                        logger.info(f"Retrying in {wait_time}s...")
+                        time.sleep(wait_time)
 
-                        backup_case = dict(case_info)
-                        backup_case.pop("_id", None)
-                        new_cases.append(backup_case)
-                    else:
+                logger.info(f"[STEP 2.1] Page: {page}")
+                for idx, item in enumerate(items, 1):
+                    try:
+                        case_number = item.get("case_number")
+                        url = item.get("url")
+                        title = item.get("title", "")
+
+                        logger.info(
+                            f"[{idx}/{len(items)}] Case {case_number}: {title}")
+
+                        if not case_number or not url:
+                            logger.warning(
+                                "  Missing case_number or url; skipping")
+                            continue
+
+                        if not test_mode and case_exists(collection, case_number):
+                            logger.info(
+                                "  Case already exists in accc_cases; skipping")
+                            continue
+
+                        case_info = extract_detail_page_case(page, url)
+                        logger.info(f"Accc daily check: case_info: {case_info}")
+                        if not case_info:
+                            collect_error(
+                                error_items,
+                                "Could not extract case info from detail page",
+                                step="scrape_detail_page",
+                                case_number=case_number,
+                                context={"url": url},
+                            )
+                            continue
+
+                        for key in [
+                            "acquisition_status",
+                            "type",
+                            "effective_notification_date",
+                            "title",
+                        ]:
+                            if key not in case_info and key in item:
+                                case_info[key] = item[key]
+
+                        now_iso = utc_now_iso()
+                        case_info.setdefault("created_at", now_iso)
+                        case_info["updated_at"] = now_iso
+
+                        case_title = case_info.get("title", "") or title
+                        try:
+                            matched_deal_id = match_case_to_deal(
+                                case_title, deals=deals)
+                        except Exception as e:
+                            logger.exception(f"Error during deal matching: {e}")
+                            collect_error(
+                                error_items,
+                                str(e),
+                                step="match_case_to_deal",
+                                case_number=case_number,
+                            )
+                            matched_deal_id = None
+
+                        # Regex fallback — only when LLM found nothing
+                        matched_by_regex = False
                         if matched_deal_id:
-                            case_info["deal_id"] = matched_deal_id
-                            logger.info(
-                                f"  Deal match found (deal_id={matched_deal_id}); sending email"
-                            )
-                            deal_match = get_deal_by_id(matched_deal_id)
-                            if not send_new_case_email(case_info, matched_deal_id, deal_match, matched_by_regex=matched_by_regex):
-                                collect_error(
-                                    error_items,
-                                    "Failed to send new-case email",
-                                    step="send_email",
-                                    case_number=case_number,
-                                    context={"url": url},
-                                )
+                            llm_match_count += 1
                         else:
-                            try:
-                                case_details_str = prepare_case_payload_for_llm(
-                                    case_info)
-                                is_usa = bool(
-                                    verify_usa_relation(
-                                        company_details=case_details_str,
-                                        case_type="ACCC",
-                                    )
-                                )
-                            except Exception as e:
-                                logger.exception(
-                                    f"Error verifying USA relation: {e}")
-                                collect_error(
-                                    error_items,
-                                    str(e),
-                                    step="verify_usa_relation",
-                                    case_number=case_number,
-                                )
-                                is_usa = False
-
-                            if is_usa:
+                            matched_deal_id = regex_match_deal_by_title(
+                                case_title, deals)
+                            if matched_deal_id:
+                                matched_by_regex = True
+                                regex_match_count += 1
                                 logger.info(
-                                    "  Case appears USA-related (unmatched); sending email"
-                                )
-                                if not send_unmatched_usa_related_email(case_info):
-                                    collect_error(
-                                        error_items,
-                                        "Failed to send USA-related email",
-                                        step="send_email",
-                                        case_number=case_number,
-                                        context={"url": url},
-                                    )
+                                    f"  Regex fallback matched deal_id={matched_deal_id}")
+                            else:
+                                logger.info(
+                                    "  No match (LLM + regex both returned None)")
 
-                        inserted_id = insert_case(collection, case_info)
-                        if inserted_id:
+                        if test_mode:
+                            if matched_deal_id:
+                                case_info["deal_id"] = matched_deal_id
+                                logger.info(
+                                    f"  Deal match found (deal_id={matched_deal_id})"
+                                )
+
+                            action = upsert_case_by_case_number(
+                                collection, case_info)
                             logger.info(
-                                f"  Inserted new case into accc_cases (id={inserted_id})"
+                                f"  [TEST MODE] Upserted case into accc_cases ({action})"
                             )
+
                             backup_case = dict(case_info)
                             backup_case.pop("_id", None)
                             new_cases.append(backup_case)
                         else:
-                            collect_error(
-                                error_items,
-                                "Insert failed",
-                                step="insert_case",
-                                case_number=case_number,
-                            )
-                except Exception as e:
-                    logger.exception(f"Error processing list item #{idx}: {e}")
-                    collect_error(
-                        error_items,
-                        str(e),
-                        step="process_list_item",
-                        case_number=item.get("case_number", "N/A"),
-                    )
-                    continue
+                            if matched_deal_id:
+                                case_info["deal_id"] = matched_deal_id
+                                logger.info(
+                                    f"  Deal match found (deal_id={matched_deal_id}); sending email"
+                                )
+                                deal_match = get_deal_by_id(matched_deal_id)
+                                if not send_new_case_email(case_info, matched_deal_id, deal_match, matched_by_regex=matched_by_regex):
+                                    collect_error(
+                                        error_items,
+                                        "Failed to send new-case email",
+                                        step="send_email",
+                                        case_number=case_number,
+                                        context={"url": url},
+                                    )
+                            else:
+                                try:
+                                    case_details_str = prepare_case_payload_for_llm(
+                                        case_info)
+                                    is_usa = bool(
+                                        verify_usa_relation(
+                                            company_details=case_details_str,
+                                            case_type="ACCC",
+                                        )
+                                    )
+                                except Exception as e:
+                                    logger.exception(
+                                        f"Error verifying USA relation: {e}")
+                                    collect_error(
+                                        error_items,
+                                        str(e),
+                                        step="verify_usa_relation",
+                                        case_number=case_number,
+                                    )
+                                    is_usa = False
 
-            browser.close()
+                                if is_usa:
+                                    logger.info(
+                                        "  Case appears USA-related (unmatched); sending email"
+                                    )
+                                    if not send_unmatched_usa_related_email(case_info):
+                                        collect_error(
+                                            error_items,
+                                            "Failed to send USA-related email",
+                                            step="send_email",
+                                            case_number=case_number,
+                                            context={"url": url},
+                                        )
+
+                            inserted_id = insert_case(collection, case_info)
+                            if inserted_id:
+                                logger.info(
+                                    f"  Inserted new case into accc_cases (id={inserted_id})"
+                                )
+                                backup_case = dict(case_info)
+                                backup_case.pop("_id", None)
+                                new_cases.append(backup_case)
+                            else:
+                                collect_error(
+                                    error_items,
+                                    "Insert failed",
+                                    step="insert_case",
+                                    case_number=case_number,
+                                )
+                    except Exception as e:
+                        logger.exception(f"Error processing list item #{idx}: {e}")
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="process_list_item",
+                            case_number=item.get("case_number", "N/A"),
+                        )
+                        continue
+
+            finally:
+                browser.close()
 
         if new_cases:
             try:

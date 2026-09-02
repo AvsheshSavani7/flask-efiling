@@ -22,13 +22,9 @@ from typing import Any, Dict, List, Optional
 
 import time
 
-import requests
-import urllib3
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 load_dotenv(".env")
@@ -103,25 +99,12 @@ PROXY_HOST = "108.59.242.138"
 PROXY_PORT = 46885
 PROXY_USERNAME = "GSenAgrfKhuNWkd"
 PROXY_PASSWORD = "8lmVa5yl0pKp9MI"
-PROXY_DICT = {
-    "http": f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}",
-    "https": f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}",
-}
 
 BASE_URL = os.getenv("BASE_URL")
 # Webhook specifically for waiver cases that are still "Under assessment"
 UNDER_ASSESSMENT_WEBHOOK_URL = (
     f"{BASE_URL}/webhook/d50502ea-6746-4d4b-8dfe-fb7bd71e0a1f"
 )
-
-LIST_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-}
 
 
 def utc_now_iso() -> str:
@@ -199,21 +182,20 @@ def parse_list_items(html_content: str) -> List[Dict[str, Any]]:
     return items
 
 
-def fetch_list_page(url: str, attempt_label: str = "") -> Optional[str]:
-    """Fetch a single list page HTML using the residential proxy. Returns HTML or None."""
+def fetch_list_page(page, url: str, attempt_label: str = "") -> Optional[str]:
+    """Fetch a single list page via Playwright (Akamai-safe). Returns HTML or None."""
     max_retries = 3
     for attempt in range(1, max_retries + 1):
         try:
-            resp = requests.get(
-                url,
-                headers=LIST_HEADERS,
-                proxies=PROXY_DICT,
-                timeout=(10, 60),
-                verify=False,
-                allow_redirects=True,
-            )
-            resp.raise_for_status()
-            return resp.text
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            try:
+                page.wait_for_selector(".views-row", timeout=15000)
+            except Exception:
+                page.wait_for_timeout(5000)
+            html = page.content()
+            if "Access Denied" in html:
+                raise Exception("Akamai Access Denied (403)")
+            return html
         except Exception as e:
             label = f"{attempt_label} " if attempt_label else ""
             logger.warning(
@@ -906,51 +888,7 @@ def run_accc_waiver_register(test_mode: bool = False):
             )
             return
 
-        if test_mode:
-            logger.info(
-                "[STEP 2] TEST MODE — paginating all pages of the waiver register")
-            page_num = 0
-            while True:
-                list_url = page_url(page_num)
-                logger.info(f"  Fetching page {page_num}: {list_url}")
-                html = fetch_list_page(
-                    list_url, attempt_label=f"[page={page_num}]")
-                if not html:
-                    collect_error(
-                        error_items,
-                        f"Failed to fetch waiver list page {page_num}",
-                        step="fetch_list_page",
-                        context={"url": list_url, "page": page_num},
-                    )
-                    break
-                items = parse_list_items(html)
-                if not items:
-                    logger.info(
-                        f"  Page {page_num} returned 0 items — end of list")
-                    break
-                all_items.extend(items)
-                logger.info(
-                    f"  Page {page_num}: {len(items)} items (total so far: {len(all_items)})")
-                page_num += 1
-                time.sleep(2)
-        else:
-            logger.info("[STEP 2] LIVE MODE — fetching first page only")
-            list_url = page_url(0)
-            html = fetch_list_page(list_url, attempt_label="[page=0]")
-            if not html:
-                collect_error(
-                    error_items,
-                    "Failed to fetch first waiver list page",
-                    step="fetch_list_page",
-                    context={"url": list_url},
-                )
-                return
-            all_items = parse_list_items(html)
-            if not all_items:
-                logger.info("No items found on first page; nothing to process")
-                return
-
-        logger.info(f"Total list items to process: {len(all_items)}")
+        logger.info(f"Using residential proxy: {PROXY_HOST}:{PROXY_PORT}")
 
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -963,107 +901,158 @@ def run_accc_waiver_register(test_mode: bool = False):
                     f"--proxy-server=http://{PROXY_HOST}:{PROXY_PORT}",
                 ],
             )
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                ),
-                proxy={
-                    "server": f"http://{PROXY_HOST}:{PROXY_PORT}",
-                    "username": PROXY_USERNAME,
-                    "password": PROXY_PASSWORD,
-                },
-            )
-            pw_page = context.new_page()
-            open_deals = fetch_open_deals()
+            try:
+                context = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                    ),
+                    proxy={
+                        "server": f"http://{PROXY_HOST}:{PROXY_PORT}",
+                        "username": PROXY_USERNAME,
+                        "password": PROXY_PASSWORD,
+                    },
+                )
+                pw_page = context.new_page()
 
-            for idx, item in enumerate(all_items, 1):
-                try:
-                    case_number = item.get("case_number")
-                    url = item.get("url")
-                    title = item.get("title", "")
-
+                if test_mode:
                     logger.info(
-                        f"[{idx}/{len(all_items)}] Case {case_number}: {title}")
-
-                    if not case_number or not url:
-                        logger.warning(
-                            "  Missing case_number or url; skipping")
-                        continue
-
-                    list_status = item.get("acquisition_status", "")
-                    if waiver_case_exists(collection, case_number, list_status):
+                        "[STEP 2] TEST MODE — paginating all pages of the waiver register")
+                    page_num = 0
+                    while True:
+                        list_url = page_url(page_num)
+                        logger.info(f"  Fetching page {page_num}: {list_url}")
+                        html = fetch_list_page(
+                            pw_page, list_url, attempt_label=f"[page={page_num}]")
+                        if not html:
+                            collect_error(
+                                error_items,
+                                f"Failed to fetch waiver list page {page_num}",
+                                step="fetch_list_page",
+                                context={"url": list_url, "page": page_num},
+                            )
+                            break
+                        items = parse_list_items(html)
+                        if not items:
+                            logger.info(
+                                f"  Page {page_num} returned 0 items — end of list")
+                            break
+                        all_items.extend(items)
                         logger.info(
-                            f"  Case already in DB (status='{list_status}'); skipping"
-                        )
-                        continue
-
-                    case_info = extract_detail_page_case(pw_page, url)
-                    logger.info(f"  case_info: {case_info}")
-                    if not case_info:
+                            f"  Page {page_num}: {len(items)} items (total so far: {len(all_items)})")
+                        page_num += 1
+                        time.sleep(2)
+                else:
+                    logger.info("[STEP 2] LIVE MODE — fetching first page only")
+                    list_url = page_url(0)
+                    html = fetch_list_page(
+                        pw_page, list_url, attempt_label="[page=0]")
+                    if not html:
                         collect_error(
                             error_items,
-                            "Could not extract case info from detail page",
-                            step="scrape_detail_page",
-                            case_number=case_number,
-                            context={"url": url},
+                            "Failed to fetch first waiver list page",
+                            step="fetch_list_page",
+                            context={"url": list_url},
+                        )
+                        return
+                    all_items = parse_list_items(html)
+                    if not all_items:
+                        logger.info(
+                            "No items found on first page; nothing to process")
+                        return
+
+                logger.info(f"Total list items to process: {len(all_items)}")
+
+                open_deals = fetch_open_deals()
+
+                for idx, item in enumerate(all_items, 1):
+                    try:
+                        case_number = item.get("case_number")
+                        url = item.get("url")
+                        title = item.get("title", "")
+
+                        logger.info(
+                            f"[{idx}/{len(all_items)}] Case {case_number}: {title}")
+
+                        if not case_number or not url:
+                            logger.warning(
+                                "  Missing case_number or url; skipping")
+                            continue
+
+                        list_status = item.get("acquisition_status", "")
+                        if waiver_case_exists(collection, case_number, list_status):
+                            logger.info(
+                                f"  Case already in DB (status='{list_status}'); skipping"
+                            )
+                            continue
+
+                        case_info = extract_detail_page_case(pw_page, url)
+                        logger.info(f"  case_info: {case_info}")
+                        if not case_info:
+                            collect_error(
+                                error_items,
+                                "Could not extract case info from detail page",
+                                step="scrape_detail_page",
+                                case_number=case_number,
+                                context={"url": url},
+                            )
+                            continue
+
+                        for key in ["acquisition_status", "type", "effective_notification_date", "title"]:
+                            if key not in case_info and key in item:
+                                case_info[key] = item[key]
+
+                        now_iso = utc_now_iso()
+                        case_info.setdefault("created_at", now_iso)
+                        case_info["updated_at"] = now_iso
+
+                        detail_status = (case_info.get(
+                            "acquisition_status") or "").strip()
+
+                        if detail_status.lower() == "under assessment":
+                            if test_mode:
+                                logger.info(
+                                    "  [TEST MODE] Waiver is Under Assessment; skipping"
+                                )
+                            else:
+                                logger.info(
+                                    "  Waiver is Under Assessment — sending notification "
+                                    "(not inserting into DB)"
+                                )
+                                if not send_under_assessment_waiver_email(case_info):
+                                    collect_error(
+                                        error_items,
+                                        "Failed to send under-assessment waiver email",
+                                        step="send_email",
+                                        case_number=case_number,
+                                        context={"url": url},
+                                    )
+                            continue
+
+                        backup = _process_waiver_case(
+                            collection=collection,
+                            case_info=case_info,
+                            title=title,
+                            error_items=error_items,
+                            test_mode=test_mode,
+                            open_deals=open_deals,
+                            counters=counters,
+                        )
+                        if backup:
+                            new_cases.append(backup)
+
+                    except Exception as e:
+                        logger.exception(f"Error processing list item #{idx}: {e}")
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="process_list_item",
+                            case_number=item.get("case_number", "N/A"),
                         )
                         continue
 
-                    for key in ["acquisition_status", "type", "effective_notification_date", "title"]:
-                        if key not in case_info and key in item:
-                            case_info[key] = item[key]
-
-                    now_iso = utc_now_iso()
-                    case_info.setdefault("created_at", now_iso)
-                    case_info["updated_at"] = now_iso
-
-                    detail_status = (case_info.get(
-                        "acquisition_status") or "").strip()
-
-                    if detail_status.lower() == "under assessment":
-                        if test_mode:
-                            logger.info(
-                                "  [TEST MODE] Waiver is Under Assessment; skipping"
-                            )
-                        else:
-                            logger.info(
-                                "  Waiver is Under Assessment — sending notification "
-                                "(not inserting into DB)"
-                            )
-                            if not send_under_assessment_waiver_email(case_info):
-                                collect_error(
-                                    error_items,
-                                    "Failed to send under-assessment waiver email",
-                                    step="send_email",
-                                    case_number=case_number,
-                                    context={"url": url},
-                                )
-                        continue
-
-                    backup = _process_waiver_case(
-                        collection=collection,
-                        case_info=case_info,
-                        title=title,
-                        error_items=error_items,
-                        test_mode=test_mode,
-                        open_deals=open_deals,
-                        counters=counters,
-                    )
-                    if backup:
-                        new_cases.append(backup)
-
-                except Exception as e:
-                    logger.exception(f"Error processing list item #{idx}: {e}")
-                    collect_error(
-                        error_items,
-                        str(e),
-                        step="process_list_item",
-                        case_number=item.get("case_number", "N/A"),
-                    )
-                    continue
-
-            browser.close()
+            finally:
+                browser.close()
 
         if new_cases:
             try:
