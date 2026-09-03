@@ -208,20 +208,20 @@ def load_deals():
 # uk_cma_cases collection helpers
 # ===================================================================
 
-def get_existing_open_case_urls() -> set:
-    """Return a set of detail_url values from uk_cma_cases where case_state is Open."""
+def get_existing_case_urls() -> set:
+    """Return a set of detail_url values from all uk_cma_cases records."""
     if _uk_cma_cases_collection is None:
         print("⚠️ uk_cma_cases collection not available.")
         return set()
     try:
         cursor = _uk_cma_cases_collection.find(
-            {"case_state": "Open"}, {"detail_url": 1, "_id": 0})
+            {}, {"detail_url": 1, "_id": 0})
         urls = {doc["detail_url"] for doc in cursor if doc.get("detail_url")}
         print(
-            f"📋 Found {len(urls)} existing open cases in uk_cma_cases collection")
+            f"📋 Found {len(urls)} existing cases in uk_cma_cases collection")
         return urls
     except Exception as e:
-        print(f"⚠️ Error fetching existing open cases: {e}")
+        print(f"⚠️ Error fetching existing cases: {e}")
         traceback.print_exc()
         return set()
 
@@ -951,9 +951,9 @@ def main():
         print("STEP 1.2: Loading deals from MongoDB...")
         load_deals()
 
-        print("\nSTEP 1.3: Fetching existing open uk_cma_cases for dedup...")
-        existing_urls = get_existing_open_case_urls()
-        print(f"STEP 1.3.1: Existing open uk_cma_cases: {existing_urls}")
+        print("\nSTEP 1.3: Fetching existing uk_cma_cases for dedup...")
+        existing_urls = get_existing_case_urls()
+        print(f"STEP 1.3.1: Existing uk_cma_cases: {existing_urls}")
 
         print(f"\n{'='*60}")
         print("STEP 1.4: FETCHING & PARSING ATOM FEED")
