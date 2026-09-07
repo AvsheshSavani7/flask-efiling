@@ -27,12 +27,18 @@ from mongodb_connection import (
     init_mongodb_connection,
     is_connected,
 )
-from cade_cases_register import match_case_to_deal, regex_match_cade_deal
+from cade_cases_register import (
+    generate_update_email_html,
+    match_case_to_deal,
+    regex_match_cade_deal,
+)
 from deal_match_llm import fetch_open_deals
-from html import escape as escape_html
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import build_subject
 from n8n_email_service import post_email_payload
+from cade_document_summariser import (
+    apply_summariser_pending_flags,
+    summarise_cade_cases_parallel,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -892,12 +898,18 @@ def extract_document_text(context, url: str) -> str:
                 pass
 
 
-def enrich_new_change_items(context, changes: List[Tuple[str, Any, Any, str]]) -> None:
+def enrich_new_change_items(
+    context,
+    changes: List[Tuple[str, Any, Any, str]],
+    skip_document_summary: bool = False,
+) -> None:
     """
     GPT-4o-mini Type EN / Description EN, plus document summary for new rows.
 
     Mutates change new_val lists in place. Extracted document text is discarded.
     Per-row failures skip Type EN / Description EN / Summary only.
+    When skip_document_summary is True (FRMD per-doc summariser path), still
+    translate Type EN but do not download/summarize document text.
     """
     for field, _old, new_val, _ctype in changes:
         if field == "table_records":
@@ -906,6 +918,8 @@ def enrich_new_change_items(context, changes: List[Tuple[str, Any, Any, str]]) -
                 rec.pop("extracted_text", None)
                 try:
                     _resolve_doc_type_pt_en(rec)
+                    if skip_document_summary:
+                        continue
                     original_type = rec.get("tipo_documento") or rec.get(
                         "document_type") or ""
                     url = rec.get("document_url") or ""
@@ -936,7 +950,11 @@ def enrich_new_change_items(context, changes: List[Tuple[str, Any, Any, str]]) -
                     rec.setdefault("description_en", "")
 
 
-def _enrich_notified_changes(context, changes: List[Tuple[str, Any, Any, str]]) -> None:
+def _enrich_notified_changes(
+    context,
+    changes: List[Tuple[str, Any, Any, str]],
+    skip_document_summary: bool = False,
+) -> None:
     """Run GPT enrich only when an update email will be sent (matched or USA-related).
 
     Never raises — email/DB must proceed even if translation or summary fails.
@@ -948,7 +966,9 @@ def _enrich_notified_changes(context, changes: List[Tuple[str, Any, Any, str]]) 
         ):
             logger.info(
                 "[STEP 2.13a] Enriching new documents/history (GPT-4o-mini)")
-            enrich_new_change_items(context, changes)
+            enrich_new_change_items(
+                context, changes, skip_document_summary=skip_document_summary
+            )
     except Exception:
         logger.exception(
             "Enrichment failed — sending email without Type EN/summary")
@@ -967,6 +987,7 @@ def update_case_in_db(
     live_historico_records: List[Dict[str, Any]],
     close_case: bool = False,
     new_deal_id: Optional[str] = None,
+    summariser_pending: Optional[bool] = None,
 ) -> bool:
     """Apply detected changes to the stored record."""
     try:
@@ -982,6 +1003,9 @@ def update_case_in_db(
 
         if new_deal_id:
             update_fields["deal_id"] = new_deal_id
+
+        if summariser_pending is not None:
+            update_fields["summariser_pending"] = summariser_pending
 
         for field, _old, new_val, change_type in changes:
             if field == "type":
@@ -1009,6 +1033,10 @@ def update_case_in_db(
 
         result = collection.update_one(
             {"_id": case_id}, {"$set": update_fields})
+        for key, value in update_fields.items():
+            if key == "updated_at":
+                continue
+            case_doc[key] = value
         if result.modified_count > 0:
             logger.info(f"    Updated case in brazil_cases")
         else:
@@ -1028,146 +1056,33 @@ def _post_email_payload(payload: Dict[str, Any]) -> bool:
     return post_email_payload(payload)
 
 
-def generate_update_email_html(
-    case_data: Dict[str, Any],
+def _table_records_from_changes(
     changes: List[Tuple[str, Any, Any, str]],
+) -> List[Dict[str, Any]]:
+    for field, _old, new_val, _ctype in changes:
+        if field == "table_records":
+            return list(new_val or [])
+    return []
+
+
+def _build_frmd_summariser_job(
+    case_doc: Dict[str, Any],
     deal: Optional[Dict[str, Any]],
+    documents: List[Dict[str, Any]],
+    *,
+    event_type: str = "update",
     matched_by_regex: bool = False,
-) -> Tuple[str, str]:
-    """Generate subject + HTML email for an update notification."""
-    process = case_data.get("process", "N/A")
-    case_type = case_data.get("type_en") or case_data.get("type", "N/A")
-    reg_date = case_data.get("registration_date", "N/A")
-    interessados = case_data.get(
-        "interessados_en") or case_data.get("interessados", "N/A")
-    detail_url = case_data.get("detail_url", "")
-
-    # Build change summary lines
-    change_lines: List[str] = []
-    new_table_items: List[Dict[str, Any]] = []
-    new_hist_items: List[Dict[str, Any]] = []
-
-    for field, old_val, new_val, change_type in changes:
-        if field == "type":
-            change_lines.append(f"Type changed: {old_val} → {new_val}")
-        elif field == "interessados":
-            old_display = old_val if old_val else "(empty)"
-            new_display = new_val if new_val else "(empty)"
-
-            if change_type == "removed":
-                change_lines.append(
-                    f"Interested parties removed: {old_display} → {new_display}"
-                )
-            elif change_type == "new":
-                change_lines.append(
-                    f"Interested parties added: {old_display} → {new_display}"
-                )
-            else:
-                change_lines.append(
-                    f"Interested parties changed: {old_display} → {new_display}"
-                )
-        elif field == "table_records":
-            new_table_items = new_val or []
-            change_lines.append(
-                f"{len(new_table_items)} new document record(s)")
-        elif field == "historico_records":
-            new_hist_items = new_val or []
-            change_lines.append(f"{len(new_hist_items)} new history record(s)")
-
-    change_summary_html = "".join(
-        f"<li>{escape_html(l)}</li>" for l in change_lines)
-
-    # Deal info
-    if deal:
-        target = deal.get("target") or deal.get("target_name", "N/A")
-        acquirer = deal.get("acquirer") or deal.get("acquire_name", "N/A")
-        deal_id = str(deal.get("_id", "N/A"))
-        deal_banner = f"""
-<div style="background:#dbeafe;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #2563eb;">
-  <div style="font-weight:800;color:#1e40af;margin-bottom:4px;">Matched Deal</div>
-  <div style="font-size:14px;color:#1e3a8a;"><b>Acquirer:</b> {escape_html(acquirer)} | <b>Target:</b> {escape_html(target)} | <b>Deal ID:</b> {escape_html(deal_id)}</div>
-</div>"""
-    else:
-        deal_banner = """
-<div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
-  <div style="font-weight:800;color:#92400e;">USA-Related (Unmatched)</div>
-</div>"""
-
-    subject = build_subject("cade", "update", deal)
-    if matched_by_regex:
-        subject = subject.replace("[FRMD]", "[FRRMD]")
-
-    # New document records table
-    doc_table_html = ""
-    if new_table_items:
-        rows = ""
-        for idx, rec in enumerate(new_table_items):
-            bg = "#fffacd" if idx % 2 == 0 else "#fff9b3"
-            dp = escape_html(str(rec.get("documento_processo", "")))
-            dt = escape_html(str(rec.get("tipo_documento") or ""))
-            dt_en = escape_html(str(rec.get("document_type") or ""))
-            dd = escape_html(str(rec.get("data_documento", "")))
-            dr = escape_html(str(rec.get("data_registro", "")))
-            un = escape_html(str(rec.get("unidade", "")))
-            sm = escape_html(str(rec.get("summary", "")))
-            du = rec.get("document_url", "")
-            dp_h = f'<a href="{escape_html(du)}" style="color:#4a90e2;">{dp}</a>' if du else dp
-            rows += (
-                f'<tr style="background:{bg};">'
-                f'<td style="padding:6px;border:1px solid #ddd;">{dp_h}</td>'
-                f'<td style="padding:6px;border:1px solid #ddd;">{dt}</td>'
-                f'<td style="padding:6px;border:1px solid #ddd;">{dt_en}</td>'
-                f'<td style="padding:6px;border:1px solid #ddd;">{dd}</td>'
-                f'<td style="padding:6px;border:1px solid #ddd;">{dr}</td>'
-                f'<td style="padding:6px;border:1px solid #ddd;">{un}</td>'
-                f'<td style="padding:6px;border:1px solid #ddd;max-width:280px;">{sm}</td>'
-                f'</tr>'
-            )
-        doc_table_html = f"""
-<h3 style="margin-top:18px;">New Document Records ({len(new_table_items)})</h3>
-<table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#f5f5f5;"><th style="padding:6px;border:1px solid #ddd;text-align:left;">Doc Process</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Type</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Type EN</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Doc Date</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Reg Date</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Unit</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Summary</th></tr></thead><tbody>{rows}</tbody></table>"""
-
-    # New history records table
-    hist_table_html = ""
-    if new_hist_items:
-        rows = ""
-        for idx, rec in enumerate(new_hist_items):
-            bg = "#e0f2fe" if idx % 2 == 0 else "#dbeafe"
-            dt_val = escape_html(str(rec.get("date_time", "")))
-            un_val = escape_html(str(rec.get("unit", "")))
-            desc = escape_html(str(rec.get("description", "")))
-            desc_en = escape_html(str(rec.get("description_en", "")))
-            rows += (
-                f'<tr style="background:{bg};">'
-                f'<td style="padding:6px;border:1px solid #ddd;">{dt_val}</td>'
-                f'<td style="padding:6px;border:1px solid #ddd;">{un_val}</td>'
-                f'<td style="padding:6px;border:1px solid #ddd;">{desc}</td>'
-                f'<td style="padding:6px;border:1px solid #ddd;">{desc_en}</td>'
-                f'</tr>'
-            )
-        hist_table_html = f"""
-<h3 style="margin-top:18px;">New History Records ({len(new_hist_items)})</h3>
-<table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#f5f5f5;"><th style="padding:6px;border:1px solid #ddd;text-align:left;">Date/Time</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Unit</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Description</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Description EN</th></tr></thead><tbody>{rows}</tbody></table>"""
-
-    html = f"""
-<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;max-width:900px;margin:0 auto;">
-  <div style="background:#fef2f2;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #ef4444;">
-    <div style="font-weight:800;color:#dc2626;margin-bottom:6px;">CADE Brazil – Case Updated</div>
-    <ul style="margin:0;padding-left:20px;color:#991b1b;font-size:14px;">{change_summary_html}</ul>
-  </div>
-  {deal_banner}
-  <div style="margin-bottom:14px;">
-    <div><b>Process:</b> {escape_html(process)}</div>
-    <div><b>Type:</b> {escape_html(case_type)}</div>
-    <div><b>Registration Date:</b> {escape_html(reg_date)}</div>
-    <div><b>Interested Parties:</b> {escape_html(interessados)}</div>
-  </div>
-  {'<div style="margin-bottom:14px;"><a href="'+escape_html(detail_url)+'" target="_blank">View CADE Detail Page →</a></div>' if detail_url else ''}
-  {doc_table_html}
-  {hist_table_html}
-</div>""".strip()
-
-    return subject, html
+    headless: bool = True,
+) -> Dict[str, Any]:
+    return {
+        "documents": documents,
+        "case_doc": case_doc,
+        "deal": deal,
+        "event_type": event_type,
+        "matched_by_regex": matched_by_regex,
+        "test_mode": False,
+        "headless": headless,
+    }
 
 
 def send_update_email(
@@ -1214,6 +1129,7 @@ def process_brazil_cases_updates(headless: bool = True):
     total_changed = 0
     llm_match_count = 0
     regex_match_count = 0
+    frmd_jobs: List[Dict[str, Any]] = []
 
     try:
         logger.info("[STEP 1] Initializing MongoDB connection...")
@@ -1344,7 +1260,37 @@ def process_brazil_cases_updates(headless: bool = True):
                         )
 
                         if not changes and not should_close:
-                            logger.info("[STEP 2.8] No changes detected")
+                            pending_deal_id = case_doc.get("deal_id")
+                            if case_doc.get("summariser_pending") and pending_deal_id:
+                                logger.info(
+                                    "[STEP 2.8a] No live changes but summariser_pending "
+                                    "— queuing remaining documents"
+                                )
+                                pending_deal = None
+                                if deals_collection is not None:
+                                    try:
+                                        pending_deal = deals_collection.find_one(
+                                            {"_id": ObjectId(str(pending_deal_id)),
+                                             **deals_status_filter}
+                                        )
+                                    except Exception:
+                                        pending_deal = None
+                                if pending_deal:
+                                    frmd_jobs.append(
+                                        _build_frmd_summariser_job(
+                                            case_doc,
+                                            pending_deal,
+                                            list(case_doc.get("table_records") or []),
+                                            event_type="update",
+                                            headless=headless,
+                                        )
+                                    )
+                                else:
+                                    logger.warning(
+                                        "[STEP 2.8b] summariser_pending but deal not found"
+                                    )
+                            else:
+                                logger.info("[STEP 2.8] No changes detected")
                             continue
 
                         if not changes and should_close:
@@ -1395,9 +1341,20 @@ def process_brazil_cases_updates(headless: bool = True):
                                 )
 
                             if deal:
-                                logger.info(
-                                    "[STEP 2.14] Deal linked — sending email")
-                                _enrich_notified_changes(context, changes)
+                                new_docs = _table_records_from_changes(changes)
+                                if new_docs:
+                                    logger.info(
+                                        "[STEP 2.14] Deal linked — bulk update email + "
+                                        "per-document FRMD summariser"
+                                    )
+                                else:
+                                    logger.info(
+                                        "[STEP 2.14] Deal linked — sending bulk update email"
+                                    )
+                                _enrich_notified_changes(
+                                    context, changes,
+                                    skip_document_summary=bool(new_docs),
+                                )
                                 if not send_update_email(case_doc, changes, deal):
                                     collect_error(
                                         error_items,
@@ -1410,6 +1367,7 @@ def process_brazil_cases_updates(headless: bool = True):
                                     cases_collection, case_doc, changes,
                                     live_table, live_historico,
                                     close_case=should_close,
+                                    summariser_pending=True if new_docs else None,
                                 ):
                                     collect_error(
                                         error_items,
@@ -1417,6 +1375,14 @@ def process_brazil_cases_updates(headless: bool = True):
                                         step="update_case",
                                         context={"process": process_num,
                                                  "detail_url": detail_url},
+                                    )
+                                elif new_docs:
+                                    frmd_jobs.append(
+                                        _build_frmd_summariser_job(
+                                            case_doc, deal, new_docs,
+                                            event_type="update",
+                                            headless=headless,
+                                        )
                                     )
                                 continue
 
@@ -1477,8 +1443,21 @@ def process_brazil_cases_updates(headless: bool = True):
                                         context={"process": process_num},
                                     )
 
-                            _enrich_notified_changes(context, changes)
-                            if not send_update_email(case_doc, changes, matched_deal, matched_by_regex=matched_by_regex):
+                            _enrich_notified_changes(
+                                context, changes,
+                                skip_document_summary=bool(
+                                    _table_records_from_changes(changes)
+                                ),
+                            )
+                            new_docs = _table_records_from_changes(changes)
+                            if new_docs:
+                                logger.info(
+                                    "[STEP 2.16a] Bulk update email + per-document FRMD summariser"
+                                )
+                            if not send_update_email(
+                                case_doc, changes, matched_deal,
+                                matched_by_regex=matched_by_regex,
+                            ):
                                 collect_error(
                                     error_items,
                                     "Failed to send update email",
@@ -1491,6 +1470,7 @@ def process_brazil_cases_updates(headless: bool = True):
                                 live_table, live_historico,
                                 close_case=should_close,
                                 new_deal_id=matched_deal_id,
+                                summariser_pending=True if new_docs else None,
                             ):
                                 collect_error(
                                     error_items,
@@ -1498,6 +1478,17 @@ def process_brazil_cases_updates(headless: bool = True):
                                     step="update_case",
                                     context={"process": process_num,
                                              "detail_url": detail_url},
+                                )
+                            elif new_docs:
+                                case_for_job = dict(case_doc)
+                                case_for_job["deal_id"] = matched_deal_id
+                                frmd_jobs.append(
+                                    _build_frmd_summariser_job(
+                                        case_for_job, matched_deal, new_docs,
+                                        event_type="update",
+                                        matched_by_regex=matched_by_regex,
+                                        headless=headless,
+                                    )
                                 )
                         else:
                             is_usa = False
@@ -1570,6 +1561,26 @@ def process_brazil_cases_updates(headless: bool = True):
             finally:
                 browser.close()
                 logger.info("[STEP 2.20] Browser closed")
+
+        if frmd_jobs:
+            logger.info(
+                f"[STEP 2.20a] Summarising {len(frmd_jobs)} FRMD case(s) in parallel"
+            )
+            summariser_results = summarise_cade_cases_parallel(frmd_jobs)
+            apply_summariser_pending_flags(cases_collection, summariser_results)
+            for res in summariser_results:
+                if res.get("success"):
+                    continue
+                collect_error(
+                    error_items,
+                    res.get("error") or "CADE document summariser failed",
+                    step=res.get("step") or "brazil_summariser",
+                    context={
+                        "process": res.get("process"),
+                        "brazil_case_id": res.get("brazil_case_id"),
+                        "documento_processo": res.get("documento_processo"),
+                    },
+                )
 
     except Exception as e:
         logger.exception(

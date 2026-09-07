@@ -32,6 +32,10 @@ from html import escape as escape_html
 from log_utils import cleanup_old_logs, refresh_log_file
 from email_subject_builder import build_subject
 from n8n_email_service import post_email_payload
+from cade_document_summariser import (
+    apply_summariser_pending_flags,
+    summarise_cade_cases_parallel,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -972,89 +976,169 @@ def _post_email_payload(payload: Dict[str, Any]) -> bool:
     return post_email_payload(payload)
 
 
+def _bulk_email_changes(
+    case_data: Dict[str, Any],
+) -> List[Tuple[str, Any, Any, str]]:
+    """Treat current documents/history as new rows for a bulk email."""
+    changes: List[Tuple[str, Any, Any, str]] = []
+    docs = list(case_data.get("table_records") or [])
+    hist = list(case_data.get("historico_records") or [])
+    if docs:
+        changes.append(("table_records", None, docs, "new_items"))
+    if hist:
+        changes.append(("historico_records", None, hist, "new_items"))
+    return changes
+
+
+def generate_update_email_html(
+    case_data: Dict[str, Any],
+    changes: List[Tuple[str, Any, Any, str]],
+    deal: Optional[Dict[str, Any]],
+    matched_by_regex: bool = False,
+    event_type: str = "update",
+) -> Tuple[str, str]:
+    """Subject + HTML for a new-case or update bulk email (history table, no doc table)."""
+    process = case_data.get("process", "N/A")
+    case_type = case_data.get("type_en") or case_data.get("type", "N/A")
+    reg_date = case_data.get("registration_date", "N/A")
+    interessados = case_data.get(
+        "interessados_en") or case_data.get("interessados", "N/A")
+    detail_url = case_data.get("detail_url", "")
+    is_new = event_type == "new"
+
+    change_lines: List[str] = []
+    new_hist_items: List[Dict[str, Any]] = []
+
+    for field, old_val, new_val, change_type in changes:
+        if field == "type":
+            change_lines.append(f"Type changed: {old_val} → {new_val}")
+        elif field == "interessados":
+            old_display = old_val if old_val else "(empty)"
+            new_display = new_val if new_val else "(empty)"
+            if change_type == "removed":
+                change_lines.append(
+                    f"Interested parties removed: {old_display} → {new_display}"
+                )
+            elif change_type == "new":
+                change_lines.append(
+                    f"Interested parties added: {old_display} → {new_display}"
+                )
+            else:
+                change_lines.append(
+                    f"Interested parties changed: {old_display} → {new_display}"
+                )
+        elif field == "table_records":
+            change_lines.append(f"{len(new_val or [])} new document record(s)")
+        elif field == "historico_records":
+            new_hist_items = list(new_val or [])
+            change_lines.append(f"{len(new_hist_items)} new history record(s)")
+
+    change_summary_html = "".join(
+        f"<li>{escape_html(l)}</li>" for l in change_lines)
+
+    if deal:
+        target = deal.get("target") or deal.get("target_name", "N/A")
+        acquirer = deal.get("acquirer") or deal.get("acquire_name", "N/A")
+        deal_id = str(deal.get("_id", "N/A"))
+        deal_banner = f"""
+<div style="background:#dbeafe;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #2563eb;">
+  <div style="font-weight:800;color:#1e40af;margin-bottom:4px;">Matched Deal</div>
+  <div style="font-size:14px;color:#1e3a8a;"><b>Acquirer:</b> {escape_html(acquirer)} | <b>Target:</b> {escape_html(target)} | <b>Deal ID:</b> {escape_html(deal_id)}</div>
+</div>"""
+    else:
+        deal_banner = """
+<div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
+  <div style="font-weight:800;color:#92400e;">USA-Related (Unmatched)</div>
+</div>"""
+
+    subject_kind = "new" if is_new else "update"
+    subject = build_subject("cade", subject_kind, deal)
+    if matched_by_regex:
+        subject = subject.replace("[FRMD]", "[FRRMD]")
+
+    banner_title = (
+        "CADE Brazil – New Case" if is_new else "CADE Brazil – Case Updated"
+    )
+    hist_heading = (
+        "History Records" if is_new else "New History Records"
+    )
+
+    hist_table_html = ""
+    if new_hist_items:
+        rows = ""
+        for idx, rec in enumerate(new_hist_items):
+            bg = "#e0f2fe" if idx % 2 == 0 else "#dbeafe"
+            dt_val = escape_html(str(rec.get("date_time", "")))
+            un_val = escape_html(str(rec.get("unit", "")))
+            desc_en = str(
+                rec.get("description_en") or rec.get("description") or ""
+            )
+            desc = escape_html(desc_en)
+            rows += (
+                f'<tr style="background:{bg};">'
+                f'<td style="padding:6px;border:1px solid #ddd;">{dt_val}</td>'
+                f'<td style="padding:6px;border:1px solid #ddd;">{un_val}</td>'
+                f'<td style="padding:6px;border:1px solid #ddd;">{desc}</td>'
+                f'</tr>'
+            )
+        hist_table_html = f"""
+<h3 style="margin-top:18px;">{hist_heading} ({len(new_hist_items)})</h3>
+<table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#f5f5f5;"><th style="padding:6px;border:1px solid #ddd;text-align:left;">Date/Time</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Unit</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Description</th></tr></thead><tbody>{rows}</tbody></table>"""
+
+    html = f"""
+<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;max-width:900px;margin:0 auto;">
+  <div style="background:#fef2f2;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #ef4444;">
+    <div style="font-weight:800;color:#dc2626;margin-bottom:6px;">{banner_title}</div>
+    <ul style="margin:0;padding-left:20px;color:#991b1b;font-size:14px;">{change_summary_html}</ul>
+  </div>
+  {deal_banner}
+  <div style="margin-bottom:14px;">
+    <div><b>Process:</b> {escape_html(process)}</div>
+    <div><b>Type:</b> {escape_html(case_type)}</div>
+    <div><b>Registration Date:</b> {escape_html(reg_date)}</div>
+    <div><b>Interested Parties:</b> {escape_html(interessados)}</div>
+  </div>
+  {'<div style="margin-bottom:14px;"><a href="'+escape_html(detail_url)+'" target="_blank">View CADE Detail Page →</a></div>' if detail_url else ''}
+  {hist_table_html}
+</div>""".strip()
+
+    return subject, html
+
+
 def send_matched_email(
     case_data: Dict[str, Any],
     deal_id: str,
     deal_match: Optional[Dict[str, Any]] = None,
     matched_by_regex: bool = False,
 ) -> bool:
-    process = case_data.get("process", "N/A")
-    interessados = case_data.get(
-        "interessados_en") or case_data.get("interessados", "N/A")
-    case_type = case_data.get("type_en") or case_data.get("type", "N/A")
-    reg_date = case_data.get("registration_date", "N/A")
-    detail_url = case_data.get("detail_url", "")
-    table_records = case_data.get("table_records", [])
-
-    subject = build_subject("cade", "new", deal_match)
-    if matched_by_regex:
-        subject = subject.replace("[FRMD]", "[FRRMD]")
-
-    table_html = ""
-    if table_records:
-        rows_html = ""
-        for idx, rec in enumerate(table_records):
-            bg = "#ffffff" if idx % 2 == 0 else "#f9f9f9"
-            doc_process = escape_html(str(rec.get("documento_processo", "")))
-            doc_type = escape_html(
-                str(rec.get("document_type", rec.get("tipo_documento", ""))))
-            doc_date = escape_html(str(rec.get("data_documento", "")))
-            reg_d = escape_html(str(rec.get("data_registro", "")))
-            unit = escape_html(str(rec.get("unidade", "")))
-            doc_url = rec.get("document_url", "")
-            dp_html = f'<a href="{escape_html(doc_url)}" style="color:#4a90e2;">{doc_process}</a>' if doc_url else doc_process
-            rows_html += f'<tr style="background:{bg};"><td style="padding:6px;border:1px solid #ddd;">{dp_html}</td><td style="padding:6px;border:1px solid #ddd;">{doc_type}</td><td style="padding:6px;border:1px solid #ddd;">{doc_date}</td><td style="padding:6px;border:1px solid #ddd;">{reg_d}</td><td style="padding:6px;border:1px solid #ddd;">{unit}</td></tr>'
-
-        table_html = f"""<h3 style="margin-top:16px;">Documents ({len(table_records)})</h3>
-<table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#f5f5f5;"><th style="padding:6px;border:1px solid #ddd;text-align:left;">Doc Process</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Type</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Doc Date</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Reg Date</th><th style="padding:6px;border:1px solid #ddd;text-align:left;">Unit</th></tr></thead><tbody>{rows_html}</tbody></table>"""
-
-    html = f"""
-<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;max-width:900px;margin:0 auto;">
-  <h2 style="margin:0 0 10px 0;border-bottom:3px solid #4a90e2;padding-bottom:12px;">CADE Brazil – Matched Deal</h2>
-  <div style="margin-bottom:12px;">
-    <div><b>Process:</b> {escape_html(process)}</div>
-    <div><b>Type:</b> {escape_html(case_type)}</div>
-    <div><b>Registration Date:</b> {escape_html(reg_date)}</div>
-    <div><b>Interested Parties:</b> {escape_html(interessados)}</div>
-    <div><b>Deal ID:</b> {escape_html(deal_id)}</div>
-  </div>
-  {'<div><a href="'+escape_html(detail_url)+'" target="_blank">View CADE Detail Page →</a></div>' if detail_url else ''}
-  {table_html}
-</div>""".strip()
-
+    """FRMD new-case bulk email: history table + per-doc summaries sent separately."""
+    changes = _bulk_email_changes(case_data)
+    subject, html = generate_update_email_html(
+        case_data,
+        changes,
+        deal_match,
+        matched_by_regex=matched_by_regex,
+        event_type="new",
+    )
     return _post_email_payload({
         "subject": subject,
         "html": html,
-        "process": process,
+        "process": case_data.get("process", "N/A"),
         "deal_id": deal_id,
-        "detail_url": detail_url,
+        "detail_url": case_data.get("detail_url", ""),
         "is_new_case": True,
+        "update_type": "brazil_case_new",
+        "changed_fields": [c[0] for c in changes],
     })
 
 
 def send_usa_related_email(case_data: Dict[str, Any]) -> bool:
     process = case_data.get("process", "N/A")
-    interessados = case_data.get(
-        "interessados_en") or case_data.get("interessados", "N/A")
-    case_type = case_data.get("type_en") or case_data.get("type", "N/A")
-    reg_date = case_data.get("registration_date", "N/A")
     detail_url = case_data.get("detail_url", "")
-
-    subject = build_subject("cade", "new")
-
-    html = f"""
-<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;max-width:900px;margin:0 auto;">
-  <h2 style="margin:0 0 10px 0;border-bottom:3px solid #f59e0b;padding-bottom:12px;">CADE Brazil – USA-Related (Unmatched)</h2>
-  <div style="background:#f59e0b;color:white;padding:6px 12px;border-radius:4px;display:inline-block;margin-bottom:12px;font-weight:bold;">USA-RELATED</div>
-  <div style="margin-bottom:12px;">
-    <div><b>Process:</b> {escape_html(process)}</div>
-    <div><b>Type:</b> {escape_html(case_type)}</div>
-    <div><b>Registration Date:</b> {escape_html(reg_date)}</div>
-    <div><b>Interested Parties:</b> {escape_html(interessados)}</div>
-  </div>
-  {'<div><a href="'+escape_html(detail_url)+'" target="_blank">View CADE Detail Page →</a></div>' if detail_url else ''}
-</div>""".strip()
-
+    changes = _bulk_email_changes(case_data)
+    subject, html = generate_update_email_html(
+        case_data, changes, None, event_type="new",
+    )
     return _post_email_payload({
         "subject": subject,
         "html": html,
@@ -1064,6 +1148,8 @@ def send_usa_related_email(case_data: Dict[str, Any]) -> bool:
         "usa_related": True,
         "is_unmatched": True,
         "is_new_case": True,
+        "update_type": "brazil_case_new",
+        "changed_fields": [c[0] for c in changes],
     })
 
 
@@ -1100,6 +1186,7 @@ def run_cade_cases_register(
     new_cases: List[Dict[str, Any]] = []
     llm_match_count = 0
     regex_match_count = 0
+    frmd_jobs: List[Dict[str, Any]] = []
 
     try:
         logger.info("[STEP 1] Initializing MongoDB connection...")
@@ -1317,19 +1404,9 @@ def run_cade_cases_register(
                             logger.info(
                                 f"[STEP 2.11] Deal match found (deal_id={matched_deal_id})")
                             case_doc["deal_id"] = matched_deal_id
-
-                            if not test_mode:
-                                deal_match = get_deal_by_id(matched_deal_id)
-                                if not send_matched_email(case_doc, matched_deal_id, deal_match, matched_by_regex=matched_by_regex):
-                                    collect_error(
-                                        error_items,
-                                        "Failed to send matched-case email",
-                                        step="send_email",
-                                        context={
-                                            "detail_url": detail_url,
-                                            "process": process_num,
-                                        },
-                                    )
+                            case_doc["summariser_pending"] = True
+                            # FRMD emails are sent per document after insert
+                            # (see frmd_jobs / summarise_cade_cases_parallel).
                         else:
                             is_usa = False
                             if interessados_text:
@@ -1384,6 +1461,34 @@ def run_cade_cases_register(
                             backup = dict(case_doc)
                             backup.pop("_id", None)
                             new_cases.append(backup)
+                            if matched_deal_id and not test_mode:
+                                deal_match = get_deal_by_id(matched_deal_id)
+                                if not send_matched_email(
+                                    case_doc,
+                                    matched_deal_id,
+                                    deal_match,
+                                    matched_by_regex=matched_by_regex,
+                                ):
+                                    collect_error(
+                                        error_items,
+                                        "Failed to send new-case bulk email",
+                                        step="send_email",
+                                        context={
+                                            "detail_url": detail_url,
+                                            "process": process_num,
+                                        },
+                                    )
+                                frmd_jobs.append({
+                                    "documents": list(
+                                        case_doc.get("table_records") or []
+                                    ),
+                                    "case_doc": dict(case_doc),
+                                    "deal": deal_match,
+                                    "event_type": "new",
+                                    "matched_by_regex": matched_by_regex,
+                                    "test_mode": False,
+                                    "headless": headless,
+                                })
                         else:
                             collect_error(
                                 error_items,
@@ -1407,6 +1512,26 @@ def run_cade_cases_register(
             finally:
                 browser.close()
                 logger.info("[STEP 2.18] Browser closed")
+
+        if frmd_jobs:
+            logger.info(
+                f"[STEP 2.18a] Summarising {len(frmd_jobs)} FRMD case(s) in parallel"
+            )
+            summariser_results = summarise_cade_cases_parallel(frmd_jobs)
+            apply_summariser_pending_flags(collection, summariser_results)
+            for res in summariser_results:
+                if res.get("success"):
+                    continue
+                collect_error(
+                    error_items,
+                    res.get("error") or "CADE document summariser failed",
+                    step=res.get("step") or "brazil_summariser",
+                    context={
+                        "process": res.get("process"),
+                        "brazil_case_id": res.get("brazil_case_id"),
+                        "documento_processo": res.get("documento_processo"),
+                    },
+                )
 
         if new_cases:
             try:
