@@ -7,7 +7,6 @@ import re
 import base64
 import datetime
 from datetime import timezone, timedelta
-from io import BytesIO
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
@@ -37,6 +36,7 @@ from log_utils import cleanup_old_logs, refresh_log_file
 from n8n_email_service import post_email_payload
 from cade_document_summariser import (
     apply_summariser_pending_flags,
+    extract_document_text,
     summarise_cade_cases_parallel,
 )
 
@@ -807,95 +807,6 @@ def detect_changes(
                        new_hist_items, "new_items"))
 
     return changes
-
-
-def _pdf_bytes_to_text(pdf_bytes: bytes) -> str:
-    """Extract text from PDF bytes — PyPDF2 first, pymupdf fallback. Caller discards bytes."""
-    if not pdf_bytes:
-        return ""
-    try:
-        from PyPDF2 import PdfReader
-        reader = PdfReader(BytesIO(pdf_bytes))
-        parts = []
-        for page in reader.pages:
-            try:
-                text = page.extract_text()
-                if text:
-                    parts.append(text)
-            except Exception:
-                continue
-        result = "\n".join(parts).strip()
-        if result:
-            return result
-    except Exception as e:
-        logger.warning(f"    PyPDF2 extraction failed: {e}")
-
-    try:
-        import fitz
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        parts = [page.get_text() or "" for page in doc]
-        doc.close()
-        return "\n".join(parts).strip()
-    except Exception as e:
-        logger.warning(f"    pymupdf extraction failed: {e}")
-        return ""
-
-
-def extract_document_text(context, url: str) -> str:
-    """Open a CADE SEI document URL in the existing browser context and return text."""
-    if not url:
-        return ""
-    page = None
-    try:
-        try:
-            api_resp = context.request.get(url, timeout=90_000)
-            body = api_resp.body()
-            ctype = (api_resp.headers.get("content-type") or "").lower()
-            if body[:4] == b"%PDF" or "pdf" in ctype:
-                return _pdf_bytes_to_text(body)
-        except Exception as e:
-            logger.info(f"    Document request.get failed, opening page: {e}")
-
-        page = context.new_page()
-        download_chunks: List[bytes] = []
-
-        def _on_download(download):
-            try:
-                path = download.path()
-                if path:
-                    with open(path, "rb") as fh:
-                        download_chunks.append(fh.read())
-            except Exception:
-                pass
-
-        page.on("download", _on_download)
-        resp = page.goto(url, wait_until="networkidle", timeout=90000)
-        handle_image_captcha_if_present(page)
-        time.sleep(2)
-
-        if download_chunks:
-            data = download_chunks[0]
-            if data[:4] == b"%PDF":
-                return _pdf_bytes_to_text(data)
-
-        if resp:
-            body = resp.body()
-            ctype = (resp.headers.get("content-type") or "").lower()
-            if body[:4] == b"%PDF" or "pdf" in ctype:
-                return _pdf_bytes_to_text(body)
-
-        html = page.content()
-        soup = BeautifulSoup(html, "html.parser")
-        return soup.get_text(" ", strip=True)
-    except Exception:
-        logger.exception(f"    Failed to extract document text: {url}")
-        return ""
-    finally:
-        if page:
-            try:
-                page.close()
-            except Exception:
-                pass
 
 
 def enrich_new_change_items(

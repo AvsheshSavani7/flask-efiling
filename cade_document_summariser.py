@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import traceback
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
@@ -1777,8 +1778,74 @@ def _ocr_pdf_bytes(pdf_bytes: bytes) -> str:
         return ""
 
 
+def _is_pdf_bytes(data: bytes) -> bool:
+    return bool(data) and data[:4] == b"%PDF"
+
+
+def _is_zip_bytes(data: bytes) -> bool:
+    return bool(data) and data[:2] == b"PK"
+
+
+def _pdf_payload_to_text(pdf_bytes: bytes) -> str:
+    text = _pdf_bytes_to_text(pdf_bytes)
+    if text:
+        return text
+    return _ocr_pdf_bytes(pdf_bytes)
+
+
+def _zip_bytes_to_text(zip_bytes: bytes) -> str:
+    """Extract text from every PDF inside a ZIP and concatenate."""
+    if not _is_zip_bytes(zip_bytes):
+        return ""
+    parts: List[str] = []
+    try:
+        with zipfile.ZipFile(BytesIO(zip_bytes)) as zf:
+            names = [
+                name for name in zf.namelist()
+                if name.lower().endswith(".pdf")
+                and not name.endswith("/")
+                and "__macosx/" not in name.lower()
+            ]
+            names.sort(key=lambda n: n.lower())
+            logger.info("    ZIP contains %s PDF(s)", len(names))
+            for name in names:
+                try:
+                    data = zf.read(name)
+                except Exception as e:
+                    logger.warning("    ZIP read failed for %s: %s", name, e)
+                    continue
+                text = _pdf_payload_to_text(data)
+                if text:
+                    parts.append(f"--- {name} ---\n{text}")
+                    logger.info(
+                        "    ZIP PDF %s → %s chars", name, f"{len(text):,}"
+                    )
+                else:
+                    logger.warning("    No text from ZIP PDF %s", name)
+    except zipfile.BadZipFile as e:
+        logger.warning("    Invalid ZIP bytes: %s", e)
+        return ""
+    except Exception as e:
+        logger.warning("    ZIP extraction failed: %s", e)
+        return ""
+    return "\n\n".join(parts).strip()
+
+
+def _payload_to_text(data: bytes, content_type: str = "") -> str:
+    """Turn downloaded PDF or ZIP bytes into document text."""
+    if not data:
+        return ""
+    ctype = (content_type or "").lower()
+    if _is_pdf_bytes(data) or "pdf" in ctype:
+        if _is_pdf_bytes(data):
+            return _pdf_payload_to_text(data)
+    if _is_zip_bytes(data) or "zip" in ctype:
+        return _zip_bytes_to_text(data)
+    return ""
+
+
 def extract_document_text(context, url: str) -> str:
-    """Open a CADE SEI document URL and return extracted text."""
+    """Open a CADE SEI document URL and return extracted text (PDF or ZIP of PDFs)."""
     if not url:
         return ""
     page = None
@@ -1788,11 +1855,11 @@ def extract_document_text(context, url: str) -> str:
             api_resp = context.request.get(url, timeout=90_000)
             body = api_resp.body()
             ctype = (api_resp.headers.get("content-type") or "").lower()
-            if body[:4] == b"%PDF" or "pdf" in ctype:
+            text = _payload_to_text(body, ctype)
+            if text:
+                return text
+            if _is_pdf_bytes(body):
                 pdf_bytes = body
-                text = _pdf_bytes_to_text(body)
-                if text:
-                    return text
         except Exception as e:
             logger.info("    Document request.get failed, opening page: %s", e)
 
@@ -1809,25 +1876,44 @@ def extract_document_text(context, url: str) -> str:
                 pass
 
         page.on("download", _on_download)
-        resp = page.goto(url, wait_until="networkidle", timeout=90000)
-        time.sleep(2)
-
-        if download_chunks:
-            data = download_chunks[0]
-            if data[:4] == b"%PDF":
-                pdf_bytes = data
-                text = _pdf_bytes_to_text(data)
+        resp = None
+        try:
+            resp = page.goto(url, wait_until="commit", timeout=90000)
+            time.sleep(2)
+        except Exception as e:
+            # ZIP/PDF attachments abort navigation (net::ERR_ABORTED).
+            logger.info("    page.goto ended (likely file download): %s", e)
+            time.sleep(2)
+            try:
+                api_resp = context.request.get(url, timeout=90_000)
+                body = api_resp.body()
+                ctype = (api_resp.headers.get("content-type") or "").lower()
+                text = _payload_to_text(body, ctype)
                 if text:
                     return text
+                if _is_pdf_bytes(body):
+                    pdf_bytes = body
+            except Exception as retry_e:
+                logger.info("    retry request.get after abort failed: %s", retry_e)
+
+        for data in download_chunks:
+            text = _payload_to_text(data)
+            if text:
+                return text
+            if _is_pdf_bytes(data):
+                pdf_bytes = data
 
         if resp:
-            body = resp.body()
-            ctype = (resp.headers.get("content-type") or "").lower()
-            if body[:4] == b"%PDF" or "pdf" in ctype:
-                pdf_bytes = body
-                text = _pdf_bytes_to_text(body)
+            try:
+                body = resp.body()
+                ctype = (resp.headers.get("content-type") or "").lower()
+                text = _payload_to_text(body, ctype)
                 if text:
                     return text
+                if _is_pdf_bytes(body):
+                    pdf_bytes = body
+            except Exception:
+                pass
 
         html = page.content()
         if "captcha" in html.lower() and "g-recaptcha" in html.lower():
