@@ -6,6 +6,7 @@ import logging
 import re
 import base64
 import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 from datetime import timezone, timedelta
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Tuple
@@ -35,9 +36,11 @@ from deal_match_llm import fetch_open_deals
 from log_utils import cleanup_old_logs, refresh_log_file
 from n8n_email_service import post_email_payload
 from cade_document_summariser import (
+    CADE_SUMMARISER_WORKERS,
+    COLLECTION_NAME,
     apply_summariser_pending_flags,
     extract_document_text,
-    summarise_cade_cases_parallel,
+    summarise_cade_case_documents,
 )
 
 # ---------------------------------------------------------------------------
@@ -996,6 +999,88 @@ def _build_frmd_summariser_job(
     }
 
 
+def _unfinished_frmd_documents(
+    case_doc: Dict[str, Any],
+    documents: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Drop docs that already have email_sent=True in brazil_summariser."""
+    if not documents:
+        return []
+    deal_id = str(case_doc.get("deal_id") or "")
+    brazil_case_id = str(case_doc.get("_id") or "")
+    if not deal_id or not brazil_case_id:
+        return list(documents)
+    db = get_database()
+    if db is None:
+        return list(documents)
+    try:
+        done_ids = set()
+        for row in db[COLLECTION_NAME].find(
+            {
+                "deal_id": deal_id,
+                "brazil_case_id": brazil_case_id,
+                "email_sent": True,
+            },
+            {"metadata.document_id": 1},
+        ):
+            doc_id = str((row.get("metadata") or {}).get("document_id") or "")
+            if doc_id:
+                done_ids.add(doc_id)
+        return [
+            rec for rec in documents
+            if str(rec.get("documento_processo") or "") not in done_ids
+        ]
+    except Exception:
+        logger.exception("Could not filter finished FRMD documents")
+        return list(documents)
+
+
+class _ImmediateFrmdSummariser:
+    """Run FRMD document summariser in the background while scrape continues."""
+
+    def __init__(self, max_workers: Optional[int] = None):
+        workers = max(1, int(max_workers or CADE_SUMMARISER_WORKERS))
+        self._executor = ThreadPoolExecutor(max_workers=workers)
+        self._futures: List[Future] = []
+
+    def submit(self, job: Optional[Dict[str, Any]]) -> None:
+        if not job or not job.get("documents"):
+            return
+        process = (job.get("case_doc") or {}).get("process", "N/A")
+        logger.info(
+            "[STEP 2.14a] Starting immediate FRMD summariser for %s (%s doc(s))",
+            process,
+            len(job["documents"]),
+        )
+        payload = dict(job)
+        payload.pop("playwright_context", None)
+        self._futures.append(
+            self._executor.submit(summarise_cade_case_documents, **payload)
+        )
+
+    def wait(self) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        if not self._futures:
+            self._executor.shutdown(wait=False)
+            return results
+        logger.info(
+            "[STEP 2.20a] Waiting for %s in-flight FRMD summariser job(s)",
+            len(self._futures),
+        )
+        for fut in as_completed(self._futures):
+            try:
+                results.append(fut.result())
+            except Exception as e:
+                logger.exception("Immediate FRMD summariser worker failed: %s", e)
+                results.append({
+                    "success": False,
+                    "error": str(e),
+                    "step": "brazil_summariser",
+                })
+        self._executor.shutdown(wait=True)
+        return results
+
+
 def send_update_email(
     case_data: Dict[str, Any],
     changes: List[Tuple[str, Any, Any, str]],
@@ -1040,7 +1125,8 @@ def process_brazil_cases_updates(headless: bool = True):
     total_changed = 0
     llm_match_count = 0
     regex_match_count = 0
-    frmd_jobs: List[Dict[str, Any]] = []
+    summariser_pool: Optional[_ImmediateFrmdSummariser] = None
+    cases_collection = None
 
     try:
         logger.info("[STEP 1] Initializing MongoDB connection...")
@@ -1090,6 +1176,8 @@ def process_brazil_cases_updates(headless: bool = True):
 
         logger.info(
             f"[STEP 1.6] Found {len(cases)} open records in brazil_cases")
+
+        summariser_pool = _ImmediateFrmdSummariser()
 
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -1175,7 +1263,7 @@ def process_brazil_cases_updates(headless: bool = True):
                             if case_doc.get("summariser_pending") and pending_deal_id:
                                 logger.info(
                                     "[STEP 2.8a] No live changes but summariser_pending "
-                                    "— queuing remaining documents"
+                                    "— starting immediate summariser for unfinished docs"
                                 )
                                 pending_deal = None
                                 if deals_collection is not None:
@@ -1187,15 +1275,34 @@ def process_brazil_cases_updates(headless: bool = True):
                                     except Exception:
                                         pending_deal = None
                                 if pending_deal:
-                                    frmd_jobs.append(
-                                        _build_frmd_summariser_job(
-                                            case_doc,
-                                            pending_deal,
-                                            list(case_doc.get("table_records") or []),
-                                            event_type="update",
-                                            headless=headless,
-                                        )
+                                    pending_docs = _unfinished_frmd_documents(
+                                        case_doc,
+                                        list(case_doc.get("table_records") or []),
                                     )
+                                    if pending_docs:
+                                        summariser_pool.submit(
+                                            _build_frmd_summariser_job(
+                                                case_doc,
+                                                pending_deal,
+                                                pending_docs,
+                                                event_type="update",
+                                                headless=headless,
+                                            )
+                                        )
+                                    else:
+                                        logger.info(
+                                            "[STEP 2.8a] All documents already summarised "
+                                            "— clearing summariser_pending"
+                                        )
+                                        apply_summariser_pending_flags(
+                                            cases_collection,
+                                            [{
+                                                "success": True,
+                                                "brazil_case_id": str(
+                                                    case_doc.get("_id") or ""
+                                                ),
+                                            }],
+                                        )
                                 else:
                                     logger.warning(
                                         "[STEP 2.8b] summariser_pending but deal not found"
@@ -1288,7 +1395,7 @@ def process_brazil_cases_updates(headless: bool = True):
                                                  "detail_url": detail_url},
                                     )
                                 elif new_docs:
-                                    frmd_jobs.append(
+                                    summariser_pool.submit(
                                         _build_frmd_summariser_job(
                                             case_doc, deal, new_docs,
                                             event_type="update",
@@ -1393,7 +1500,7 @@ def process_brazil_cases_updates(headless: bool = True):
                             elif new_docs:
                                 case_for_job = dict(case_doc)
                                 case_for_job["deal_id"] = matched_deal_id
-                                frmd_jobs.append(
+                                summariser_pool.submit(
                                     _build_frmd_summariser_job(
                                         case_for_job, matched_deal, new_docs,
                                         event_type="update",
@@ -1473,26 +1580,6 @@ def process_brazil_cases_updates(headless: bool = True):
                 browser.close()
                 logger.info("[STEP 2.20] Browser closed")
 
-        if frmd_jobs:
-            logger.info(
-                f"[STEP 2.20a] Summarising {len(frmd_jobs)} FRMD case(s) in parallel"
-            )
-            summariser_results = summarise_cade_cases_parallel(frmd_jobs)
-            apply_summariser_pending_flags(cases_collection, summariser_results)
-            for res in summariser_results:
-                if res.get("success"):
-                    continue
-                collect_error(
-                    error_items,
-                    res.get("error") or "CADE document summariser failed",
-                    step=res.get("step") or "brazil_summariser",
-                    context={
-                        "process": res.get("process"),
-                        "brazil_case_id": res.get("brazil_case_id"),
-                        "documento_processo": res.get("documento_processo"),
-                    },
-                )
-
     except Exception as e:
         logger.exception(
             f"Unhandled error in process_brazil_cases_updates(): {e}")
@@ -1503,6 +1590,35 @@ def process_brazil_cases_updates(headless: bool = True):
         )
 
     finally:
+        if summariser_pool is not None:
+            try:
+                summariser_results = summariser_pool.wait()
+                apply_summariser_pending_flags(
+                    cases_collection, summariser_results
+                )
+                for res in summariser_results:
+                    if res.get("success"):
+                        continue
+                    collect_error(
+                        error_items,
+                        res.get("error") or "CADE document summariser failed",
+                        step=res.get("step") or "brazil_summariser",
+                        context={
+                            "process": res.get("process"),
+                            "brazil_case_id": res.get("brazil_case_id"),
+                            "documento_processo": res.get("documento_processo"),
+                        },
+                    )
+            except Exception as e:
+                logger.exception(
+                    "Failed while waiting for FRMD summariser workers: %s", e
+                )
+                collect_error(
+                    error_items,
+                    str(e),
+                    step="brazil_summariser",
+                )
+
         send_error_summary(error_items, SCRIPT_NAME)
 
         elapsed = round(time.time() - run_start, 1)
