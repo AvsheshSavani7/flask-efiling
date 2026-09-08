@@ -3135,6 +3135,7 @@ KNOWN_LOG_SCRIPTS = {
     "canada_cases_update_monitor",
     "brazil_cases_register",
     "brazil_cases_update_monitor",
+    "cade_document_summariser",
     "newzealand_cases_register",
     "newzealand_cases_update_monitor",
     "australia_cases_register",
