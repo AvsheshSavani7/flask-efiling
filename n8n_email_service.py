@@ -15,8 +15,9 @@ send_report_email(report_type, payload, org_id=None, deal_id=None)
      — keep only those whose report_types list contains the report_type.
      When deal_id is provided ([FRMD] / [FRRMD]), further filter to
      recipients whose allowed_deal_ids list contains the deal_id.
-  4. POST one webhook request per org (with its recipients list)
+    4. POST one webhook request per org (with its recipients list)
      to NEW_N8N_EMAIL_WEBHOOK_URL.
+    When deal_id is known, an unsubscribe footer is appended to the HTML.
 
 Supported report_types (foreign regulatory):
   "foreign_regulatory_matched_deal"  — case matched to a deal [FRMD]
@@ -44,6 +45,7 @@ from bson import ObjectId
 from dotenv import load_dotenv
 
 from mongodb_connection import get_database
+from unsubscribe_footer import append_unsubscribe_footer
 
 load_dotenv(".env")
 
@@ -254,6 +256,11 @@ def send_report_email(
             "NEW_N8N_EMAIL_WEBHOOK_URL is not set. Add it to your .env file."
         )
 
+    payload = {
+        **payload,
+        "html": append_unsubscribe_footer(payload.get("html") or "", deal_id),
+    }
+
     summary: Dict[str, Any] = {
         "report_type": report_type,
         "orgs_processed": 0,
@@ -439,7 +446,9 @@ def send_direct_email(
             "send_direct_email called with empty recipients list — skipping.")
         return False
 
-    webhook_payload = {**payload, "recipients": recipients}
+    deal_id = payload.get("deal_id")
+    html = append_unsubscribe_footer(payload.get("html") or "", deal_id)
+    webhook_payload = {**payload, "html": html, "recipients": recipients}
     logger.info(
         "send_direct_email | recipients=%d | subject=%s",
         len(recipients), payload.get("subject", ""),
