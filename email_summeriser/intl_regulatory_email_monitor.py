@@ -80,6 +80,14 @@ EXCLUDE_PATTERN = re.compile(r'SEC Filing.*8-K', re.IGNORECASE)
 # mistagged emails (e.g. [FRUD]) or untagged agency mentions are rejected.
 INTL_SUBJECT_PATTERN = re.compile(r'\[FRMD\]', re.IGNORECASE)
 
+# CADE regulatory-update alerts we never want to summarize (low-signal noise).
+# These carry the [FRMD] tag so they'd otherwise pass INTL_SUBJECT_PATTERN.
+SKIP_SUBJECT_PATTERN = re.compile(
+    r'CADE Brazil - Regulatory Update - \[FRMD\]'
+    r'|CADE Brazil - New Regulatory Case - \[FRMD\]',
+    re.IGNORECASE
+)
+
 # URLs to filter out (noise)
 NOISE_URL_PATTERNS = re.compile(
     r'unsubscribe|mailto:|facebook\.com|twitter\.com|linkedin\.com|'
@@ -953,6 +961,9 @@ Return ONLY the JSON array, no markdown fences or explanation."""
                     continue
                 if EXCLUDE_PATTERN.search(subject):
                     skipped_8k += 1
+                    continue
+                if SKIP_SUBJECT_PATTERN.search(subject):
+                    skipped_no_match += 1
                     continue
                 if not INTL_SUBJECT_PATTERN.search(subject):
                     skipped_no_match += 1
