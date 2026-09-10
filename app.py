@@ -3632,6 +3632,9 @@ def ukraine_amcu_scraper_endpoint():
                   When true, scrapes from 2026-01-01 (no email).
         no_deal_match: string (optional). Default true on backfill, false on live.
         force: string (optional, "true" or "false") re-process seen URLs.
+        test_email: string (optional, "true" or "false", default: "false")
+                    When true, emails go only to avshesh.savani@teqnodux.com.
+                    Live default is org-aware production routing.
 
     Returns:
     {
@@ -3645,6 +3648,8 @@ def ukraine_amcu_scraper_endpoint():
             'backfill', 'false').lower() in ('true', '1', 'yes')
         force = request.args.get(
             'force', 'false').lower() in ('true', '1', 'yes')
+        test_email = request.args.get(
+            'test_email', 'false').lower() in ('true', '1', 'yes')
         if 'no_deal_match' in request.args:
             no_deal_match = request.args.get(
                 'no_deal_match', 'true').lower() in ('true', '1', 'yes')
@@ -3655,21 +3660,25 @@ def ukraine_amcu_scraper_endpoint():
             try:
                 logger.info(
                     "Starting Ukraine AMCU scraper in background "
-                    "(backfill=%s no_deal_match=%s force=%s)",
-                    backfill, no_deal_match, force,
+                    "(backfill=%s no_deal_match=%s force=%s test_email=%s)",
+                    backfill, no_deal_match, force, test_email,
                 )
                 run_ukraine_amcu_cases(
                     backfill=backfill,
                     no_deal_match=no_deal_match,
                     force=force,
+                    test_mode=test_email,
                 )
                 logger.info("Ukraine AMCU scraper completed successfully.")
             except Exception:
                 logger.exception("Error in background Ukraine AMCU scraper")
 
-        task_name = (
-            "ukraine-amcu-scraper-backfill" if backfill else "ukraine-amcu-scraper"
-        )
+        if backfill:
+            task_name = "ukraine-amcu-scraper-backfill"
+        elif test_email:
+            task_name = "ukraine-amcu-scraper-test-email"
+        else:
+            task_name = "ukraine-amcu-scraper"
         submitted, msg = submit_unique_task(task_name, run_scraper)
         if not submitted:
             return jsonify({
@@ -3685,6 +3694,7 @@ def ukraine_amcu_scraper_endpoint():
             "backfill": backfill,
             "no_deal_match": no_deal_match,
             "force": force,
+            "test_email": test_email,
         }), 200
 
     except Exception as e:

@@ -13,11 +13,12 @@ as documents and never flip is_open.
 Usage:
   python ukraine_amcu_cases.py --wipe --backfill --no-deal-match
   python ukraine_amcu_cases.py --backfill --no-deal-match --dry-run
-  python ukraine_amcu_cases.py --no-deal-match
+  python ukraine_amcu_cases.py
+  python ukraine_amcu_cases.py --test-email
 
-Live email (Avshesh only, never org routing):
+Live email (org routing via post_email_payload):
   deal match → [FRMD] / [FRRMD]; one-side → [FRPMD-A]/[FRPMD-T]; else USA-related → [FRUD].
-  New case vs case update uses the matching subject.
+  --test-email sends only to avshesh.savani@teqnodux.com.
 Backfill does not send email.
 """
 
@@ -45,7 +46,7 @@ from email_subject_builder import apply_partial_match_subject, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import ensure_script_logger, refresh_script_log
 from mongodb_connection import get_database, get_deal_by_id, init_mongodb_connection
-from n8n_email_service import send_direct_email
+from n8n_email_service import post_email_payload, send_direct_email
 from ukraine_amcu_2026_backfill import (
     BASE_URL,
     QUOTED_RE,
@@ -789,7 +790,7 @@ def build_case_email(
   </table>
   <p style="font-size:14px;color:#334155;white-space:pre-wrap;">{escape_html((item.get("text") or "")[:1200])}</p>
   <p style="color:#999;font-size:12px;margin-top:24px;">
-    Automated email — Ukraine AMCU. Test recipient only.
+    Automated email — Ukraine AMCU merger filings.
   </p>
 </div>
 </body>
@@ -805,11 +806,8 @@ def send_case_email(
     *,
     matched_by_regex: bool = False,
     partial_side: Optional[str] = None,
+    test_mode: bool = False,
 ) -> bool:
-    webhook_url = os.getenv("N8N_WEBHOOK_ONLY_ME", "")
-    if not webhook_url:
-        logger.warning("N8N_WEBHOOK_ONLY_ME not set — email skipped")
-        return False
     subject, html = build_case_email(
         case, item, event_type, deal_match, matched_by_regex=matched_by_regex
     )
@@ -829,8 +827,16 @@ def send_case_email(
         ),
         "case_key": case.get("key") or "",
     }
-    logger.info("[TEST] Sending to %s | %s", TEST_RECIPIENT, subject)
-    return bool(send_direct_email([TEST_RECIPIENT], payload, webhook_url=webhook_url))
+    if test_mode:
+        webhook_url = os.getenv("N8N_WEBHOOK_ONLY_ME", "")
+        if not webhook_url:
+            logger.warning("N8N_WEBHOOK_ONLY_ME not set — test email skipped")
+            return False
+        logger.info("[TEST] Sending to %s | %s", TEST_RECIPIENT, subject)
+        return bool(send_direct_email(
+            [TEST_RECIPIENT], payload, webhook_url=webhook_url))
+    logger.info("[PROD] org routing | %s", subject)
+    return bool(post_email_payload(payload, subject=subject))
 
 
 def maybe_email_case(
@@ -874,7 +880,9 @@ def maybe_email_case(
     if deal_match:
         try:
             if send_case_email(
-                case, item, event_type, deal_match, matched_by_regex=matched_by_regex
+                case, item, event_type, deal_match,
+                matched_by_regex=matched_by_regex,
+                test_mode=bool(mailer.get("test_mode")),
             ):
                 stats["emails_sent"] += 1
                 stats["deal_matched_email"] += 1
@@ -895,7 +903,8 @@ def maybe_email_case(
             )
             try:
                 if send_case_email(
-                    case, item, event_type, None, partial_side=partial_side
+                    case, item, event_type, None, partial_side=partial_side,
+                    test_mode=bool(mailer.get("test_mode")),
                 ):
                     stats["emails_sent"] += 1
                     stats["partial_matched_email"] += 1
@@ -925,7 +934,10 @@ def maybe_email_case(
         stats["email_skipped"] += 1
         return
     try:
-        if send_case_email(case, item, event_type, None):
+        if send_case_email(
+            case, item, event_type, None,
+            test_mode=bool(mailer.get("test_mode")),
+        ):
             stats["emails_sent"] += 1
             stats["usa_related_email"] += 1
     except Exception as exc:
@@ -1116,6 +1128,7 @@ def run_ukraine_amcu_cases(
     max_pages: Optional[int] = None,
     force: bool = False,
     wipe: bool = False,
+    test_mode: bool = False,
 ) -> Dict[str, int]:
     refresh_script_log(logger, get_log_file)
     date_to = datetime.date.today().isoformat()
@@ -1150,8 +1163,9 @@ def run_ukraine_amcu_cases(
 
     logger.info("=" * 60)
     logger.info(
-        "Ukraine AMCU cases  %s → %s  backfill=%s dry_run=%s wipe=%s no_deal_match=%s",
-        date_from, date_to, backfill, dry_run, wipe, no_deal_match,
+        "Ukraine AMCU cases  %s → %s  backfill=%s dry_run=%s wipe=%s "
+        "no_deal_match=%s test_mode=%s",
+        date_from, date_to, backfill, dry_run, wipe, no_deal_match, test_mode,
     )
 
     cases_coll = None
@@ -1188,16 +1202,21 @@ def run_ukraine_amcu_cases(
         "enabled": mailer_on,
         "no_deal_match": no_deal_match,
         "open_deals": open_deals,
+        "test_mode": test_mode,
     }
     if backfill:
-        logger.info(
-            "email skipped (backfill) — recipient would be %s", TEST_RECIPIENT)
+        logger.info("email skipped (backfill)")
     elif dry_run:
         logger.info("email skipped (dry-run)")
-    else:
+    elif test_mode:
         logger.info(
             "email recipient (test only): %s | deal_match=%s | FRMD then USA/FRUD",
             TEST_RECIPIENT,
+            not no_deal_match,
+        )
+    else:
+        logger.info(
+            "email routing: production org-aware | deal_match=%s | FRMD then USA/FRUD",
             not no_deal_match,
         )
 
@@ -1283,6 +1302,11 @@ def main() -> None:
                    help="Delete ukraine_cases and ukraine_amcu_seen before running")
     p.add_argument("--max-pages", type=int, default=None,
                    help="Cap timeline pages")
+    p.add_argument(
+        "--test-email",
+        action="store_true",
+        help=f"Send emails to {TEST_RECIPIENT} via N8N_WEBHOOK_ONLY_ME",
+    )
     args = p.parse_args()
     run_ukraine_amcu_cases(
         backfill=args.backfill,
@@ -1291,6 +1315,7 @@ def main() -> None:
         max_pages=args.max_pages,
         force=args.force,
         wipe=args.wipe,
+        test_mode=args.test_email,
     )
 
 
