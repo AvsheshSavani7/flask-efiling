@@ -42,7 +42,7 @@ from PyPDF2 import PdfReader
 
 from deal_match_llm import fetch_open_deals, llm_match_deal_id, llm_match_partial_deal
 from deal_match_regex import apply_regex_match_subject, regex_match_ukraine_deal
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import apply_partial_match_subject, build_partial_match_banner_html, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import ensure_script_logger, refresh_script_log
 from mongodb_connection import get_database, get_deal_by_id, init_mongodb_connection
@@ -713,10 +713,15 @@ def build_case_email(
     deal_match: Optional[Dict[str, Any]] = None,
     *,
     matched_by_regex: bool = False,
+    partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
 ) -> Tuple[str, str]:
     subject = build_subject("ukraine_amcu", event_type, deal_match)
     if deal_match and matched_by_regex:
         subject = apply_regex_match_subject(subject, True)
+    if partial_side:
+        subject = apply_partial_match_subject(subject, partial_side)
     url = item.get("article_url") or ""
     parties = ", ".join(case.get("parties")
                         or item.get("parties") or []) or "—"
@@ -740,6 +745,9 @@ def build_case_email(
   <strong>Matched Deal:</strong> {escape_html(str(target))} / {escape_html(str(acquirer))}<br>
   <strong>Deal ID:</strong> {escape_html(str(deal_id))}
 </div>"""
+    elif partial_side:
+        banner = build_partial_match_banner_html(
+            partial_deal, partial_side, deal_id=partial_deal_id)
     else:
         banner = """
 <div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
@@ -806,10 +814,16 @@ def send_case_email(
     *,
     matched_by_regex: bool = False,
     partial_side: Optional[str] = None,
+    partial_deal_id: Optional[str] = None,
     test_mode: bool = False,
 ) -> bool:
+    partial_deal = get_deal_by_id(partial_deal_id) if partial_deal_id else None
     subject, html = build_case_email(
-        case, item, event_type, deal_match, matched_by_regex=matched_by_regex
+        case, item, event_type, deal_match,
+        matched_by_regex=matched_by_regex,
+        partial_side=partial_side,
+        partial_deal=partial_deal,
+        partial_deal_id=partial_deal_id,
     )
     if partial_side:
         subject = apply_partial_match_subject(subject, partial_side)
@@ -895,15 +909,17 @@ def maybe_email_case(
             case, item, mailer.get("open_deals") or []
         )
         if partial_match:
-            _partial_deal_id, partial_side = partial_match
+            partial_deal_id, partial_side = partial_match
             logger.info(
                 "  Partial match (deal_id=%s side=%s) "
                 "— sending FRPMD email, not storing deal_id",
-                _partial_deal_id, partial_side,
+                partial_deal_id, partial_side,
             )
             try:
                 if send_case_email(
-                    case, item, event_type, None, partial_side=partial_side,
+                    case, item, event_type, None,
+                    partial_side=partial_side,
+                    partial_deal_id=partial_deal_id,
                     test_mode=bool(mailer.get("test_mode")),
                 ):
                     stats["emails_sent"] += 1

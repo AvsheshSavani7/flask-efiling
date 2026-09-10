@@ -34,7 +34,7 @@ from mongodb_connection import (
 from deal_match_llm import llm_match_deal_id, llm_match_partial_deal, fetch_open_deals
 from deal_match_regex import apply_regex_match_subject, regex_match_jftc_deal
 from llm_verification_service import verify_usa_relation
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import apply_partial_match_subject, build_partial_match_banner_html, build_subject
 from n8n_email_service import post_email_payload, send_direct_email
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import ensure_script_logger, refresh_script_log
@@ -343,9 +343,29 @@ def build_matched_email(
     return subject, html
 
 
-def build_usa_email(record: Dict[str, Any]) -> Tuple[str, str]:
+def build_usa_email(
+    record: Dict[str, Any],
+    *,
+    partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
+) -> Tuple[str, str]:
     subject = build_subject("jftc", "press_release")
+    if partial_side:
+        subject = apply_partial_match_subject(subject, partial_side)
     body = _press_release_section(record)
+
+    if partial_side:
+        banner = build_partial_match_banner_html(
+            partial_deal, partial_side, deal_id=partial_deal_id)
+    else:
+        banner = """
+  <div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
+    <div style="font-weight:800;color:#92400e;">USA-Related (Unmatched)</div>
+    <div style="font-size:14px;color:#78350f;margin-top:4px;">
+      This press release appears to involve USA-related companies.
+    </div>
+  </div>"""
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -354,12 +374,7 @@ def build_usa_email(record: Dict[str, Any]) -> Tuple[str, str]:
 <div style="max-width:900px;margin:20px auto;background:#fff;padding:30px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.1);">
   <h2 style="color:#333;text-align:center;margin-top:0;padding-bottom:20px;border-bottom:3px solid #f59e0b;">{escape_html(subject)}</h2>
   <p style="color:#666;text-align:center;">Source: JFTC Japan</p>
-  <div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
-    <div style="font-weight:800;color:#92400e;">USA-Related (Unmatched)</div>
-    <div style="font-size:14px;color:#78350f;margin-top:4px;">
-      This press release appears to involve USA-related companies.
-    </div>
-  </div>
+  {banner}
   {body}
   <p>
     <a href="{escape_html(record.get('detail_url', ''))}" style="color:#2563eb;" target="_blank">
@@ -561,14 +576,20 @@ def run(test_mode: bool = False):
                         )
 
                     if partial_match:
-                        _partial_deal_id, partial_side = partial_match
+                        partial_deal_id, partial_side = partial_match
                         stats["partial_matched"] += 1
                         logger.info(
                             "  Partial match (deal_id=%s side=%s) "
                             "— sending FRPMD email, not storing deal_id",
-                            _partial_deal_id, partial_side,
+                            partial_deal_id, partial_side,
                         )
-                        subject, html_body = build_usa_email(record)
+                        partial_deal = get_deal_by_id(partial_deal_id)
+                        subject, html_body = build_usa_email(
+                            record,
+                            partial_side=partial_side,
+                            partial_deal=partial_deal,
+                            partial_deal_id=partial_deal_id,
+                        )
                         subject = apply_partial_match_subject(
                             subject, partial_side)
                         ok = _send_email(subject, html_body, {

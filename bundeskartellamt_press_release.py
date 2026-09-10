@@ -30,9 +30,13 @@ from openai import OpenAI
 
 from deal_match_llm import llm_match_deal_id, llm_match_partial_deal, fetch_open_deals
 from deal_match_regex import regex_match_bka_deal
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import (
+    apply_partial_match_subject, build_partial_match_banner_html, build_subject,
+)
 from llm_verification_service import verify_country_relation
-from mongodb_connection import get_database, is_connected, init_mongodb_connection
+from mongodb_connection import (
+    get_database, is_connected, init_mongodb_connection, get_deal_by_id,
+)
 from n8n_email_service import post_email_payload
 from scraper_error_utils import collect_error, send_error_summary
 
@@ -359,18 +363,24 @@ def generate_matched_email(record: Dict, deal: Dict) -> Tuple[str, str]:
 
 
 def generate_usa_email(
-    record: Dict, partial_side: Optional[str] = None
+    record: Dict,
+    partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict] = None,
 ) -> Tuple[str, str]:
     subject = build_subject("bundeskartellamt", "press_release")
     if partial_side:
         subject = apply_partial_match_subject(subject, partial_side)
-
-    usa_banner = (
-        '<div style="background:#fef3c7;border-radius:6px;padding:14px 20px;'
-        'margin-bottom:18px;border-left:4px solid #f59e0b;">'
-        "<strong>🇺🇸 USA-Related Case</strong> — No deal match found, but this press release appears related to the United States."
-        "</div>"
-    )
+        usa_banner = build_partial_match_banner_html(
+            partial_deal, partial_side,
+            deal_id=(partial_deal or {}).get("deal_id"),
+        )
+    else:
+        usa_banner = (
+            '<div style="background:#fef3c7;border-radius:6px;padding:14px 20px;'
+            'margin-bottom:18px;border-left:4px solid #f59e0b;">'
+            "<strong>🇺🇸 USA-Related Case</strong> — No deal match found, but this press release appears related to the United States."
+            "</div>"
+        )
 
     case_rows = _build_case_rows_html(record)
     html = f"""<!DOCTYPE html>
@@ -689,8 +699,10 @@ def main():
                                 )
                         elif partial_match:
                             _partial_deal_id, partial_side = partial_match
+                            partial_deal = get_deal_by_id(_partial_deal_id)
                             subject, html_body = generate_usa_email(
-                                doc, partial_side=partial_side)
+                                doc, partial_side=partial_side,
+                                partial_deal=partial_deal)
                             stats["partial_matched"] += 1
                             if not send_email_via_webhook(subject, html_body, url):
                                 collect_error(

@@ -30,7 +30,7 @@ from deal_match_llm import llm_match_deal_id, llm_match_partial_deal, fetch_open
 from deal_match_regex import regex_match_cade_deal
 from html import escape as escape_html
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import apply_partial_match_subject, build_partial_match_banner_html, build_subject
 from n8n_email_service import post_email_payload
 from cade_document_summariser import (
     apply_summariser_pending_flags,
@@ -1014,6 +1014,8 @@ def generate_update_email_html(
     matched_by_regex: bool = False,
     event_type: str = "update",
     partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Subject + HTML for a new-case or update bulk email (history table, no doc table)."""
     process = case_data.get("process", "N/A")
@@ -1063,6 +1065,11 @@ def generate_update_email_html(
   <div style="font-weight:800;color:#1e40af;margin-bottom:4px;">Matched Deal</div>
   <div style="font-size:14px;color:#1e3a8a;"><b>Acquirer:</b> {escape_html(acquirer)} | <b>Target:</b> {escape_html(target)} | <b>Deal ID:</b> {escape_html(deal_id)}</div>
 </div>"""
+    elif partial_side:
+        if not partial_deal and partial_deal_id:
+            partial_deal = get_deal_by_id(str(partial_deal_id))
+        deal_banner = build_partial_match_banner_html(
+            partial_deal, partial_side, deal_id=partial_deal_id)
     else:
         deal_banner = """
 <div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
@@ -1155,6 +1162,8 @@ def send_matched_email(
 def send_usa_related_email(
     case_data: Dict[str, Any],
     partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
 ) -> bool:
     process = case_data.get("process", "N/A")
     detail_url = case_data.get("detail_url", "")
@@ -1162,6 +1171,8 @@ def send_usa_related_email(
     subject, html = generate_update_email_html(
         case_data, changes, None, event_type="new",
         partial_side=partial_side,
+        partial_deal=partial_deal,
+        partial_deal_id=partial_deal_id,
     )
     return _post_email_payload({
         "subject": subject,
@@ -1464,6 +1475,7 @@ def run_cade_cases_register(
                                 if not test_mode:
                                     if not send_usa_related_email(
                                         case_doc, partial_side=partial_side,
+                                        partial_deal_id=_partial_deal_id,
                                     ):
                                         collect_error(
                                             error_items,

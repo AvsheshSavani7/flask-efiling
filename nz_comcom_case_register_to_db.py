@@ -34,7 +34,7 @@ from mongodb_connection import (
 )
 
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import apply_partial_match_subject, build_partial_match_banner_html, build_subject
 from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
@@ -259,6 +259,8 @@ def send_nz_new_case_matched_email(
 def send_unmatched_nz_usa_email_via_webhook(
     case_info: Dict[str, Any],
     partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
 ) -> bool:
     """Send USA-related unmatched NZ case email via webhook."""
     details = case_info.get("case_details") or {}
@@ -272,16 +274,23 @@ def send_unmatched_nz_usa_email_via_webhook(
     subject = build_subject("nz_comcom", "new")
     if partial_side:
         subject = apply_partial_match_subject(subject, partial_side)
+        if not partial_deal and partial_deal_id:
+            partial_deal = get_deal_by_id(str(partial_deal_id))
+        banner_html = build_partial_match_banner_html(
+            partial_deal, partial_side, deal_id=partial_deal_id)
+    else:
+        banner_html = """
+  <div style="background:#dbeafe;border-radius:8px;padding:16px;margin-bottom:20px;border-left:4px solid #3b82f6;">
+    <div style="font-size:16px;font-weight:800;color:#1e40af;">🇺🇸 USA-Related NZ Case</div>
+    <div style="font-size:14px;color:#1e3a8a;margin-top:6px;">This case appears to involve USA-related companies.</div>
+  </div>"""
     html = f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>USA-Related NZ Case</title></head>
 <body style="margin:0;padding:0;background:#fff;color:#0f172a;font-family:system-ui,-apple-system,sans-serif;">
 <div style="max-width:600px;margin:0 auto;padding:24px;">
-  <div style="background:#dbeafe;border-radius:8px;padding:16px;margin-bottom:20px;border-left:4px solid #3b82f6;">
-    <div style="font-size:16px;font-weight:800;color:#1e40af;">🇺🇸 USA-Related NZ Case</div>
-    <div style="font-size:14px;color:#1e3a8a;margin-top:6px;">This case appears to involve USA-related companies.</div>
-  </div>
+  {banner_html}
   <div style="font-size:18px;font-weight:800;margin-bottom:8px;">{title}</div>
   <div style="font-size:14px;color:#64748b;">Case number: {case_number} | Category: {category} | Status: {status} | Opened: {date_opened}</div>
   <div style="margin-top:20px;">
@@ -733,6 +742,7 @@ def run():
                                 if not test_mode:
                                     if not send_unmatched_nz_usa_email_via_webhook(
                                         doc, partial_side=partial_side,
+                                        partial_deal_id=_partial_deal_id,
                                     ):
                                         collect_error(
                                             error_items,

@@ -17,7 +17,9 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import (
+    apply_partial_match_subject, build_partial_match_banner_html, build_subject,
+)
 from n8n_email_service import post_email_payload
 from llm_verification_service import verify_usa_relation
 from mongodb_connection import get_database, get_deal_by_id, get_deals_collection
@@ -1150,6 +1152,9 @@ def build_cci_email_html(
     source_label: str,
     list_page_url: Optional[str] = None,
     changes: Optional[Dict[str, Any]] = None,
+    partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
 ) -> Tuple[str, str]:
     subject = build_subject("cci", event_type, deal_match)
     reg_no = record.get("combination_registration_no", "N/A")
@@ -1185,6 +1190,11 @@ def build_cci_email_html(
   <strong>Matched Deal:</strong> {escape_html(str(target))} / {escape_html(str(acquirer))}<br>
   <strong>Deal ID:</strong> {escape_html(str(deal_id))}
 </div>"""
+    elif partial_side:
+        banner = build_partial_match_banner_html(
+            partial_deal, partial_side,
+            deal_id=(partial_deal or {}).get("deal_id") or partial_deal_id,
+        )
     else:
         banner = """
 <div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
@@ -1257,6 +1267,7 @@ def send_cci_email(
     source_key: Optional[str] = None,
     changes: Optional[Dict[str, Any]] = None,
     partial_side: Optional[str] = None,
+    partial_deal_id: Optional[str] = None,
 ) -> bool:
     reg_no = record.get("combination_registration_no", "")
     tag = "[FRMD]" if deal_match else "[FRUD]"
@@ -1290,6 +1301,11 @@ def send_cci_email(
     subject, html = build_cci_email_html(
         record, deal_match, event_type, source_label,
         list_page_url=list_page_url, changes=changes,
+        partial_side=partial_side,
+        partial_deal=(
+            get_deal_by_id(str(partial_deal_id)) if partial_deal_id else None
+        ),
+        partial_deal_id=partial_deal_id,
     )
     if partial_side:
         subject = apply_partial_match_subject(subject, partial_side)
@@ -1451,6 +1467,7 @@ def process_deal_match_and_email(
             source_key=source_key,
             changes=changes,
             partial_side=partial_side,
+            partial_deal_id=_partial_deal_id,
         )
 
     logger.info("  No deal match; running USA relation check (case_type=CCI)...")

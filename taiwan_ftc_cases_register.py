@@ -40,7 +40,7 @@ from openai import OpenAI
 
 from deal_match_llm import fetch_open_deals, llm_match_deal_id, llm_match_partial_deal
 from deal_match_regex import apply_regex_match_subject, regex_match_taiwan_deal
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import apply_partial_match_subject, build_partial_match_banner_html, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import ensure_script_logger, refresh_script_log
 from mongodb_connection import (
@@ -855,8 +855,14 @@ def render_summary_html(summary: Optional[Dict[str, Any]]) -> str:
 def build_email_html(
     record: Dict[str, Any],
     deal_match: Optional[Dict[str, Any]],
+    *,
+    partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
 ) -> Tuple[str, str]:
     subject = build_subject("taiwan_ftc", "new", deal_match)
+    if partial_side:
+        subject = apply_partial_match_subject(subject, partial_side)
 
     title = record.get("title") or "N/A"
     title_en = record.get("title_en") or title
@@ -879,6 +885,9 @@ def build_email_html(
   <strong>Matched Deal:</strong> {escape_html(str(target))} / {escape_html(str(acquirer))}<br>
   <strong>Deal ID:</strong> {escape_html(str(deal_id))}
 </div>"""
+    elif partial_side:
+        banner = build_partial_match_banner_html(
+            partial_deal, partial_side, deal_id=partial_deal_id)
     else:
         banner = """
 <div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
@@ -1052,6 +1061,7 @@ def process_record(
         if deal_match and "deal_id" not in deal_match:
             deal_match["deal_id"] = matched_deal_id
 
+    partial_deal_id: Optional[str] = None
     partial_side: Optional[str] = None
     if not matched_deal_id:
         partial_match = match_deal_partial(
@@ -1063,11 +1073,11 @@ def process_record(
             forum_id=forum_id,
         )
         if partial_match:
-            _partial_deal_id, partial_side = partial_match
+            partial_deal_id, partial_side = partial_match
             logger.info(
                 "  Partial match (deal_id=%s side=%s) "
                 "— sending FRPMD email, not storing deal_id",
-                _partial_deal_id, partial_side,
+                partial_deal_id, partial_side,
             )
 
     # Option A: detail summary only for LLM/regex deal matches
@@ -1157,7 +1167,13 @@ def process_record(
         return "no_email"
 
     if partial_side:
-        subject, html = build_email_html(record, None)
+        partial_deal = get_deal_by_id(partial_deal_id) if partial_deal_id else None
+        subject, html = build_email_html(
+            record, None,
+            partial_side=partial_side,
+            partial_deal=partial_deal,
+            partial_deal_id=partial_deal_id,
+        )
         subject = apply_partial_match_subject(subject, partial_side)
         payload = {
             "subject": subject,

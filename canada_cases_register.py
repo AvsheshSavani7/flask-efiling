@@ -45,7 +45,7 @@ import sys
 
 
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import apply_partial_match_subject, build_partial_match_banner_html, build_subject
 from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
@@ -359,13 +359,35 @@ def generate_matched_case_email_html(
     return html
 
 
-def generate_usa_related_email_html(case_info: Dict[str, Any]) -> str:
+def generate_usa_related_email_html(
+    case_info: Dict[str, Any],
+    partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
+) -> str:
     """Generate rich HTML email for USA-related (unmatched) Canada case."""
     parties = case_info.get("parties", "N/A")
     opened_date = case_info.get("opened_date", "N/A")
     concluded_date = case_info.get("concluded_date", "N/A")
     industry = case_info.get("industry", "N/A")
     outcome = case_info.get("outcome", "N/A")
+
+    if partial_side:
+        banner = build_partial_match_banner_html(
+            partial_deal, partial_side, deal_id=partial_deal_id)
+    else:
+        banner = f"""
+<!-- USA-Related Banner -->
+<div style="background:#dbeafe;border-radius:6px;padding:16px 22px;margin-bottom:20px;border-left:4px solid #3b82f6;">
+  <div style="font-size:15px;font-weight:800;color:#1e40af;margin-bottom:6px;">🇺🇸 USA-Related Canada Competition Bureau Case</div>
+  <div style="font-size:14px;color:#1e3a8a;">
+    This merger review appears to involve USA-related parties or markets.
+  </div>
+  <div style="margin-top:10px;">
+    <a href="{REPORT_URL}" target="_blank" style="color:#2563eb;text-decoration:none;font-weight:700;font-size:14px;">View Competition Bureau Report →</a>
+  </div>
+</div>
+"""
 
     html = f"""<!doctype html>
 <html lang="en">
@@ -377,16 +399,7 @@ def generate_usa_related_email_html(case_info: Dict[str, Any]) -> str:
 <body style="margin:0;padding:0;background:#ffffff;color:#0f172a;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
 <div style="max-width:1100px;margin:0 auto;padding:28px 26px 40px 26px;">
 
-<!-- USA-Related Banner -->
-<div style="background:#dbeafe;border-radius:6px;padding:16px 22px;margin-bottom:20px;border-left:4px solid #3b82f6;">
-  <div style="font-size:15px;font-weight:800;color:#1e40af;margin-bottom:6px;">🇺🇸 USA-Related Canada Competition Bureau Case</div>
-  <div style="font-size:14px;color:#1e3a8a;">
-    This merger review appears to involve USA-related parties or markets.
-  </div>
-  <div style="margin-top:10px;">
-    <a href="{REPORT_URL}" target="_blank" style="color:#2563eb;text-decoration:none;font-weight:700;font-size:14px;">View Competition Bureau Report →</a>
-  </div>
-</div>
+{banner}
 
 <!-- Case details -->
 <div style="background:#f3f4f6;border-radius:6px;padding:22px 26px;">
@@ -665,7 +678,13 @@ def run_canada_cases_register(headless: bool = True):
                         subject = build_subject("canada", "new")
                         subject = apply_partial_match_subject(
                             subject, partial_side)
-                        html_email = generate_usa_related_email_html(case_info)
+                        partial_deal = get_deal_by_id(_partial_deal_id)
+                        html_email = generate_usa_related_email_html(
+                            case_info,
+                            partial_side=partial_side,
+                            partial_deal=partial_deal,
+                            partial_deal_id=_partial_deal_id,
+                        )
                         if not send_email_via_webhook(
                             subject, html_email, case_info, usa_related=True
                         ):

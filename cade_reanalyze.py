@@ -309,7 +309,9 @@ def reanalyze(process_numbers: List[str], dry_run: bool) -> Dict[str, Any]:
                     logger.info(
                         f"  [DRY-RUN] Would send FRPMD email for {process}")
                 else:
-                    if not send_usa_related_email(record, partial_side=partial_side):
+                    if not send_usa_related_email(
+                            record, partial_side=partial_side,
+                            partial_deal_id=_partial_deal_id):
                         collect_error(
                             error_items,
                             "Failed to send FRPMD email",

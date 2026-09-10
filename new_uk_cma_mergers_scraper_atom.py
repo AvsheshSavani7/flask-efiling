@@ -20,7 +20,9 @@ from pymongo import MongoClient
 from typing import Any, Dict, List, Optional, Tuple
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import (
+    apply_partial_match_subject, build_partial_match_banner_html, build_subject,
+)
 from n8n_email_service import post_email_payload
 
 # ---------------------------------------------------------------------------
@@ -716,13 +718,31 @@ def generate_matched_email_html(case_info, deal_match):
     return subject, html_email
 
 
-def generate_unmatched_email_html(case_info):
+def generate_unmatched_email_html(
+    case_info, partial_side=None, partial_deal=None, partial_deal_id=None,
+):
     title = case_info.get("title", "N/A")
 
     subject = build_subject("uk_cma", "new")
+    if partial_side:
+        subject = apply_partial_match_subject(subject, partial_side)
 
     common_rows = _build_common_case_rows(case_info)
     history_section = _build_history_section(case_info)
+
+    if partial_side:
+        header_block = build_partial_match_banner_html(
+            partial_deal, partial_side,
+            deal_id=partial_deal_id or (partial_deal or {}).get("deal_id"),
+        )
+    else:
+        header_block = """
+    <h2 style="color:#333; text-align:center; margin-top:0; padding-bottom:20px; border-bottom:3px solid #f59e0b;">
+      UK CMA Merger Case (USA-Related)
+    </h2>
+    <div style="text-align:center; margin-bottom:20px;">
+      <div style="background-color:#f59e0b; color:white; padding:8px 16px; border-radius:4px; display:inline-block; font-weight:bold;">🇺🇸 USA-RELATED</div>
+    </div>"""
 
     html_email = f"""
 <!DOCTYPE html>
@@ -730,12 +750,7 @@ def generate_unmatched_email_html(case_info):
 <head><meta charset="UTF-8"><title>{escape_html(subject)}</title></head>
 <body style="margin:0; padding:0; font-family:Arial,sans-serif; background-color:#f4f4f4;">
   <div style="max-width:900px; margin:20px auto; background-color:#ffffff; padding:30px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1);">
-    <h2 style="color:#333; text-align:center; margin-top:0; padding-bottom:20px; border-bottom:3px solid #f59e0b;">
-      UK CMA Merger Case (USA-Related)
-    </h2>
-    <div style="text-align:center; margin-bottom:20px;">
-      <div style="background-color:#f59e0b; color:white; padding:8px 16px; border-radius:4px; display:inline-block; font-weight:bold;">🇺🇸 USA-RELATED</div>
-    </div>
+    {header_block}
     <table style="width:100%; border-collapse:collapse; margin-bottom:20px;">
 {common_rows}
     </table>
@@ -893,7 +908,12 @@ def process_record(record, existing_urls, error_items: List[Dict[str, Any]]):
                     f"side={partial_side}) — sending FRPMD email, not storing deal_id"
                 )
                 email_info = {**case_record, "updated": record.get("updated", "")}
-                subj, html = generate_unmatched_email_html(email_info)
+                subj, html = generate_unmatched_email_html(
+                    email_info,
+                    partial_side=partial_side,
+                    partial_deal=find_deal_by_id(_partial_deal_id),
+                    partial_deal_id=_partial_deal_id,
+                )
                 subj = apply_partial_match_subject(subj, partial_side)
                 if not send_email_via_webhook(subj, html, {
                     "title": case_record["title"],

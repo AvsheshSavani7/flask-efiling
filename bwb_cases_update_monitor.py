@@ -40,10 +40,11 @@ from bwb_cases_common import (
 from bwb_cases_register import match_case_to_deal, match_case_to_deal_partial
 from deal_match_llm import fetch_open_deals
 from deal_match_regex import apply_regex_match_subject, regex_match_bwb_deal
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import apply_partial_match_subject, build_partial_match_banner_html, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import cleanup_old_logs, refresh_log_file
 from mongodb_connection import (
+    get_deal_by_id,
     get_deals_collection,
     init_mongodb_connection,
     is_connected,
@@ -154,6 +155,9 @@ def generate_update_email_html(
     merged_case: Dict[str, Any],
     deal: Optional[Dict[str, Any]],
     changes: List[Tuple[str, Any, Any]],
+    partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
 ) -> str:
     file_number = merged_case.get(
         "file_number", old_case.get("file_number", "N/A")
@@ -201,7 +205,11 @@ def generate_update_email_html(
   </div>
 </div>"""
     else:
-        deal_banner = """
+        if partial_side:
+            deal_banner = build_partial_match_banner_html(
+                partial_deal, partial_side, deal_id=partial_deal_id)
+        else:
+            deal_banner = """
 <div style="background:#dbeafe;border-radius:6px;padding:16px 22px;margin-bottom:20px;border-left:4px solid #3b82f6;">
   <div style="font-size:15px;font-weight:800;color:#1e40af;margin-bottom:6px;">USA-Related BWB Case</div>
   <div style="font-size:14px;color:#1e3a8a;">This case appears to involve USA-related parties or markets.</div>
@@ -251,9 +259,16 @@ def send_update_email(
     matched_by_regex: bool = False,
     usa_related: bool = False,
     partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
 ) -> bool:
     try:
-        html = generate_update_email_html(old_case, merged_case, deal, changes)
+        html = generate_update_email_html(
+            old_case, merged_case, deal, changes,
+            partial_side=partial_side,
+            partial_deal=partial_deal,
+            partial_deal_id=partial_deal_id,
+        )
         file_number = old_case.get("file_number", "N/A")
 
         if deal:
@@ -611,6 +626,8 @@ def process_bwb_cases_updates(headless: Optional[bool] = None) -> None:
                                     differences,
                                     usa_related=True,
                                     partial_side=partial_side,
+                                    partial_deal=get_deal_by_id(_partial_deal_id),
+                                    partial_deal_id=_partial_deal_id,
                                 ):
                                     collect_error(
                                         error_items,

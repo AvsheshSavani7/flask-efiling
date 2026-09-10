@@ -10,7 +10,7 @@ from deal_match_regex import regex_match_deal_by_title
 from llm_verification_service import verify_usa_relation
 from log_utils import cleanup_old_logs, refresh_log_file
 from scraper_error_utils import collect_error, send_error_summary
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import apply_partial_match_subject, build_partial_match_banner_html, build_subject
 from n8n_email_service import post_email_payload
 import os
 import json
@@ -358,12 +358,19 @@ def send_new_case_email(
 def send_unmatched_usa_related_email(
     case_info: Dict[str, Any],
     partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
 ) -> bool:
     case_number = case_info.get("case_number", "N/A")
     title = case_info.get("title", "N/A")
     subject = build_subject("accc", "new")
+    partial_banner = ""
     if partial_side:
         subject = apply_partial_match_subject(subject, partial_side)
+        if not partial_deal and partial_deal_id:
+            partial_deal = get_deal_by_id(str(partial_deal_id))
+        partial_banner = build_partial_match_banner_html(
+            partial_deal, partial_side, deal_id=partial_deal_id)
     url = case_info.get("url", "")
     notification_date = case_info.get("effective_notification_date", "")
     acquisition_status = case_info.get("acquisition_status", "")
@@ -371,6 +378,7 @@ def send_unmatched_usa_related_email(
 
     html = f"""
 <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;max-width:600px;">
+  {partial_banner}
   <div style="border:1px solid #e2e8f0;border-radius:8px;padding:20px;margin-bottom:16px;">
     <div style="font-size:18px;font-weight:700;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid #e2e8f0;">{title}</div>
     <table style="width:100%;border-collapse:collapse;">
@@ -1019,6 +1027,7 @@ def run_accc_cases_register(test_mode: bool = False):
                                     )
                                     if not send_unmatched_usa_related_email(
                                         case_info, partial_side=partial_side,
+                                        partial_deal_id=_partial_deal_id,
                                     ):
                                         collect_error(
                                             error_items,

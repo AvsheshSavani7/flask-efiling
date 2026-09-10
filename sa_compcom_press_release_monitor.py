@@ -38,7 +38,7 @@ from playwright.sync_api import sync_playwright
 
 from deal_match_llm import fetch_open_deals, llm_match_deal_id, llm_match_partial_deal
 from deal_match_regex import apply_regex_match_subject, regex_match_sa_compcom_deal
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import apply_partial_match_subject, build_partial_match_banner_html, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import cleanup_old_logs, refresh_log_file
 from mongodb_connection import (
@@ -616,16 +616,28 @@ def generate_matched_email_html(
 </html>"""
 
 
-def generate_usa_email_html(case_info: Dict[str, Any], press_url: str) -> str:
+def generate_usa_email_html(
+    case_info: Dict[str, Any],
+    press_url: str,
+    partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
+) -> str:
+    if partial_side:
+        banner = build_partial_match_banner_html(
+            partial_deal, partial_side, deal_id=partial_deal_id)
+    else:
+        banner = """
+<div style="background:#dbeafe;border-radius:6px;padding:16px 22px;margin-bottom:20px;border-left:4px solid #3b82f6;">
+  <div style="font-size:15px;font-weight:800;color:#1e40af;margin-bottom:6px;">USA-Related South Africa CompCom Decision</div>
+  <div style="font-size:14px;color:#1e3a8a;">This press-release decision appears to involve USA-related parties or markets.</div>
+</div>"""
     return f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8" /><title>USA-Related South Africa CompCom Press Release</title></head>
 <body style="margin:0;padding:0;background:#ffffff;color:#0f172a;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
 <div style="max-width:1100px;margin:0 auto;padding:28px 26px 40px 26px;">
-<div style="background:#dbeafe;border-radius:6px;padding:16px 22px;margin-bottom:20px;border-left:4px solid #3b82f6;">
-  <div style="font-size:15px;font-weight:800;color:#1e40af;margin-bottom:6px;">USA-Related South Africa CompCom Decision</div>
-  <div style="font-size:14px;color:#1e3a8a;">This press-release decision appears to involve USA-related parties or markets.</div>
-</div>
+{banner}
 <div style="background:#f3f4f6;border-radius:6px;padding:22px 26px;">
   <div style="font-size:18px;font-weight:800;margin-bottom:16px;">Case Details</div>
   <div style="display:grid;grid-template-columns:220px 1fr;row-gap:12px;column-gap:18px;">
@@ -881,7 +893,14 @@ def process_extracted_case(
         )
         subject = build_subject("sa_compcom", "press_release")
         subject = apply_partial_match_subject(subject, partial_side)
-        html = generate_usa_email_html(updated, press_url)
+        partial_deal = get_deal_by_id(_partial_deal_id)
+        html = generate_usa_email_html(
+            updated,
+            press_url,
+            partial_side=partial_side,
+            partial_deal=partial_deal,
+            partial_deal_id=_partial_deal_id,
+        )
         if not send_email(
             subject, html, updated, press_url, test_mode=test_mode
         ):

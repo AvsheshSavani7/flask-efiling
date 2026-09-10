@@ -16,6 +16,7 @@ Flow:
 
 from mongodb_connection import (
     get_database,
+    get_deal_by_id,
     get_deals_collection,
     init_mongodb_connection,
     is_connected,
@@ -39,7 +40,7 @@ from openai import OpenAI
 
 
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import apply_partial_match_subject, build_partial_match_banner_html, build_subject
 from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
@@ -248,6 +249,9 @@ def generate_update_email_html(
     new_case: Dict[str, Any],
     deal: Optional[Dict[str, Any]],
     changes: List[Tuple[str, Any, Any]],
+    partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
 ) -> str:
     """Generate rich HTML email for case update (similar to ACCC style)."""
     parties = new_case.get("parties", old_case.get("parties", "N/A"))
@@ -300,8 +304,12 @@ def generate_update_email_html(
   </div>
 </div>"""
     else:
-        # USA-related banner
-        deal_banner = f"""
+        if partial_side:
+            deal_banner = build_partial_match_banner_html(
+                partial_deal, partial_side, deal_id=partial_deal_id)
+        else:
+            # USA-related banner
+            deal_banner = f"""
 <!-- USA-Related Banner -->
 <div style="background:#dbeafe;border-radius:6px;padding:16px 22px;margin-bottom:20px;border-left:4px solid:#3b82f6;">
   <div style="font-size:15px;font-weight:800;color:#1e40af;margin-bottom:6px;">🇺🇸 USA-Related Case</div>
@@ -372,10 +380,17 @@ def send_update_email(
     changes: List[Tuple[str, Any, Any]],
     matched_by_regex: bool = False,
     partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
 ) -> bool:
     """Send update email via n8n webhook."""
     try:
-        html = generate_update_email_html(old_case, new_case, deal, changes)
+        html = generate_update_email_html(
+            old_case, new_case, deal, changes,
+            partial_side=partial_side,
+            partial_deal=partial_deal,
+            partial_deal_id=partial_deal_id,
+        )
         parties = old_case.get("parties", "N/A")
 
         if deal:
@@ -653,6 +668,8 @@ def process_canada_cases_updates():
                             if not send_update_email(
                                 case_doc, new_row, None, differences,
                                 partial_side=partial_side,
+                                partial_deal=get_deal_by_id(_partial_deal_id),
+                                partial_deal_id=_partial_deal_id,
                             ):
                                 collect_error(
                                     error_items,

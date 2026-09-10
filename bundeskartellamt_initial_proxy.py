@@ -31,13 +31,16 @@ from datetime import datetime, date, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple, Set
 from bson import ObjectId
 from mongodb_connection import (
-    get_deals_collection, get_database, is_connected, init_mongodb_connection
+    get_deals_collection, get_database, is_connected, init_mongodb_connection,
+    get_deal_by_id,
 )
 from html import escape as escape_html
 from llm_verification_service import verify_country_relation
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import (
+    apply_partial_match_subject, build_partial_match_banner_html, build_subject,
+)
 from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
@@ -539,7 +542,9 @@ def generate_matched_email(record: Dict, deal: Dict) -> Tuple[str, str]:
 
 
 def generate_usa_related_email(
-    record: Dict, partial_side: Optional[str] = None
+    record: Dict,
+    partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict] = None,
 ) -> Tuple[str, str]:
     fn = record.get("file_number", "N/A")
     pursue_en = record.get("pursue_en", "N/A")
@@ -548,8 +553,12 @@ def generate_usa_related_email(
     subject = build_subject("bundeskartellamt", "new")
     if partial_side:
         subject = apply_partial_match_subject(subject, partial_side)
-
-    usa_banner = """
+        usa_banner = build_partial_match_banner_html(
+            partial_deal, partial_side,
+            deal_id=(partial_deal or {}).get("deal_id"),
+        )
+    else:
+        usa_banner = """
 <div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
   <strong>🇺🇸 USA-Related Case</strong> — No deal match found, but this case appears related to the United States.
 </div>"""
@@ -814,8 +823,10 @@ def main():
                             _partial_deal_id, partial_side = partial_match
                             logger.info(
                                 f"  Sending [FRPMD] email (first insert)")
+                            partial_deal = get_deal_by_id(_partial_deal_id)
                             subject, html = generate_usa_related_email(
-                                record, partial_side=partial_side)
+                                record, partial_side=partial_side,
+                                partial_deal=partial_deal)
                             stats["partial_matched"] += 1
                             if not send_email_via_webhook(subject, html, fn):
                                 collect_error(

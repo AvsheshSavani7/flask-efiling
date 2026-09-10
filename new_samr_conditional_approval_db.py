@@ -18,6 +18,7 @@ from bson import ObjectId
 from mongodb_connection import (
     get_deals_collection,
     get_database,
+    get_deal_by_id,
     init_mongodb_connection,
     is_connected,
 )
@@ -25,7 +26,9 @@ from html import escape as escape_html
 from llm_verification_service import verify_usa_relation
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import (
+    apply_partial_match_subject, build_partial_match_banner_html, build_subject,
+)
 from n8n_email_service import post_email_payload
 from typing import Any, Optional, Tuple
 
@@ -717,7 +720,11 @@ def send_conditional_email_via_webhook(
 # Email – unmatched USA-related
 # ---------------------------------------------------------------------------
 
-def generate_unmatched_conditional_email_html(samr_case, conditional_data):
+def generate_unmatched_conditional_email_html(
+    samr_case, conditional_data,
+    partial_side: Optional[str] = None,
+    partial_deal: Optional[dict] = None,
+):
     title_cn = samr_case.get(
         "title_cn", conditional_data.get("title_cn", "N/A"))
     title_en = samr_case.get(
@@ -728,6 +735,20 @@ def generate_unmatched_conditional_email_html(samr_case, conditional_data):
     cond_date = conditional_data.get("date", "N/A")
 
     subject = build_subject("samr_conditional", "new")
+    if partial_side:
+        subject = apply_partial_match_subject(subject, partial_side)
+        header_block = build_partial_match_banner_html(
+            partial_deal, partial_side,
+            deal_id=(partial_deal or {}).get("deal_id"),
+        )
+    else:
+        header_block = """
+    <h2 style="color:#333; text-align:center; margin-top:0; padding-bottom:20px; border-bottom:3px solid #f59e0b;">
+      SAMR China Conditional Approval (USA-Related)
+    </h2>
+    <div style="text-align:center; margin-bottom:20px;">
+      <div style="background-color:#f59e0b; color:white; padding:8px 16px; border-radius:4px; display:inline-block; font-weight:bold;">🇺🇸 USA-RELATED</div>
+    </div>"""
 
     html_email = f"""
 <!DOCTYPE html>
@@ -738,12 +759,7 @@ def generate_unmatched_conditional_email_html(samr_case, conditional_data):
 </head>
 <body style="margin:0; padding:0; font-family:Arial,sans-serif; background-color:#f4f4f4;">
   <div style="max-width:900px; margin:20px auto; background-color:#ffffff; padding:30px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1);">
-    <h2 style="color:#333; text-align:center; margin-top:0; padding-bottom:20px; border-bottom:3px solid #f59e0b;">
-      SAMR China Conditional Approval (USA-Related)
-    </h2>
-    <div style="text-align:center; margin-bottom:20px;">
-      <div style="background-color:#f59e0b; color:white; padding:8px 16px; border-radius:4px; display:inline-block; font-weight:bold;">🇺🇸 USA-RELATED</div>
-    </div>
+    {header_block}
 
     <table style="width:100%; border-collapse:collapse; margin-bottom:20px;">
       <tr>
@@ -796,10 +812,15 @@ def generate_unmatched_conditional_email_html(samr_case, conditional_data):
 
 def send_unmatched_conditional_email_via_webhook(
     samr_case, conditional_data, partial_side: Optional[str] = None,
+    partial_deal_id: Optional[str] = None,
 ):
     try:
+        partial_deal = (
+            get_deal_by_id(str(partial_deal_id)) if partial_deal_id else None
+        )
         subject, html_email = generate_unmatched_conditional_email_html(
-            samr_case, conditional_data)
+            samr_case, conditional_data,
+            partial_side=partial_side, partial_deal=partial_deal)
         if partial_side:
             subject = apply_partial_match_subject(subject, partial_side)
         logger.info(f"Generated email subject: {subject}")
@@ -1026,7 +1047,8 @@ def process_record(record, samr_cases_list, error_items: list[dict[str, Any]] | 
                 )
                 update_samr_case_conditional(matched_case, conditional_data)
                 send_unmatched_conditional_email_via_webhook(
-                    matched_case, conditional_data, partial_side=partial_side)
+                    matched_case, conditional_data, partial_side=partial_side,
+                    partial_deal_id=_partial_deal_id)
             else:
                 logger.info("  No deal match. Checking USA relation...")
                 update_samr_case_conditional(matched_case, conditional_data)

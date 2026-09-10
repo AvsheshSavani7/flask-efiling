@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 
 from deal_match_llm import fetch_open_deals, llm_match_deal_id, llm_match_partial_deal
 from deal_match_regex import apply_regex_match_subject, regex_match_comesa_deal
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import apply_partial_match_subject, build_partial_match_banner_html, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import cleanup_old_logs, refresh_log_file
 from mongodb_connection import (
@@ -328,20 +328,31 @@ def generate_matched_case_email_html(
 </html>"""
 
 
-def generate_usa_related_email_html(case_info: Dict[str, Any]) -> str:
+def generate_usa_related_email_html(
+    case_info: Dict[str, Any],
+    partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
+) -> str:
     detail_url = case_info.get("detail_url") or REGISTRY_URL
-    return f"""<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8" /><title>USA-Related COMESA Case</title></head>
-<body style="margin:0;padding:0;background:#ffffff;color:#0f172a;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
-<div style="max-width:1100px;margin:0 auto;padding:28px 26px 40px 26px;">
+    if partial_side:
+        banner = build_partial_match_banner_html(
+            partial_deal, partial_side, deal_id=partial_deal_id)
+    else:
+        banner = f"""
 <div style="background:#dbeafe;border-radius:6px;padding:16px 22px;margin-bottom:20px;border-left:4px solid #3b82f6;">
   <div style="font-size:15px;font-weight:800;color:#1e40af;margin-bottom:6px;">USA-Related COMESA Case</div>
   <div style="font-size:14px;color:#1e3a8a;">This merger review appears to involve USA-related parties or markets.</div>
   <div style="margin-top:10px;">
     <a href="{escape_html(detail_url)}" target="_blank" style="color:#2563eb;text-decoration:none;font-weight:700;font-size:14px;">View Case →</a>
   </div>
-</div>
+</div>"""
+    return f"""<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8" /><title>USA-Related COMESA Case</title></head>
+<body style="margin:0;padding:0;background:#ffffff;color:#0f172a;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">
+<div style="max-width:1100px;margin:0 auto;padding:28px 26px 40px 26px;">
+{banner}
 <div style="background:#f3f4f6;border-radius:6px;padding:22px 26px;">
   <div style="font-size:18px;font-weight:800;margin-bottom:16px;">Case Details</div>
   <div style="display:grid;grid-template-columns:200px 1fr;row-gap:12px;column-gap:18px;">
@@ -607,7 +618,13 @@ def run_comesa_cases_register(bootstrap: bool = False):
                         subject = build_subject("comesa", "new")
                         subject = apply_partial_match_subject(
                             subject, partial_side)
-                        html_email = generate_usa_related_email_html(case_info)
+                        partial_deal = get_deal_by_id(_partial_deal_id)
+                        html_email = generate_usa_related_email_html(
+                            case_info,
+                            partial_side=partial_side,
+                            partial_deal=partial_deal,
+                            partial_deal_id=_partial_deal_id,
+                        )
                         if not send_email_via_webhook(
                             subject, html_email, case_info
                         ):

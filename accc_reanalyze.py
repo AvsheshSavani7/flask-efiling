@@ -296,7 +296,8 @@ def reanalyze(cutoff_str: str, dry_run: bool) -> Dict[str, Any]:
                         f"  [DRY-RUN] Would send FRPMD email for {case_number}")
                 else:
                     send_unmatched_usa_related_email(
-                        record, partial_side=partial_side)
+                        record, partial_side=partial_side,
+                        partial_deal_id=_partial_deal_id)
                     logger.info(f"  Sent FRPMD email for {case_number}")
                 continue
 

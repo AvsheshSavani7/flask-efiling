@@ -12,9 +12,10 @@ Subject formats:
                   acquirer = acquirer_ticker, else acquirer/acquire_name (omit if absent)
   Unmatched (FRUD): "{Agency} - {Event Label} - [FRUD]"
   Partial (FRPMD):  "{Agency} - {Event Label} - [FRPMD-A]" or "[FRPMD-T]"
-                    same unmatched body as FRUD; tag set by apply_partial_match_subject
+                    unmatched subject; body uses deal-details banner, not the USA block
 """
 
+from html import escape as escape_html
 from typing import Optional
 
 # ---------------------------------------------------------------------------
@@ -145,3 +146,39 @@ def apply_partial_match_subject(subject: str, side: str) -> str:
     if "[FRMD]" in (subject or ""):
         return subject.replace("[FRMD]", tag)
     return subject
+
+
+def partial_match_side_label(side: str) -> str:
+    """Human label for the matched side: 'acquirer' or 'target'."""
+    if (side or "").lower().startswith("acquir"):
+        return "acquirer"
+    return "target"
+
+
+def build_partial_match_banner_html(
+    deal_match: Optional[dict],
+    partial_side: str,
+    *,
+    deal_id: Optional[str] = None,
+) -> str:
+    """Yellow banner with one-side deal details. Not the USA-related FRUD block."""
+    side = partial_match_side_label(partial_side)
+    deal = deal_match or {}
+    target = deal.get("target") or deal.get("target_name") or "N/A"
+    acquirer = (
+        deal.get("acquirer")
+        or deal.get("acquire_name")
+        or deal.get("acquirer_name")
+        or "N/A"
+    )
+    shown_id = deal.get("deal_id") or deal_id or "N/A"
+    return f"""
+<div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
+  <div style="font-weight:800;color:#92400e;margin-bottom:4px;">Partial match ({escape_html(side)} side)</div>
+  <div style="font-size:14px;color:#78350f;">
+    Only one side of this deal is named in the filing. Deal ID is not stored on the case.<br>
+    <b>Acquirer:</b> {escape_html(str(acquirer))} &nbsp;|&nbsp;
+    <b>Target:</b> {escape_html(str(target))} &nbsp;|&nbsp;
+    <b>Deal ID:</b> {escape_html(str(shown_id))}
+  </div>
+</div>"""

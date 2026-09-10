@@ -25,7 +25,7 @@ from deal_match_regex import apply_regex_match_subject, regex_match_deal_by_titl
 from deal_match_llm import fetch_open_deals
 from log_utils import cleanup_old_logs, refresh_log_file
 from scraper_error_utils import collect_error, send_error_summary
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import apply_partial_match_subject, build_partial_match_banner_html, build_subject
 from n8n_email_service import post_email_payload, resolve_webhook_url
 
 
@@ -508,6 +508,9 @@ def generate_update_email_html(
     deal: Optional[Dict[str, Any]],
     changes: List[Tuple[str, Any, Any, str]],
     is_usa: bool = False,
+    partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
 ) -> str:
     """
     Generate HTML email for ACCC case update, mirroring the rich layout from
@@ -675,6 +678,11 @@ def generate_update_email_html(
   </div>"""
         html += """
     </div>"""
+    elif partial_side:
+        if not partial_deal and partial_deal_id:
+            partial_deal = get_deal_by_id(str(partial_deal_id))
+        html += build_partial_match_banner_html(
+            partial_deal, partial_side, deal_id=partial_deal_id)
     elif is_usa:
         # USA-related but no matched deal
         html += """
@@ -938,10 +946,16 @@ def send_update_email(
     is_usa: bool = False,
     matched_by_regex: bool = False,
     partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
 ) -> bool:
     try:
         html = generate_update_email_html(
-            old_case, new_case, deal, changes, is_usa)
+            old_case, new_case, deal, changes, is_usa,
+            partial_side=partial_side,
+            partial_deal=partial_deal,
+            partial_deal_id=partial_deal_id,
+        )
         case_number = old_case.get("case_number", "N/A")
         title = old_case.get("title", "N/A")
         deal_id = str(deal.get("_id")) if deal and deal.get("_id") else None
@@ -1285,6 +1299,7 @@ def process_accc_cases_updates():
                         if not send_update_email(
                             case_doc, current_case, None, changes,
                             partial_side=partial_side,
+                            partial_deal_id=_partial_deal_id,
                         ):
                             collect_error(
                                 error_items,

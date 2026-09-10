@@ -18,7 +18,9 @@ from pymongo import MongoClient
 from typing import Any, Dict, List, Optional, Tuple
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import (
+    apply_partial_match_subject, build_partial_match_banner_html, build_subject,
+)
 from n8n_email_service import post_email_payload
 
 # ---------------------------------------------------------------------------
@@ -682,7 +684,10 @@ def _build_history_section(case_info, new_history_keys=None):
     return section
 
 
-def generate_update_email_html(case_info, changes, deal_match=None):
+def generate_update_email_html(
+    case_info, changes, deal_match=None, partial_side=None, partial_deal=None,
+    partial_deal_id=None,
+):
     """Generate update email with changes highlighted. deal_match is optional."""
     title = case_info.get("title", "N/A")
 
@@ -699,6 +704,8 @@ def generate_update_email_html(case_info, changes, deal_match=None):
         )
     else:
         subject = build_subject("uk_cma", "update")
+        if partial_side:
+            subject = apply_partial_match_subject(subject, partial_side)
         title_text = f"📝 UK CMA Merger Case Update – {title[:50]}"
 
     common_rows = _build_common_case_rows(case_info)
@@ -723,6 +730,11 @@ def generate_update_email_html(case_info, changes, deal_match=None):
       <tr style="background-color:#e8f5e9;"><td style="padding:8px; font-weight:bold; color:#555;">Target:</td><td style="padding:8px; color:#333;">{escape_html(target)}</td></tr>
       <tr style="background-color:#e8f5e9;"><td style="padding:8px; font-weight:bold; color:#555;">Acquirer:</td><td style="padding:8px; color:#333;">{escape_html(acquirer)}</td></tr>
     </table>"""
+    elif partial_side:
+        deal_section = build_partial_match_banner_html(
+            partial_deal, partial_side,
+            deal_id=partial_deal_id or (partial_deal or {}).get("deal_id"),
+        )
 
     html_email = f"""
 <!DOCTYPE html>
@@ -961,7 +973,11 @@ def process_case(db_record, error_items: List[Dict[str, Any]], match_stats: Opti
                         f"side={partial_side}) — sending FRPMD email, not storing deal_id"
                     )
                     subj, html = generate_update_email_html(
-                        case_info, changes)
+                        case_info, changes,
+                        partial_side=partial_side,
+                        partial_deal=find_deal_by_id(_partial_deal_id),
+                        partial_deal_id=_partial_deal_id,
+                    )
                     subj = apply_partial_match_subject(subj, partial_side)
                     if not send_email_via_webhook(subj, html, {
                         "title": case_info["title"],

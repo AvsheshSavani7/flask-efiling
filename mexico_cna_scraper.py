@@ -42,7 +42,7 @@ from dotenv import load_dotenv
 
 from deal_match_llm import llm_match_deal_id, llm_match_partial_deal, fetch_open_deals
 from deal_match_regex import regex_match_flat_scan
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import apply_partial_match_subject, build_partial_match_banner_html, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import ensure_script_logger, refresh_script_log
 from mongodb_connection import (
@@ -353,8 +353,14 @@ def build_email_html(
     case: Dict[str, Any],
     deal_match: Optional[Dict[str, Any]],
     agentes_en: str,
+    *,
+    partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
 ) -> Tuple[str, str]:
     subject = build_subject("mexico_cna", "new", deal_match)
+    if partial_side:
+        subject = apply_partial_match_subject(subject, partial_side)
     expediente = case.get("expediente", "N/A")
     asunto = case.get("asunto", "N/A")
     agentes_es = case.get("agentes", "N/A")
@@ -373,6 +379,9 @@ def build_email_html(
   <strong>Matched Deal:</strong> {escape_html(str(target))} / {escape_html(str(acquirer))}<br>
   <strong>Deal ID:</strong> {escape_html(str(deal_id))}
 </div>"""
+    elif partial_side:
+        banner = build_partial_match_banner_html(
+            partial_deal, partial_side, deal_id=partial_deal_id)
     else:
         banner = """
 <div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
@@ -702,13 +711,19 @@ def process_case(
             deals=open_deals,
         )
         if partial_match:
-            _partial_deal_id, partial_side = partial_match
+            partial_deal_id, partial_side = partial_match
             logger.info(
                 "  [%s] Partial match (deal_id=%s side=%s) "
                 "— sending FRPMD email, not storing deal_id",
-                expediente, _partial_deal_id, partial_side,
+                expediente, partial_deal_id, partial_side,
             )
-            subject, html = build_email_html(case, None, agentes_en)
+            partial_deal = get_deal_by_id(partial_deal_id)
+            subject, html = build_email_html(
+                case, None, agentes_en,
+                partial_side=partial_side,
+                partial_deal=partial_deal,
+                partial_deal_id=partial_deal_id,
+            )
             subject = apply_partial_match_subject(subject, partial_side)
             if not dry_run:
                 if not insert_case(collection, doc):

@@ -40,6 +40,7 @@ from scraper_error_utils import (
 from mongodb_connection import (
     get_database,
     get_deals_collection,
+    get_deal_by_id,
     init_mongodb_connection,
     is_connected,
 )
@@ -64,7 +65,9 @@ from ec_html_scraper import parse_case_html
 from new_ec_cases_html import match_case_to_deal, match_case_to_deal_partial
 from deal_match_regex import apply_regex_match_subject, regex_match_ec_deal
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import (
+    apply_partial_match_subject, build_partial_match_banner_html, build_subject,
+)
 from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
@@ -1164,7 +1167,10 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                             )
                             email_html = generate_update_email_html(
                                 new_data, differences)
-                            banner = _build_usa_banner(case_number)
+                            partial_deal = get_deal_by_id(_partial_deal_id)
+                            banner = build_partial_match_banner_html(
+                                partial_deal, partial_side,
+                                deal_id=_partial_deal_id)
                             email_html = email_html.replace(
                                 "{BANNER_PLACEHOLDER}", banner)
                             subject = build_subject("ec_merger", "update")

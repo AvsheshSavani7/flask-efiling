@@ -1088,11 +1088,15 @@ def send_update_email(
     deal: Optional[Dict[str, Any]],
     matched_by_regex: bool = False,
     partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
+    partial_deal_id: Optional[str] = None,
 ) -> bool:
     subject, html = generate_update_email_html(
         case_data, changes, deal,
         matched_by_regex=matched_by_regex,
         partial_side=partial_side,
+        partial_deal=partial_deal,
+        partial_deal_id=partial_deal_id,
     )
     print(f"    📤 Sending email: {subject}")
     return _post_email_payload({
@@ -1545,6 +1549,7 @@ def process_brazil_cases_updates(headless: bool = True):
                                 if not send_update_email(
                                     case_doc, changes, None,
                                     partial_side=partial_side,
+                                    partial_deal_id=_partial_deal_id,
                                 ):
                                     collect_error(
                                         error_items,

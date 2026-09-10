@@ -54,7 +54,7 @@ from bundeskartellamt_initial_proxy import (
 from error_email_service import send_error_email
 from llm_verification_service import verify_country_relation
 from log_utils import cleanup_old_logs, refresh_log_file
-from mongodb_connection import init_mongodb_connection
+from mongodb_connection import get_deal_by_id, init_mongodb_connection
 
 # ---------------------------------------------------------------------------
 # Config
@@ -302,8 +302,9 @@ def reanalyze(cutoff_str: str, dry_run: bool) -> Dict[str, Any]:
                 f"side={partial_side} (not storing deal_id)"
             )
             update_record_after_analysis(gc_collection, fn, None, dry_run)
+            partial_deal = get_deal_by_id(_partial_deal_id)
             subject, html = generate_usa_related_email(
-                record, partial_side=partial_side)
+                record, partial_side=partial_side, partial_deal=partial_deal)
             if dry_run:
                 logger.info(f"  [DRY-RUN] Would send FRPMD email: {subject}")
             else:

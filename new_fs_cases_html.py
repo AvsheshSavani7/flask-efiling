@@ -37,6 +37,7 @@ from scraper_error_utils import (
 from mongodb_connection import (
     get_database,
     get_deals_collection,
+    get_deal_by_id,
     init_mongodb_connection,
     is_connected,
 )
@@ -61,7 +62,9 @@ import traceback
 
 from fs_html_scraper import parse_case_html
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import (
+    apply_partial_match_subject, build_partial_match_banner_html, build_subject,
+)
 from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
@@ -725,6 +728,7 @@ def generate_usa_email(
     case: Dict[str, Any],
     companies: List[str],
     partial_side: Optional[str] = None,
+    partial_deal: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, str]:
     case_num = case.get("case_number", "N/A")
     companies_str = " / ".join(companies) if companies else "N/A"
@@ -732,19 +736,25 @@ def generate_usa_email(
     subject = build_subject("ec_fs", "new")
     if partial_side:
         subject = apply_partial_match_subject(subject, partial_side)
-
-    usa_banner = (
-        '<div style="background:#fef3c7;border-radius:6px;padding:16px 22px;'
-        'margin:20px 28px 0 28px;border-left:4px solid #f59e0b;">'
-        '<div style="font-size:15px;font-weight:800;color:#92400e;margin-bottom:4px;">USA-Related Case</div>'
-        '<div style="font-size:14px;color:#78350f;">This FS case involves companies with US connections.</div>'
-        '</div>'
-    )
+        usa_banner = build_partial_match_banner_html(
+            partial_deal, partial_side,
+            deal_id=(partial_deal or {}).get("deal_id"),
+        )
+        page_title = f"EC FS Case - {case_num}"
+    else:
+        usa_banner = (
+            '<div style="background:#fef3c7;border-radius:6px;padding:16px 22px;'
+            'margin:20px 28px 0 28px;border-left:4px solid #f59e0b;">'
+            '<div style="font-size:15px;font-weight:800;color:#92400e;margin-bottom:4px;">USA-Related Case</div>'
+            '<div style="font-size:14px;color:#78350f;">This FS case involves companies with US connections.</div>'
+            '</div>'
+        )
+        page_title = f"EC FS Case (USA-Related) - {case_num}"
 
     html = f'''<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>EC FS Case (USA-Related) - {case_num}</title></head>
+<title>{page_title}</title></head>
 <body style="margin:0;background:#f5f7fb;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#1f2937;">
 <div style="max-width:980px;margin:28px auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:10px;box-shadow:0 6px 18px rgba(17,24,39,0.06);overflow:hidden;">
 {usa_banner}
@@ -1057,7 +1067,8 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                             case_num, _partial_deal_id, partial_side,
                         )
                         subject, html_email = generate_usa_email(
-                            case, companies, partial_side=partial_side)
+                            case, companies, partial_side=partial_side,
+                            partial_deal=get_deal_by_id(_partial_deal_id))
                         if not send_email_via_webhook(
                                 subject, html_email, case_num, case_title):
                             collect_error(

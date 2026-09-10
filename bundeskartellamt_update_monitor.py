@@ -36,7 +36,8 @@ from datetime import datetime, date, timezone, timedelta
 from typing import List, Dict, Any, Optional, Tuple, Set
 from bson import ObjectId
 from mongodb_connection import (
-    get_deals_collection, get_database, is_connected, init_mongodb_connection
+    get_deals_collection, get_database, is_connected, init_mongodb_connection,
+    get_deal_by_id,
 )
 from html import escape as escape_html
 from llm_verification_service import verify_country_relation
@@ -45,7 +46,9 @@ from deal_match_regex import regex_match_bka_deal
 from deal_match_llm import fetch_open_deals
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import apply_partial_match_subject, build_subject
+from email_subject_builder import (
+    apply_partial_match_subject, build_partial_match_banner_html, build_subject,
+)
 from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
@@ -435,7 +438,8 @@ def _build_case_info_html(stored: Dict) -> str:
 
 def generate_update_email(stored: Dict, changes: List[Tuple[str, str, str]],
                           deal: Optional[Dict],
-                          partial_side: Optional[str] = None) -> Tuple[str, str]:
+                          partial_side: Optional[str] = None,
+                          partial_deal: Optional[Dict] = None) -> Tuple[str, str]:
     fn = stored.get("file_number", "N/A")
     change_summary = ", ".join(FIELD_LABELS.get(f, f) for f, _, _ in changes)
 
@@ -457,7 +461,12 @@ def generate_update_email(stored: Dict, changes: List[Tuple[str, str, str]],
         subject = build_subject("bundeskartellamt", "update")
         if partial_side:
             subject = apply_partial_match_subject(subject, partial_side)
-        banner = """
+            banner = build_partial_match_banner_html(
+                partial_deal, partial_side,
+                deal_id=(partial_deal or {}).get("deal_id"),
+            )
+        else:
+            banner = """
 <div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
   <div style="font-weight:800;color:#92400e;">USA-Related (Unmatched)</div>
 </div>"""
@@ -732,8 +741,11 @@ def main():
                                 "— sending FRPMD email, not storing deal_id",
                                 _partial_deal_id, partial_side,
                             )
+                            partial_deal = get_deal_by_id(_partial_deal_id)
                             subject, html = generate_update_email(
-                                merged, changes, None, partial_side=partial_side)
+                                merged, changes, None,
+                                partial_side=partial_side,
+                                partial_deal=partial_deal)
                             stats["email_sent"] += 1
                             stats["partial_matched_new"] += 1
                             if not send_email_via_webhook(
