@@ -13,7 +13,7 @@ For each record in mexico_cna_cases where is_open=True:
        → update DB (companies_resolved, decision, dates, is_open=False, ...)
        → email:
            deal_id already set → send [FRMD] update email
-           else → LLM match → regex [FRRMD] → USA check [FRUD] → silent
+           else → LLM match → regex [FRRMD] → FRPMD → USA check [FRUD] → silent
 
 Concurrency:
   All is_open=True records are fetched at once. A ThreadPoolExecutor
@@ -45,9 +45,9 @@ import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
-from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_llm import llm_match_deal_id, llm_match_partial_deal, fetch_open_deals
 from deal_match_regex import regex_match_flat_scan
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import ensure_script_logger, refresh_script_log
 from mongodb_connection import (
@@ -451,7 +451,7 @@ def process_record(
     Handle a record that has a resolution result.
     Translates companies, updates DB, sends email.
 
-    Returns: "updated_matched" | "updated_usa" | "updated_no_email"
+    Returns: "updated_matched" | "updated_partial" | "updated_usa" | "updated_no_email"
     """
     expediente = record.get("expediente", "")
     companies_es = resolution.get("companies", "")
@@ -601,6 +601,55 @@ def process_record(
             )
         return "updated_matched"
 
+    # One-side FRPMD — do not store deal_id
+    try:
+        partial_match = llm_match_partial_deal(
+            regulator_name="Mexico CNA",
+            case_sections={
+                "EXPEDIENTE": expediente,
+                "COMPANIES (Spanish)": companies_es,
+                "COMPANIES (English translation)": companies_en,
+            },
+            source_label="the companies text",
+            source_label_step1="the companies text (acquirer or target)",
+            deals=open_deals,
+        )
+        if partial_match:
+            _partial_deal_id, partial_side = partial_match
+            logger.info(
+                "  [%s] Partial match (deal_id=%s side=%s) "
+                "— sending FRPMD email, not storing deal_id",
+                expediente, _partial_deal_id, partial_side,
+            )
+            subject, html = build_update_email_html(
+                record, resolution, None, companies_en, decision_en
+            )
+            subject = apply_partial_match_subject(subject, partial_side)
+            if not dry_run:
+                collection.update_one(
+                    {"expediente": expediente},
+                    {"$set": update_fields},
+                )
+                payload = {
+                    "subject": subject,
+                    "html": html,
+                    "expediente": expediente,
+                    "source": "mexico_cna_update_monitor",
+                    "is_new_case": False,
+                    "is_unmatched": True,
+                }
+                _send_email(payload, subject, test_mode)
+            else:
+                logger.info(
+                    "  [DRY-RUN] Would update + send [FRPMD] for %s", expediente)
+            return "updated_partial"
+    except Exception as exc:
+        logger.error("  [%s] Partial match error: %s", expediente, exc)
+        collect_error(
+            error_items, str(exc), step="llm_match_partial_deal",
+            context={"expediente": expediente},
+        )
+
     # USA relation check
     is_usa = False
     try:
@@ -688,6 +737,7 @@ def run_mexico_cna_update_monitor(
         "records_pending": 0,
         "records_resolved": 0,
         "updated_matched": 0,
+        "updated_partial": 0,
         "updated_usa": 0,
         "updated_no_email": 0,
         "errors": 0,
@@ -836,6 +886,7 @@ def run_mexico_cna_update_monitor(
         logger.info("  Records pending        : %d (no decision yet)", stats["records_pending"])
         logger.info("  Records resolved       : %d (decision found)", stats["records_resolved"])
         logger.info("  Updated [FRMD/FRRMD]   : %d", stats["updated_matched"])
+        logger.info("  Updated [FRPMD]        : %d", stats["updated_partial"])
         logger.info("  Updated [FRUD]         : %d", stats["updated_usa"])
         logger.info("  Updated silently       : %d", stats["updated_no_email"])
         logger.info("  Errors                 : %d", stats["errors"])

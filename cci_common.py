@@ -17,10 +17,11 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from n8n_email_service import post_email_payload
 from llm_verification_service import verify_usa_relation
 from mongodb_connection import get_database, get_deal_by_id, get_deals_collection
+from deal_match_llm import llm_match_partial_deal
 
 
 # python under_review_scraper.py              # live
@@ -1030,6 +1031,26 @@ RESPONSE FORMAT:
         raise
 
 
+def match_case_to_deal_partial(
+    match_text: str, reg_no: str = ""
+) -> Optional[Tuple[str, str]]:
+    """One-side LLM match after FRMD fails. CCI has no regex step. Returns (deal_id, side) or None."""
+    prefix = f"  [{reg_no}] " if reg_no else "  "
+    text = (match_text or "").strip()
+    if not text:
+        logger.info(
+            "%sPartial match skipped: empty notifying_parties/description", prefix)
+        return None
+    return llm_match_partial_deal(
+        regulator_name="CCI India",
+        case_sections={
+            "CCI CASE TEXT (notifying parties / description)": text,
+        },
+        source_label="the CCI case text",
+        source_label_step1="the CCI case text (acquirer or target / notifying parties)",
+    )
+
+
 def _pdf_link_row(label: str, url: Optional[str]) -> str:
     if not url:
         return ""
@@ -1235,9 +1256,12 @@ def send_cci_email(
     list_page_url: Optional[str] = None,
     source_key: Optional[str] = None,
     changes: Optional[Dict[str, Any]] = None,
+    partial_side: Optional[str] = None,
 ) -> bool:
     reg_no = record.get("combination_registration_no", "")
     tag = "[FRMD]" if deal_match else "[FRUD]"
+    if partial_side:
+        tag = "[FRPMD-A]" if (partial_side or "").lower().startswith("acquir") else "[FRPMD-T]"
     if deal_match:
         target = deal_match.get("target") or deal_match.get(
             "target_name", "N/A")
@@ -1267,6 +1291,8 @@ def send_cci_email(
         record, deal_match, event_type, source_label,
         list_page_url=list_page_url, changes=changes,
     )
+    if partial_side:
+        subject = apply_partial_match_subject(subject, partial_side)
     detail_urls = record.get("detail_urls") or {}
     detail_for_source = detail_urls.get(source_key) if source_key else None
     payload: Dict[str, Any] = {
@@ -1303,6 +1329,7 @@ def process_deal_match_and_email(
 ) -> bool:
     """
     Deal match / USA check / email per plan. Skips LLM if deal_id already set.
+    Order: FRMD → FRPMD (CCI has no regex) → USA/FRUD. FRPMD does not store deal_id.
 
     changes: optional {"old": {...}, "new": {...}} dict built by the scraper when
              a status-change update is detected; forwarded into the email HTML.
@@ -1391,6 +1418,39 @@ def process_deal_match_and_email(
             list_page_url=list_page_url,
             source_key=source_key,
             changes=changes,
+        )
+
+    logger.info("  No both-sides match; trying one-side FRPMD match...")
+    partial_match = None
+    try:
+        partial_match = match_case_to_deal_partial(match_text, reg_no=reg_no)
+    except Exception as exc:
+        from scraper_error_utils import collect_error
+
+        logger.error("  Partial match failed for %s: %s", reg_no, exc)
+        collect_error(
+            error_items,
+            str(exc),
+            step="match_case_to_deal_partial",
+            context={"combination_registration_no": reg_no},
+        )
+
+    if partial_match:
+        _partial_deal_id, partial_side = partial_match
+        logger.info(
+            "  Partial match (deal_id=%s side=%s) "
+            "— sending FRPMD email, not storing deal_id",
+            _partial_deal_id, partial_side,
+        )
+        return send_cci_email(
+            record,
+            None,
+            event_type,
+            source_label,
+            list_page_url=list_page_url,
+            source_key=source_key,
+            changes=changes,
+            partial_side=partial_side,
         )
 
     logger.info("  No deal match; running USA relation check (case_type=CCI)...")

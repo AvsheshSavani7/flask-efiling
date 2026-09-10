@@ -37,10 +37,10 @@ from bwb_cases_common import (
     translate_to_english_required,
     utc_now_iso,
 )
-from bwb_cases_register import match_case_to_deal
+from bwb_cases_register import match_case_to_deal, match_case_to_deal_partial
 from deal_match_llm import fetch_open_deals
 from deal_match_regex import apply_regex_match_subject, regex_match_bwb_deal
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import cleanup_old_logs, refresh_log_file
 from mongodb_connection import (
@@ -250,6 +250,7 @@ def send_update_email(
     changes: List[Tuple[str, Any, Any]],
     matched_by_regex: bool = False,
     usa_related: bool = False,
+    partial_side: Optional[str] = None,
 ) -> bool:
     try:
         html = generate_update_email_html(old_case, merged_case, deal, changes)
@@ -261,6 +262,8 @@ def send_update_email(
             deal_id = str(deal.get("_id")) if deal.get("_id") else None
         else:
             subject = build_subject("bwb", "update")
+            if partial_side:
+                subject = apply_partial_match_subject(subject, partial_side)
             deal_id = None
 
         payload = {
@@ -346,6 +349,7 @@ def process_bwb_cases_updates(headless: Optional[bool] = None) -> None:
     total_changed = 0
     llm_match_count = 0
     regex_match_count = 0
+    partial_match_count = 0
     listing_years = monitor_listing_years()
 
     logger.info("=" * 60)
@@ -576,38 +580,78 @@ def process_bwb_cases_updates(headless: Optional[bool] = None) -> None:
                                 )
                         else:
                             try:
-                                details_for_llm = (
-                                    f"File Number: {file_number}\n"
-                                    f"Parties: {parties_en}\n"
-                                    f"Status: {status_en}\n"
-                                    f"Detail: {(merged.get('detail_content_en') or '')[:2000]}"
-                                )
-                                is_usa = bool(
-                                    verify_usa_relation(
-                                        company_details=details_for_llm,
-                                        case_type="BWB Austria",
-                                    )
+                                partial_match = match_case_to_deal_partial(
+                                    parties_en,
+                                    file_number,
+                                    status_en,
+                                    deals=open_deals,
                                 )
                             except Exception as e:
-                                logger.exception("USA relation check error: %s", e)
-                                is_usa = False
+                                logger.exception("Partial deal matching error: %s", e)
+                                collect_error(
+                                    error_items,
+                                    str(e),
+                                    step="match_case_to_deal_partial",
+                                    context={"file_number": file_number},
+                                )
+                                partial_match = None
 
-                            if is_usa:
+                            if partial_match:
+                                _partial_deal_id, partial_side = partial_match
+                                partial_match_count += 1
+                                logger.info(
+                                    "Partial match (deal_id=%s side=%s) "
+                                    "— sending FRPMD email, not storing deal_id",
+                                    _partial_deal_id, partial_side,
+                                )
                                 if not send_update_email(
                                     case_doc,
                                     merged,
                                     None,
                                     differences,
                                     usa_related=True,
+                                    partial_side=partial_side,
                                 ):
                                     collect_error(
                                         error_items,
-                                        "Failed to send USA-related update email",
+                                        "Failed to send FRPMD update email",
                                         step="send_email",
                                         context={"file_number": file_number},
                                     )
                             else:
-                                logger.info("Not USA-related; updating DB only")
+                                try:
+                                    details_for_llm = (
+                                        f"File Number: {file_number}\n"
+                                        f"Parties: {parties_en}\n"
+                                        f"Status: {status_en}\n"
+                                        f"Detail: {(merged.get('detail_content_en') or '')[:2000]}"
+                                    )
+                                    is_usa = bool(
+                                        verify_usa_relation(
+                                            company_details=details_for_llm,
+                                            case_type="BWB Austria",
+                                        )
+                                    )
+                                except Exception as e:
+                                    logger.exception("USA relation check error: %s", e)
+                                    is_usa = False
+
+                                if is_usa:
+                                    if not send_update_email(
+                                        case_doc,
+                                        merged,
+                                        None,
+                                        differences,
+                                        usa_related=True,
+                                    ):
+                                        collect_error(
+                                            error_items,
+                                            "Failed to send USA-related update email",
+                                            step="send_email",
+                                            context={"file_number": file_number},
+                                        )
+                                else:
+                                    logger.info("Not USA-related; updating DB only")
 
                     if not update_case_document(collection, case_doc, update_fields):
                         collect_error(
@@ -655,6 +699,7 @@ def process_bwb_cases_updates(headless: Optional[bool] = None) -> None:
         logger.info("  Cases with changes           : %s", total_changed)
         logger.info("  LLM deal matches             : %s", llm_match_count)
         logger.info("  Regex fallback matches       : %s", regex_match_count)
+        logger.info("  Partial one-side matches     : %s", partial_match_count)
         logger.info("  Errors encountered           : %s", len(error_items))
         logger.info("  Total time                   : %ss", elapsed)
         logger.info("=" * 60)

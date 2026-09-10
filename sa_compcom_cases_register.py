@@ -35,9 +35,9 @@ from dotenv import load_dotenv
 from openpyxl import load_workbook
 from playwright.sync_api import sync_playwright
 
-from deal_match_llm import fetch_open_deals, llm_match_deal_id
+from deal_match_llm import fetch_open_deals, llm_match_deal_id, llm_match_partial_deal
 from deal_match_regex import apply_regex_match_subject, regex_match_sa_compcom_deal
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import cleanup_old_logs, refresh_log_file
 from mongodb_connection import (
@@ -379,6 +379,26 @@ def match_case_to_deal(
     )
 
 
+def match_case_to_deal_partial(
+    case_number: str,
+    acquiring: str,
+    target: str,
+    deals: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Tuple[str, str]]:
+    """One-side LLM match after FRMD and FRRMD fail. Returns (deal_id, side) or None."""
+    return llm_match_partial_deal(
+        regulator_name="South Africa Competition Commission",
+        case_sections={
+            "CASE NUMBER": case_number,
+            "PRIMARY ACQUIRING FIRM": acquiring,
+            "PRIMARY TARGET FIRM": target,
+        },
+        source_label="the South Africa CompCom acquiring and target firms",
+        source_label_step1="the South Africa CompCom acquiring or target firm",
+        deals=deals,
+    )
+
+
 def generate_matched_case_email_html(
     case_info: Dict[str, Any], deal: Dict[str, Any]
 ) -> str:
@@ -621,6 +641,7 @@ def run_sa_compcom_cases_register(
     new_cases: List[Dict[str, Any]] = []
     llm_match_count = 0
     regex_match_count = 0
+    partial_match_count = 0
     inserted_count = 0
     skipped_existing = 0
     parsed_count = 0
@@ -837,34 +858,34 @@ def run_sa_compcom_cases_register(
                             },
                         )
                 else:
+                    partial_match = None
                     try:
-                        details_for_llm = (
-                            f"Case Number: {case_number}\n"
-                            f"Acquiring Firm: {acquiring}\n"
-                            f"Target Firm: {target}\n"
-                            f"Size: {row.get('size', '')}\n"
-                            f"Phase: {row.get('phase', '')}\n"
-                            f"Status: {row.get('status', '')}\n"
-                            f"Initial date filed: {row.get('initial_date_filed', '')}"
-                        )
-                        is_usa = bool(
-                            verify_usa_relation(
-                                company_details=details_for_llm,
-                                case_type="South Africa CompCom",
-                            )
+                        partial_match = match_case_to_deal_partial(
+                            case_number,
+                            acquiring,
+                            target,
+                            deals=open_deals,
                         )
                     except Exception as e:
-                        logger.exception("USA verification error: %s", e)
+                        logger.exception("Partial deal matching error: %s", e)
                         collect_error(
                             error_items,
                             str(e),
-                            step="verify_usa_relation",
+                            step="match_case_to_deal_partial",
                             context={"case_number": case_number},
                         )
-                        is_usa = False
 
-                    if is_usa:
+                    if partial_match:
+                        _partial_deal_id, partial_side = partial_match
+                        partial_match_count += 1
+                        logger.info(
+                            "Partial match (deal_id=%s side=%s) "
+                            "— sending FRPMD email, not storing deal_id",
+                            _partial_deal_id, partial_side,
+                        )
                         subject = build_subject("sa_compcom", "new")
+                        subject = apply_partial_match_subject(
+                            subject, partial_side)
                         html_email = generate_usa_related_email_html(case_info)
                         if not send_email_via_webhook(
                             subject,
@@ -874,14 +895,56 @@ def run_sa_compcom_cases_register(
                         ):
                             collect_error(
                                 error_items,
-                                "Failed to send USA-related email",
+                                "Failed to send FRPMD email",
                                 step="send_email",
                                 context={"case_number": case_number},
                             )
                     else:
-                        logger.info(
-                            "Not matched and not USA-related; silent insert"
-                        )
+                        try:
+                            details_for_llm = (
+                                f"Case Number: {case_number}\n"
+                                f"Acquiring Firm: {acquiring}\n"
+                                f"Target Firm: {target}\n"
+                                f"Size: {row.get('size', '')}\n"
+                                f"Phase: {row.get('phase', '')}\n"
+                                f"Status: {row.get('status', '')}\n"
+                                f"Initial date filed: {row.get('initial_date_filed', '')}"
+                            )
+                            is_usa = bool(
+                                verify_usa_relation(
+                                    company_details=details_for_llm,
+                                    case_type="South Africa CompCom",
+                                )
+                            )
+                        except Exception as e:
+                            logger.exception("USA verification error: %s", e)
+                            collect_error(
+                                error_items,
+                                str(e),
+                                step="verify_usa_relation",
+                                context={"case_number": case_number},
+                            )
+                            is_usa = False
+
+                        if is_usa:
+                            subject = build_subject("sa_compcom", "new")
+                            html_email = generate_usa_related_email_html(case_info)
+                            if not send_email_via_webhook(
+                                subject,
+                                html_email,
+                                case_info,
+                                test_mode=test_mode,
+                            ):
+                                collect_error(
+                                    error_items,
+                                    "Failed to send USA-related email",
+                                    step="send_email",
+                                    context={"case_number": case_number},
+                                )
+                        else:
+                            logger.info(
+                                "Not matched and not USA-related; silent insert"
+                            )
 
                 inserted_id = insert_case(collection, case_info)
                 if inserted_id:
@@ -949,6 +1012,8 @@ def run_sa_compcom_cases_register(
             logger.info("  LLM deal matches             : %s", llm_match_count)
             logger.info("  Regex fallback matches       : %s",
                         regex_match_count)
+            logger.info("  Partial one-side matches     : %s",
+                        partial_match_count)
         logger.info("  Pending → removed (silent)   : %s",
                     removed_pending_count)
         logger.info("  Errors encountered           : %s", len(error_items))

@@ -26,7 +26,7 @@ from datetime import datetime, timezone, timedelta
 from html import escape as escape_html
 from io import BytesIO
 from logging.handlers import RotatingFileHandler
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
 import requests
@@ -36,9 +36,9 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from playwright.sync_api import sync_playwright
 
-from deal_match_llm import fetch_open_deals, llm_match_deal_id
+from deal_match_llm import fetch_open_deals, llm_match_deal_id, llm_match_partial_deal
 from deal_match_regex import apply_regex_match_subject, regex_match_sa_compcom_deal
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import cleanup_old_logs, refresh_log_file
 from mongodb_connection import (
@@ -548,6 +548,31 @@ def match_deal_for_case(
     return None, False
 
 
+def match_deal_for_case_partial(
+    case_doc: Dict[str, Any],
+    press_title: str,
+    description: str,
+    deals: List[Dict[str, Any]],
+) -> Optional[Tuple[str, str]]:
+    """One-side LLM match after FRMD and FRRMD fail. Returns (deal_id, side) or None."""
+    acquiring = (case_doc.get("primary_acquiring_firm") or "").strip()
+    target = (case_doc.get("primary_target_firm") or "").strip()
+    case_number = (case_doc.get("case_number") or "").strip()
+    return llm_match_partial_deal(
+        regulator_name="South Africa Competition Commission",
+        case_sections={
+            "CASE NUMBER": case_number,
+            "PRESS TITLE": press_title,
+            "PRIMARY ACQUIRING FIRM": acquiring,
+            "PRIMARY TARGET FIRM": target,
+            "DESCRIPTION": description,
+        },
+        source_label="the South Africa CompCom press-release case text",
+        source_label_step1="the South Africa CompCom press-release case text (acquirer or target)",
+        deals=deals,
+    )
+
+
 def generate_matched_email_html(
     case_info: Dict[str, Any],
     deal: Dict[str, Any],
@@ -778,6 +803,21 @@ def process_extracted_case(
             )
             deal_id = None
 
+    partial_match = None
+    if not deal_id:
+        try:
+            partial_match = match_deal_for_case_partial(
+                case_doc, press_title, description, open_deals
+            )
+        except Exception as e:
+            logger.exception("Partial deal match error: %s", e)
+            collect_error(
+                error_items,
+                str(e),
+                step="match_deal_for_case_partial",
+                context={"case_number": case_doc.get("case_number")},
+            )
+
     updated = update_case_as_completed(
         cases_col,
         matched_id,
@@ -829,6 +869,27 @@ def process_extracted_case(
                 "deal_id set but deal document not found",
                 step="fetch_matched_deal",
                 context={"deal_id": deal_id, "case_id": matched_id},
+            )
+        return True
+
+    if partial_match:
+        _partial_deal_id, partial_side = partial_match
+        logger.info(
+            "Partial match (deal_id=%s side=%s) "
+            "— sending FRPMD email, not storing deal_id",
+            _partial_deal_id, partial_side,
+        )
+        subject = build_subject("sa_compcom", "press_release")
+        subject = apply_partial_match_subject(subject, partial_side)
+        html = generate_usa_email_html(updated, press_url)
+        if not send_email(
+            subject, html, updated, press_url, test_mode=test_mode
+        ):
+            collect_error(
+                error_items,
+                "Failed to send FRPMD press-release email",
+                step="send_email",
+                context={"case_number": updated.get("case_number")},
             )
         return True
 

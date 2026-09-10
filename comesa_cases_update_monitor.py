@@ -21,12 +21,13 @@ from comesa_cases_register import (
     REGISTRY_URL,
     fetch_registry_html,
     match_case_to_deal,
+    match_case_to_deal_partial,
     parse_comesa_table,
     utc_now_iso,
 )
 from deal_match_llm import fetch_open_deals
 from deal_match_regex import apply_regex_match_subject, regex_match_comesa_deal
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import cleanup_old_logs, refresh_log_file
 from mongodb_connection import (
@@ -224,6 +225,7 @@ def send_update_email(
     changes: List[Tuple[str, Any, Any]],
     matched_by_regex: bool = False,
     usa_related: bool = False,
+    partial_side: Optional[str] = None,
 ) -> bool:
     try:
         html = generate_update_email_html(old_case, new_case, deal, changes)
@@ -235,6 +237,8 @@ def send_update_email(
             deal_id = str(deal.get("_id")) if deal.get("_id") else None
         else:
             subject = build_subject("comesa", "update")
+            if partial_side:
+                subject = apply_partial_match_subject(subject, partial_side)
             deal_id = None
 
         payload = {
@@ -289,6 +293,7 @@ def process_comesa_cases_updates():
     total_changed = 0
     llm_match_count = 0
     regex_match_count = 0
+    partial_match_count = 0
 
     logger.info("=" * 60)
     logger.info("Starting COMESA Cases Update Monitor")
@@ -510,49 +515,90 @@ def process_comesa_cases_updates():
                             )
                         new_case_data["deal_id"] = matched_deal_id
                     else:
-                        logger.info("No deal match; checking USA-related")
+                        logger.info("No deal match; trying one-side FRPMD match")
+                        partial_match = None
                         try:
-                            details_for_llm = (
-                                f"Reference: {reference_number}\n"
-                                f"Parties: {case_parties}\n"
-                                f"Sector: {sector}\n"
-                                f"Outcome: {new_row.get('tax_case_outcome', '')}\n"
-                                f"Status: {new_row.get('hf_tax_case_status', '')}\n"
-                                f"Notice Date: {new_row.get('notice_date', '')}"
-                            )
-                            is_usa = bool(
-                                verify_usa_relation(
-                                    company_details=details_for_llm,
-                                    case_type="COMESA",
-                                )
+                            partial_match = match_case_to_deal_partial(
+                                case_parties,
+                                sector,
+                                reference_number,
+                                deals=open_deals,
                             )
                         except Exception as e:
-                            logger.exception(f"USA relation check error: {e}")
+                            logger.exception(f"Partial deal matching error: {e}")
                             collect_error(
                                 error_items,
                                 str(e),
-                                step="verify_usa_relation",
+                                step="match_case_to_deal_partial",
                                 context={"reference_number": reference_number},
                             )
-                            is_usa = False
 
-                        if is_usa:
-                            logger.info("USA-related; sending update email")
+                        if partial_match:
+                            _partial_deal_id, partial_side = partial_match
+                            partial_match_count += 1
+                            logger.info(
+                                "Partial match (deal_id=%s side=%s) "
+                                "— sending FRPMD email, not storing deal_id",
+                                _partial_deal_id, partial_side,
+                            )
                             if not send_update_email(
                                 case_doc,
                                 new_row,
                                 None,
                                 differences,
                                 usa_related=True,
+                                partial_side=partial_side,
                             ):
                                 collect_error(
                                     error_items,
-                                    "Failed to send USA-related update email",
+                                    "Failed to send FRPMD update email",
                                     step="send_email",
                                     context={"reference_number": reference_number},
                                 )
                         else:
-                            logger.info("Not USA-related; updating DB only")
+                            logger.info("No deal match; checking USA-related")
+                            try:
+                                details_for_llm = (
+                                    f"Reference: {reference_number}\n"
+                                    f"Parties: {case_parties}\n"
+                                    f"Sector: {sector}\n"
+                                    f"Outcome: {new_row.get('tax_case_outcome', '')}\n"
+                                    f"Status: {new_row.get('hf_tax_case_status', '')}\n"
+                                    f"Notice Date: {new_row.get('notice_date', '')}"
+                                )
+                                is_usa = bool(
+                                    verify_usa_relation(
+                                        company_details=details_for_llm,
+                                        case_type="COMESA",
+                                    )
+                                )
+                            except Exception as e:
+                                logger.exception(f"USA relation check error: {e}")
+                                collect_error(
+                                    error_items,
+                                    str(e),
+                                    step="verify_usa_relation",
+                                    context={"reference_number": reference_number},
+                                )
+                                is_usa = False
+
+                            if is_usa:
+                                logger.info("USA-related; sending update email")
+                                if not send_update_email(
+                                    case_doc,
+                                    new_row,
+                                    None,
+                                    differences,
+                                    usa_related=True,
+                                ):
+                                    collect_error(
+                                        error_items,
+                                        "Failed to send USA-related update email",
+                                        step="send_email",
+                                        context={"reference_number": reference_number},
+                                    )
+                            else:
+                                logger.info("Not USA-related; updating DB only")
 
                 if not update_case_document(
                     cases_collection, case_doc, new_case_data
@@ -590,6 +636,7 @@ def process_comesa_cases_updates():
         logger.info(f"  Cases with changes           : {total_changed}")
         logger.info(f"  LLM deal matches             : {llm_match_count}")
         logger.info(f"  Regex fallback matches       : {regex_match_count}")
+        logger.info(f"  Partial one-side matches     : {partial_match_count}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")
         logger.info("=" * 60)

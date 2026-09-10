@@ -40,9 +40,9 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from deal_match_llm import fetch_open_deals, llm_match_deal_id
+from deal_match_llm import fetch_open_deals, llm_match_deal_id, llm_match_partial_deal
 from deal_match_regex import apply_regex_match_subject, regex_match_taiwan_deal
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import ensure_script_logger, refresh_script_log
 from mongodb_connection import (
@@ -976,6 +976,41 @@ def process_news_item(
                 matched_deal_id = None
                 match_type = None
 
+    partial_side: Optional[str] = None
+    if not matched_deal_id:
+        title_en_for_match = title_en or parent.get("title_en") or title
+        try:
+            partial_match = llm_match_partial_deal(
+                regulator_name="Taiwan FTC",
+                case_sections={
+                    "NEWS HEADLINE (ZH)": title,
+                    "NEWS HEADLINE (EN)": title_en_for_match,
+                    "STATUS": str(status_info.get("status") or ""),
+                    "SUMMARY (EN)": str(status_info.get("summary_en") or ""),
+                    "ORIGINAL CASE TITLE (EN)": parent.get("title_en") or "",
+                },
+                source_label="the Taiwan FTC news headline and case title",
+                source_label_step1=(
+                    "the Taiwan FTC news headline and case title "
+                    "(acquirer or target)"
+                ),
+                deals=open_deals,
+            )
+        except Exception as exc:
+            logger.error("  Partial deal match error: %s", exc)
+            collect_error(
+                error_items, str(exc), step="llm_match_partial_deal",
+                context={"doc_id": doc_id, "forum_id": forum_id},
+            )
+            partial_match = None
+        if partial_match:
+            _partial_deal_id, partial_side = partial_match
+            logger.info(
+                "  Partial match (deal_id=%s side=%s) "
+                "— sending FRPMD email, not storing deal_id",
+                _partial_deal_id, partial_side,
+            )
+
     update_doc = {
         "doc_id": doc_id,
         "date": news.get("date") or "",
@@ -1013,6 +1048,8 @@ def process_news_item(
         )
         if deal_match and matched_deal_id:
             return "updated_matched"
+        if partial_side:
+            return "updated_partial"
         return "updated_no_email"
 
     try:
@@ -1051,6 +1088,25 @@ def process_news_item(
         _send_email(payload, subject, test_mode, error_items=error_items)
         logger.info("  EMAIL sent | kind=deal_match | subject=%s", subject)
         return "updated_matched"
+
+    if partial_side:
+        subject, html = build_update_email_html(
+            news, parent, status_info, None)
+        subject = apply_partial_match_subject(subject, partial_side)
+        payload = {
+            "subject": subject,
+            "html": html,
+            "url": news.get("detail_url") or detail_url,
+            "source": "taiwan_ftc_update",
+            "is_new_case": False,
+            "is_unmatched": True,
+            "forum_id": forum_id,
+            "doc_id": doc_id,
+            "status": status_info.get("status"),
+        }
+        _send_email(payload, subject, test_mode, error_items=error_items)
+        logger.info("  EMAIL sent | kind=frpmd | subject=%s", subject)
+        return "updated_partial"
 
     # USA check only when no deal match
     is_usa = False
@@ -1118,6 +1174,7 @@ def run_taiwan_ftc_update_monitor(
         "skipped": 0,
         "saved_unmatched": 0,
         "updated_matched": 0,
+        "updated_partial": 0,
         "updated_usa": 0,
         "updated_no_email": 0,
     }
@@ -1197,6 +1254,7 @@ def run_taiwan_ftc_update_monitor(
                 "skipped": "skipped",
                 "saved_unmatched": "saved_unmatched",
                 "updated_matched": "updated_matched",
+                "updated_partial": "updated_partial",
                 "updated_usa": "updated_usa",
                 "updated_no_email": "updated_no_email",
             }.get(result, "skipped")

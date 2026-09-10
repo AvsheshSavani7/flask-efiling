@@ -38,9 +38,9 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from deal_match_llm import fetch_open_deals, llm_match_deal_id
+from deal_match_llm import fetch_open_deals, llm_match_deal_id, llm_match_partial_deal
 from deal_match_regex import apply_regex_match_subject, regex_match_taiwan_deal
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import ensure_script_logger, refresh_script_log
 from mongodb_connection import (
@@ -546,6 +546,40 @@ def match_deal(
     return matched_deal_id, match_type, matched_by_regex
 
 
+def match_deal_partial(
+    title: str,
+    title_en: str,
+    period_en: str,
+    open_deals: List[Dict[str, Any]],
+    *,
+    error_items: Optional[List[Dict[str, Any]]] = None,
+    forum_id: str = "",
+) -> Optional[Tuple[str, str]]:
+    """One-side LLM match after FRMD and FRRMD fail. Returns (deal_id, side) or None."""
+    try:
+        return llm_match_partial_deal(
+            regulator_name="Taiwan FTC",
+            case_sections={
+                "TITLE (original Traditional Chinese)": title,
+                "TITLE (English translation)": title_en,
+                "CONSULTATION PERIOD (English)": period_en or "",
+            },
+            source_label="the Taiwan FTC case title",
+            source_label_step1="the Taiwan FTC case title (acquirer or target)",
+            deals=open_deals,
+        )
+    except Exception as exc:
+        logger.error("  Partial deal match error: %s", exc)
+        if error_items is not None:
+            collect_error(
+                error_items,
+                f"Partial deal match error: {exc}",
+                step="llm_match_partial_deal",
+                context={"forum_id": forum_id, "title": title[:200]},
+            )
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Detail page + matched-case summary (option A: match only)
 # ---------------------------------------------------------------------------
@@ -1018,6 +1052,24 @@ def process_record(
         if deal_match and "deal_id" not in deal_match:
             deal_match["deal_id"] = matched_deal_id
 
+    partial_side: Optional[str] = None
+    if not matched_deal_id:
+        partial_match = match_deal_partial(
+            title,
+            record["title_en"],
+            record.get("period_en") or "",
+            open_deals,
+            error_items=error_items,
+            forum_id=forum_id,
+        )
+        if partial_match:
+            _partial_deal_id, partial_side = partial_match
+            logger.info(
+                "  Partial match (deal_id=%s side=%s) "
+                "— sending FRPMD email, not storing deal_id",
+                _partial_deal_id, partial_side,
+            )
+
     # Option A: detail summary only for LLM/regex deal matches
     record["summary"] = None
     if matched_deal_id and deal_match:
@@ -1060,6 +1112,8 @@ def process_record(
                     matched_deal_id)
         if matched_deal_id and deal_match:
             return "matched"
+        if partial_side:
+            return "partial"
         return "no_email"
 
     try:
@@ -1101,6 +1155,22 @@ def process_record(
             matched_deal_id,
         )
         return "no_email"
+
+    if partial_side:
+        subject, html = build_email_html(record, None)
+        subject = apply_partial_match_subject(subject, partial_side)
+        payload = {
+            "subject": subject,
+            "html": html,
+            "url": detail_url,
+            "source": "taiwan_ftc",
+            "is_new_case": True,
+            "is_unmatched": True,
+            "forum_id": forum_id,
+        }
+        _send_email(payload, subject, test_mode, error_items=error_items)
+        logger.info("  EMAIL sent | kind=frpmd | subject=%s", subject)
+        return "partial"
 
     is_usa = False
     try:
@@ -1163,6 +1233,7 @@ def run_taiwan_ftc_cases_register(
         "records_scraped": 0,
         "records_skipped": 0,
         "matched": 0,
+        "partial": 0,
         "usa": 0,
         "no_email": 0,
     }
@@ -1230,6 +1301,7 @@ def run_taiwan_ftc_cases_register(
             stat_key = {
                 "skipped": "records_skipped",
                 "matched": "matched",
+                "partial": "partial",
                 "usa": "usa",
                 "no_email": "no_email",
             }.get(result, "records_skipped")

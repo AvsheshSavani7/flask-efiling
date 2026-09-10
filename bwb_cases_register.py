@@ -14,7 +14,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 from html import escape as escape_html
 from logging.handlers import RotatingFileHandler
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -34,9 +34,9 @@ from bwb_cases_common import (
     translate_to_english_required,
     utc_now_iso,
 )
-from deal_match_llm import fetch_open_deals, llm_match_deal_id
+from deal_match_llm import fetch_open_deals, llm_match_deal_id, llm_match_partial_deal
 from deal_match_regex import apply_regex_match_subject, regex_match_bwb_deal
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import cleanup_old_logs, refresh_log_file
 from mongodb_connection import (
@@ -131,6 +131,26 @@ def match_case_to_deal(
             "STATUS": status_en,
         },
         source_label="the BWB merger parties and status",
+        deals=deals,
+    )
+
+
+def match_case_to_deal_partial(
+    parties_en: str,
+    file_number: str,
+    status_en: str,
+    deals: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Tuple[str, str]]:
+    """One-side LLM match after FRMD and FRRMD fail. Returns (deal_id, side) or None."""
+    return llm_match_partial_deal(
+        regulator_name="Austrian Federal Competition Authority (BWB)",
+        case_sections={
+            "FILE NUMBER": file_number,
+            "PARTIES": parties_en,
+            "STATUS": status_en,
+        },
+        source_label="the BWB merger parties and status",
+        source_label_step1="the BWB merger parties and status (acquirer or target)",
         deals=deals,
     )
 
@@ -248,6 +268,7 @@ def run_bwb_cases_register(
     new_cases: List[Dict[str, Any]] = []
     llm_match_count = 0
     regex_match_count = 0
+    partial_match_count = 0
     inserted_count = 0
     skipped_existing = 0
     parsed_count = 0
@@ -455,31 +476,33 @@ def run_bwb_cases_register(
                             )
                     else:
                         try:
-                            details_for_llm = (
-                                f"File Number: {file_number}\n"
-                                f"Parties: {parties_en}\n"
-                                f"Status: {status_en}\n"
-                                f"Merger Date: {row.get('merger_date', '')}\n"
-                                f"Detail: {detail_content_en[:2000]}"
-                            )
-                            is_usa = bool(
-                                verify_usa_relation(
-                                    company_details=details_for_llm,
-                                    case_type="BWB Austria",
-                                )
+                            partial_match = match_case_to_deal_partial(
+                                parties_en,
+                                file_number,
+                                status_en,
+                                deals=open_deals,
                             )
                         except Exception as e:
-                            logger.exception("USA verification error: %s", e)
+                            logger.exception("Partial deal matching error: %s", e)
                             collect_error(
                                 error_items,
                                 str(e),
-                                step="verify_usa_relation",
+                                step="match_case_to_deal_partial",
                                 context={"file_number": file_number},
                             )
-                            is_usa = False
+                            partial_match = None
 
-                        if is_usa:
+                        if partial_match:
+                            _partial_deal_id, partial_side = partial_match
+                            partial_match_count += 1
+                            logger.info(
+                                "Partial match (deal_id=%s side=%s) "
+                                "— sending FRPMD email, not storing deal_id",
+                                _partial_deal_id, partial_side,
+                            )
                             subject = build_subject("bwb", "new")
+                            subject = apply_partial_match_subject(
+                                subject, partial_side)
                             html_email = generate_usa_related_email_html(
                                 case_info)
                             if not send_email_via_webhook(
@@ -487,13 +510,51 @@ def run_bwb_cases_register(
                             ):
                                 collect_error(
                                     error_items,
-                                    "Failed to send USA-related email",
+                                    "Failed to send FRPMD email",
                                     step="send_email",
                                     context={"file_number": file_number},
                                 )
                         else:
-                            logger.info(
-                                "Not matched and not USA-related; silent insert")
+                            try:
+                                details_for_llm = (
+                                    f"File Number: {file_number}\n"
+                                    f"Parties: {parties_en}\n"
+                                    f"Status: {status_en}\n"
+                                    f"Merger Date: {row.get('merger_date', '')}\n"
+                                    f"Detail: {detail_content_en[:2000]}"
+                                )
+                                is_usa = bool(
+                                    verify_usa_relation(
+                                        company_details=details_for_llm,
+                                        case_type="BWB Austria",
+                                    )
+                                )
+                            except Exception as e:
+                                logger.exception("USA verification error: %s", e)
+                                collect_error(
+                                    error_items,
+                                    str(e),
+                                    step="verify_usa_relation",
+                                    context={"file_number": file_number},
+                                )
+                                is_usa = False
+
+                            if is_usa:
+                                subject = build_subject("bwb", "new")
+                                html_email = generate_usa_related_email_html(
+                                    case_info)
+                                if not send_email_via_webhook(
+                                    subject, html_email, case_info
+                                ):
+                                    collect_error(
+                                        error_items,
+                                        "Failed to send USA-related email",
+                                        step="send_email",
+                                        context={"file_number": file_number},
+                                    )
+                            else:
+                                logger.info(
+                                    "Not matched and not USA-related; silent insert")
 
                     inserted_id = insert_case(collection, case_info)
                     if inserted_id:
@@ -567,6 +628,8 @@ def run_bwb_cases_register(
             logger.info("  LLM deal matches             : %s", llm_match_count)
             logger.info("  Regex fallback matches       : %s",
                         regex_match_count)
+            logger.info("  Partial one-side matches     : %s",
+                        partial_match_count)
         logger.info("  Errors encountered           : %s", len(error_items))
         logger.info("  Total time                   : %ss", elapsed)
         logger.info("=" * 60)

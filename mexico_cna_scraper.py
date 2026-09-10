@@ -14,7 +14,7 @@ Pipeline:
   4. Skip cases where Agentes is "Reservado" (no party info available)
   5. Dedup against mexico_cna_cases MongoDB collection by expediente
   6. Translate agentes (Spanish → English)
-  7. LLM deal match → regex fallback [FRRMD] → USA check [FRUD] → skip
+  7. LLM deal match → regex fallback [FRRMD] → one-side [FRPMD] → USA check [FRUD] → skip
   8. Insert into DB and send email
 
 Usage:
@@ -40,9 +40,9 @@ import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
-from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_llm import llm_match_deal_id, llm_match_partial_deal, fetch_open_deals
 from deal_match_regex import regex_match_flat_scan
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import ensure_script_logger, refresh_script_log
 from mongodb_connection import (
@@ -480,12 +480,12 @@ def process_case(
 ) -> str:
     """
     Full pipeline for a single case record:
-      dedup → translate → LLM → regex [FRRMD] → USA [FRUD] → DB + email
+      dedup → translate → LLM → regex [FRRMD] → FRPMD → USA [FRUD] → DB + email
 
     test_mode=True  → email goes to TEST_RECIPIENT via N8N_WEBHOOK_ONLY_ME
     test_mode=False → normal org-aware routing
 
-    Returns one of: "skipped" | "new_matched" | "new_usa" | "new_no_email"
+    Returns one of: "skipped" | "new_matched" | "new_partial" | "new_usa" | "new_no_email"
     """
     expediente = (case.get("expediente") or "").strip()
     agentes_es = (case.get("agentes") or "").strip()
@@ -685,6 +685,63 @@ def process_case(
         return "new_matched"
 
     # -----------------------------------------------------------------------
+    # Step 2b — One-side FRPMD (do not store deal_id)
+    # -----------------------------------------------------------------------
+    partial_side: Optional[str] = None
+    try:
+        partial_match = llm_match_partial_deal(
+            regulator_name="Mexico CNA",
+            case_sections={
+                "EXPEDIENTE": expediente,
+                "ASUNTO": case.get("asunto") or "",
+                "AGENTES (original Spanish)": agentes_es,
+                "AGENTES (English translation)": agentes_en,
+            },
+            source_label="the agentes (parties) text",
+            source_label_step1="the agentes (parties) text (acquirer or target)",
+            deals=open_deals,
+        )
+        if partial_match:
+            _partial_deal_id, partial_side = partial_match
+            logger.info(
+                "  [%s] Partial match (deal_id=%s side=%s) "
+                "— sending FRPMD email, not storing deal_id",
+                expediente, _partial_deal_id, partial_side,
+            )
+            subject, html = build_email_html(case, None, agentes_en)
+            subject = apply_partial_match_subject(subject, partial_side)
+            if not dry_run:
+                if not insert_case(collection, doc):
+                    collect_error(
+                        error_items,
+                        "DB insert failed",
+                        step="insert_case",
+                        context={"expediente": expediente},
+                    )
+                    return "skipped"
+                payload = {
+                    "subject": subject,
+                    "html": html,
+                    "expediente": expediente,
+                    "source": "mexico_cna",
+                    "is_new_case": True,
+                    "is_unmatched": True,
+                }
+                _send_email(payload, subject, test_mode)
+            else:
+                logger.info(
+                    "  [DRY-RUN] Would insert + send [FRPMD] for %s", expediente)
+            return "new_partial"
+    except Exception as exc:
+        logger.error("  [%s] Partial match error: %s", expediente, exc)
+        collect_error(
+            error_items,
+            str(exc),
+            step="llm_match_partial_deal",
+            context={"expediente": expediente},
+        )
+
+    # -----------------------------------------------------------------------
     # Step 3 — USA relation check → [FRUD]
     # -----------------------------------------------------------------------
     is_usa = False
@@ -777,6 +834,7 @@ def run_mexico_cna_scraper(
         "cases_found": 0,
         "cases_skipped": 0,
         "cases_matched": 0,
+        "cases_partial": 0,
         "cases_usa": 0,
         "cases_no_email": 0,
     }
@@ -884,6 +942,7 @@ def run_mexico_cna_scraper(
                     stats[{
                         "skipped":      "cases_skipped",
                         "new_matched":  "cases_matched",
+                        "new_partial":  "cases_partial",
                         "new_usa":      "cases_usa",
                         "new_no_email": "cases_no_email",
                     }.get(result, "cases_skipped")] += 1
@@ -912,6 +971,7 @@ def run_mexico_cna_scraper(
         logger.info("  Cases found            : %d", stats["cases_found"])
         logger.info("  Cases skipped (dup/res): %d", stats["cases_skipped"])
         logger.info("  Cases matched [FRMD/FRRMD]: %d", stats["cases_matched"])
+        logger.info("  Cases partial [FRPMD]  : %d", stats["cases_partial"])
         logger.info("  Cases USA [FRUD]       : %d", stats["cases_usa"])
         logger.info("  Cases no email         : %d", stats["cases_no_email"])
         logger.info("  Errors                 : %d", len(error_items))

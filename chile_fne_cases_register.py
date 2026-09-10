@@ -37,9 +37,9 @@ from bson import ObjectId
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from deal_match_llm import call_llm, fetch_open_deals, llm_match_deal_id, parse_deal_id
+from deal_match_llm import call_llm, fetch_open_deals, llm_match_deal_id, llm_match_partial_deal, parse_deal_id
 from deal_match_regex import apply_regex_match_subject, regex_match_chile_deal
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import ensure_script_logger, refresh_script_log
 from mongodb_connection import (
@@ -616,6 +616,38 @@ def match_to_deal(
     return matched_deal_id, match_type, matched_by_regex
 
 
+def match_to_deal_partial(
+    title: str,
+    title_en: str,
+    open_deals: List[Dict[str, Any]],
+    *,
+    error_items: Optional[List[Dict[str, Any]]] = None,
+    url: str = "",
+) -> Optional[Tuple[str, str]]:
+    """One-side LLM match after FRMD and FRRMD fail. Returns (deal_id, side) or None."""
+    try:
+        return llm_match_partial_deal(
+            regulator_name="Chile FNE",
+            case_sections={
+                "TITLE (original Spanish)": title,
+                "TITLE (English translation)": title_en,
+            },
+            source_label="the FNE filing title",
+            source_label_step1="the FNE filing title (acquirer or target)",
+            deals=open_deals,
+        )
+    except Exception as exc:
+        logger.error("  Partial deal match error: %s", exc)
+        if error_items is not None:
+            collect_error(
+                error_items,
+                f"Partial deal match error: {exc}",
+                step="llm_match_partial_deal",
+                context={"url": url, "title": title[:200]},
+            )
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Email
 # ---------------------------------------------------------------------------
@@ -897,6 +929,23 @@ def process_record(
     else:
         logger.info("  No deal match after LLM + regex (+ parent reuse)")
 
+    partial_side: Optional[str] = None
+    if not matched_deal_id:
+        partial_match = match_to_deal_partial(
+            title,
+            record["title_en"],
+            open_deals,
+            error_items=error_items,
+            url=url,
+        )
+        if partial_match:
+            _partial_deal_id, partial_side = partial_match
+            logger.info(
+                "  Partial match (deal_id=%s side=%s) "
+                "— sending FRPMD email, not storing deal_id",
+                _partial_deal_id, partial_side,
+            )
+
     base_doc: Dict[str, Any] = {
         "url": url,
         "title": title,
@@ -920,6 +969,8 @@ def process_record(
         )
         if deal_match:
             return f"{outcome_prefix}_matched"
+        if partial_side:
+            return f"{outcome_prefix}_partial"
         return f"{outcome_prefix}_no_email"
 
     inserted_id = None
@@ -1038,6 +1089,27 @@ def process_record(
         )
         return f"{outcome_prefix}_no_email"
 
+    if partial_side:
+        subject, html = build_email_html(record, None, is_update=is_update)
+        subject = apply_partial_match_subject(subject, partial_side)
+        payload = {
+            "subject": subject,
+            "html": html,
+            "url": url,
+            "source": "chile_fne",
+            "is_new_case": not is_update,
+            "is_unmatched": True,
+            "phase": record.get("phase"),
+            "phase_en": record.get("phase_en"),
+        }
+        _send_email(payload, subject, test_mode, error_items=error_items)
+        logger.info(
+            "  EMAIL sent | kind=frpmd | is_new=%s | subject=%s",
+            not is_update, subject,
+        )
+        logger.info("  OUTCOME: %s_partial", outcome_prefix)
+        return f"{outcome_prefix}_partial"
+
     is_usa = False
     try:
         is_usa = bool(
@@ -1105,9 +1177,11 @@ def run_chile_fne_cases_register(
         "records_scraped": 0,
         "records_skipped": 0,
         "new_matched": 0,
+        "new_partial": 0,
         "new_usa": 0,
         "new_no_email": 0,
         "update_matched": 0,
+        "update_partial": 0,
         "update_usa": 0,
         "update_no_email": 0,
     }
@@ -1180,9 +1254,11 @@ def run_chile_fne_cases_register(
             stat_key = {
                 "skipped": "records_skipped",
                 "new_matched": "new_matched",
+                "new_partial": "new_partial",
                 "new_usa": "new_usa",
                 "new_no_email": "new_no_email",
                 "update_matched": "update_matched",
+                "update_partial": "update_partial",
                 "update_usa": "update_usa",
                 "update_no_email": "update_no_email",
             }.get(result, "records_skipped")

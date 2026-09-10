@@ -30,10 +30,10 @@ from mongodb_connection import (
     get_deal_by_id,
     init_mongodb_connection,
 )
-from deal_match_llm import llm_match_deal_id, fetch_open_deals, call_llm
+from deal_match_llm import llm_match_deal_id, llm_match_partial_deal, fetch_open_deals, call_llm
 from deal_match_regex import apply_regex_match_subject, regex_match_kftc_deal
 from llm_verification_service import verify_usa_relation
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from n8n_email_service import post_email_payload, send_direct_email
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import ensure_script_logger, refresh_script_log
@@ -424,6 +424,7 @@ def run(test_mode: bool = False, backfill: bool = False):
         "inserted": 0,
         "llm_matched": 0,
         "regex_matched": 0,
+        "partial_matched": 0,
         "usa_related": 0,
         "emails_sent": 0,
     }
@@ -611,25 +612,33 @@ def run(test_mode: bool = False, backfill: bool = False):
                             context={"detail_url": detail_url},
                         )
                 else:
-                    usa_details = {
-                        "title": title,
-                        "date": record.get("date"),
-                        "detail_url": detail_url,
-                        "viewer_url": record.get("viewer_url"),
-                        "download_url": record.get("download_url"),
-                    }
-                    logger.info("  [STEP usa] checking USA relation")
+                    partial_match = None
                     try:
-                        usa = bool(verify_usa_relation(
-                            usa_details, case_type="KFTC"))
+                        partial_match = llm_match_partial_deal(
+                            regulator_name="KFTC Korea",
+                            case_sections={"PRESS RELEASE TITLE": title},
+                            source_label="the KFTC press release title",
+                            source_label_step1="the KFTC press release title (acquirer or target)",
+                            deals=deals,
+                        )
                     except Exception as e:
-                        logger.warning(f"  [STEP usa] check error: {e}")
-                        usa = False
-                    logger.info(f"  [STEP usa] usa_related={usa}")
+                        logger.exception(f"  [STEP partial] error: {e}")
+                        collect_error(
+                            error_items, str(e), step="llm_match_partial_deal",
+                            context={"title": title, "detail_url": detail_url},
+                        )
 
-                    if usa:
-                        stats["usa_related"] += 1
+                    if partial_match:
+                        _partial_deal_id, partial_side = partial_match
+                        stats["partial_matched"] += 1
+                        logger.info(
+                            "  [STEP partial] deal_id=%s side=%s "
+                            "— sending FRPMD email, not storing deal_id",
+                            _partial_deal_id, partial_side,
+                        )
                         subject, html_body = build_usa_email(record)
+                        subject = apply_partial_match_subject(
+                            subject, partial_side)
                         ok = _send_email(subject, html_body, {
                             "deal_id": "N/A",
                             "case_title": title,
@@ -641,18 +650,58 @@ def run(test_mode: bool = False, backfill: bool = False):
                         if ok:
                             stats["emails_sent"] += 1
                             logger.info(
-                                f"  [STEP email] USA email sent ({subject[:80]})")
+                                f"  [STEP email] FRPMD email sent ({subject[:80]})")
                         else:
                             logger.warning(
-                                "  [STEP email] USA email send failed")
+                                "  [STEP email] FRPMD email send failed")
                             collect_error(
-                                error_items, "Failed to send USA email",
+                                error_items, "Failed to send FRPMD email",
                                 step="send_email",
                                 context={"detail_url": detail_url},
                             )
                     else:
-                        logger.info(
-                            "  [STEP email] Not USA-related — save only")
+                        usa_details = {
+                            "title": title,
+                            "date": record.get("date"),
+                            "detail_url": detail_url,
+                            "viewer_url": record.get("viewer_url"),
+                            "download_url": record.get("download_url"),
+                        }
+                        logger.info("  [STEP usa] checking USA relation")
+                        try:
+                            usa = bool(verify_usa_relation(
+                                usa_details, case_type="KFTC"))
+                        except Exception as e:
+                            logger.warning(f"  [STEP usa] check error: {e}")
+                            usa = False
+                        logger.info(f"  [STEP usa] usa_related={usa}")
+
+                        if usa:
+                            stats["usa_related"] += 1
+                            subject, html_body = build_usa_email(record)
+                            ok = _send_email(subject, html_body, {
+                                "deal_id": "N/A",
+                                "case_title": title,
+                                "case_url": detail_url,
+                                "source": "kftc_cases_register",
+                                "is_unmatched": True,
+                                "is_new_case": True,
+                            }, test_mode=test_mode)
+                            if ok:
+                                stats["emails_sent"] += 1
+                                logger.info(
+                                    f"  [STEP email] USA email sent ({subject[:80]})")
+                            else:
+                                logger.warning(
+                                    "  [STEP email] USA email send failed")
+                                collect_error(
+                                    error_items, "Failed to send USA email",
+                                    step="send_email",
+                                    context={"detail_url": detail_url},
+                                )
+                        else:
+                            logger.info(
+                                "  [STEP email] Not USA-related — save only")
             except Exception as e:
                 logger.exception(f"  [STEP email] pipeline error: {e}")
                 collect_error(
@@ -698,6 +747,7 @@ def run(test_mode: bool = False, backfill: bool = False):
         logger.info(f"  Inserted                : {stats['inserted']}")
         logger.info(f"  LLM deal matches        : {stats['llm_matched']}")
         logger.info(f"  Regex deal matches      : {stats['regex_matched']}")
+        logger.info(f"  Partial one-side matches: {stats['partial_matched']}")
         logger.info(f"  USA-related (unmatched) : {stats['usa_related']}")
         logger.info(f"  Emails sent             : {stats['emails_sent']}")
         logger.info(f"  Errors                  : {len(error_items)}")

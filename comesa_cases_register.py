@@ -18,16 +18,16 @@ import sys
 from datetime import datetime, timezone, timedelta
 from html import escape as escape_html
 from logging.handlers import RotatingFileHandler
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
-from deal_match_llm import fetch_open_deals, llm_match_deal_id
+from deal_match_llm import fetch_open_deals, llm_match_deal_id, llm_match_partial_deal
 from deal_match_regex import apply_regex_match_subject, regex_match_comesa_deal
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import cleanup_old_logs, refresh_log_file
 from mongodb_connection import (
@@ -266,6 +266,26 @@ def match_case_to_deal(
     )
 
 
+def match_case_to_deal_partial(
+    case_parties: str,
+    sector: str,
+    reference_number: str,
+    deals: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Tuple[str, str]]:
+    """One-side LLM match after FRMD and FRRMD fail. Returns (deal_id, side) or None."""
+    return llm_match_partial_deal(
+        regulator_name="COMESA Competition Commission",
+        case_sections={
+            "REFERENCE NUMBER": reference_number,
+            "PARTIES": case_parties,
+            "SECTOR": sector,
+        },
+        source_label="the COMESA case parties and sector",
+        source_label_step1="the COMESA case parties and sector (acquirer or target)",
+        deals=deals,
+    )
+
+
 def generate_matched_case_email_html(
     case_info: Dict[str, Any], deal: Dict[str, Any]
 ) -> str:
@@ -382,6 +402,7 @@ def run_comesa_cases_register(bootstrap: bool = False):
     new_cases: List[Dict[str, Any]] = []
     llm_match_count = 0
     regex_match_count = 0
+    partial_match_count = 0
     inserted_count = 0
     skipped_existing = 0
     parsed_count = 0
@@ -539,46 +560,103 @@ def run_comesa_cases_register(bootstrap: bool = False):
                                     "deal_id": matched_deal_id,
                                 },
                             )
-                else:
-                    try:
-                        details_for_llm = (
-                            f"Reference: {reference_number}\n"
-                            f"Parties: {case_parties}\n"
-                            f"Sector: {sector}\n"
-                            f"Outcome: {row.get('tax_case_outcome', '')}\n"
-                            f"Status: {row.get('hf_tax_case_status', '')}\n"
-                            f"Notice Date: {row.get('notice_date', '')}"
+                    else:
+                        # Deal matched but the deal document could not be looked
+                        # up. Case is still saved with deal_id; raise an error
+                        # email so the missing deal is visible.
+                        logger.warning(
+                            f"Matched deal_id={matched_deal_id} but deal document not found"
                         )
-                        is_usa = bool(
-                            verify_usa_relation(
-                                company_details=details_for_llm,
-                                case_type="COMESA",
-                            )
+                        collect_error(
+                            error_items,
+                            "Matched deal_id but deal document not found",
+                            step="fetch_matched_deal",
+                            context={
+                                "reference_number": reference_number,
+                                "deal_id": matched_deal_id,
+                                "detail_url": detail_url,
+                                "matched_by_regex": matched_by_regex,
+                            },
+                        )
+                else:
+                    partial_match = None
+                    try:
+                        partial_match = match_case_to_deal_partial(
+                            case_parties,
+                            sector,
+                            reference_number,
+                            deals=open_deals,
                         )
                     except Exception as e:
-                        logger.exception(f"USA verification error: {e}")
+                        logger.exception(f"Partial deal matching error: {e}")
                         collect_error(
                             error_items,
                             str(e),
-                            step="verify_usa_relation",
+                            step="match_case_to_deal_partial",
                             context={"reference_number": reference_number},
                         )
-                        is_usa = False
 
-                    if is_usa:
+                    if partial_match:
+                        _partial_deal_id, partial_side = partial_match
+                        partial_match_count += 1
+                        logger.info(
+                            "Partial match (deal_id=%s side=%s) "
+                            "— sending FRPMD email, not storing deal_id",
+                            _partial_deal_id, partial_side,
+                        )
                         subject = build_subject("comesa", "new")
+                        subject = apply_partial_match_subject(
+                            subject, partial_side)
                         html_email = generate_usa_related_email_html(case_info)
                         if not send_email_via_webhook(
                             subject, html_email, case_info
                         ):
                             collect_error(
                                 error_items,
-                                "Failed to send USA-related email",
+                                "Failed to send FRPMD email",
                                 step="send_email",
                                 context={"reference_number": reference_number},
                             )
                     else:
-                        logger.info("Not matched and not USA-related; silent insert")
+                        try:
+                            details_for_llm = (
+                                f"Reference: {reference_number}\n"
+                                f"Parties: {case_parties}\n"
+                                f"Sector: {sector}\n"
+                                f"Outcome: {row.get('tax_case_outcome', '')}\n"
+                                f"Status: {row.get('hf_tax_case_status', '')}\n"
+                                f"Notice Date: {row.get('notice_date', '')}"
+                            )
+                            is_usa = bool(
+                                verify_usa_relation(
+                                    company_details=details_for_llm,
+                                    case_type="COMESA",
+                                )
+                            )
+                        except Exception as e:
+                            logger.exception(f"USA verification error: {e}")
+                            collect_error(
+                                error_items,
+                                str(e),
+                                step="verify_usa_relation",
+                                context={"reference_number": reference_number},
+                            )
+                            is_usa = False
+
+                        if is_usa:
+                            subject = build_subject("comesa", "new")
+                            html_email = generate_usa_related_email_html(case_info)
+                            if not send_email_via_webhook(
+                                subject, html_email, case_info
+                            ):
+                                collect_error(
+                                    error_items,
+                                    "Failed to send USA-related email",
+                                    step="send_email",
+                                    context={"reference_number": reference_number},
+                                )
+                        else:
+                            logger.info("Not matched and not USA-related; silent insert")
 
                 inserted_id = insert_case(collection, case_info)
                 if inserted_id:
@@ -634,6 +712,7 @@ def run_comesa_cases_register(bootstrap: bool = False):
         if not bootstrap:
             logger.info(f"  LLM deal matches             : {llm_match_count}")
             logger.info(f"  Regex fallback matches       : {regex_match_count}")
+            logger.info(f"  Partial one-side matches     : {partial_match_count}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")
         logger.info("=" * 60)

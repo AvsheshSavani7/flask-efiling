@@ -13,14 +13,10 @@ as documents and never flip is_open.
 Usage:
   python ukraine_amcu_cases.py --wipe --backfill --no-deal-match
   python ukraine_amcu_cases.py --backfill --no-deal-match --dry-run
-  python ukraine_amcu_cases.py
-
-API (live, last 2 days, deal match + Avshesh email):
-  GET /ukraine-amcu-scraper
-  GET /ukraine-amcu-scraper?backfill=true&no_deal_match=true
+  python ukraine_amcu_cases.py --no-deal-match
 
 Live email (Avshesh only, never org routing):
-  deal match → [FRMD] / [FRRMD]; else USA-related → [FRUD].
+  deal match → [FRMD] / [FRRMD]; one-side → [FRPMD-A]/[FRPMD-T]; else USA-related → [FRUD].
   New case vs case update uses the matching subject.
 Backfill does not send email.
 """
@@ -43,9 +39,9 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from PyPDF2 import PdfReader
 
-from deal_match_llm import fetch_open_deals, llm_match_deal_id
+from deal_match_llm import fetch_open_deals, llm_match_deal_id, llm_match_partial_deal
 from deal_match_regex import apply_regex_match_subject, regex_match_ukraine_deal
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from llm_verification_service import verify_usa_relation
 from log_utils import ensure_script_logger, refresh_script_log
 from mongodb_connection import get_database, get_deal_by_id, init_mongodb_connection
@@ -232,13 +228,16 @@ def llm_match_open_case(
         return None
     valid = {c["key"] for c in candidates if c.get("key")}
     prompt = CASE_LINK_PROMPT.format(
-        cases_block=format_cases_block(candidates).replace("{", "(").replace("}", ")"),
+        cases_block=format_cases_block(candidates).replace(
+            "{", "(").replace("}", ")"),
         date=item.get("date") or "",
         application_id=",".join(item.get("application_ids") or []) or "-",
         case_number=",".join(item.get("case_numbers") or []) or "-",
-        legal_form=item.get("legal_form") or detect_legal_form(item.get("text") or ""),
+        legal_form=item.get("legal_form") or detect_legal_form(
+            item.get("text") or ""),
         parties=", ".join(item.get("parties") or []) or "-",
-        text_uk=((item.get("text") or "")[:800]).replace("{", "(").replace("}", ")"),
+        text_uk=((item.get("text") or "")[:800]).replace(
+            "{", "(").replace("}", ")"),
     )
     try:
         client = _get_openai_client()
@@ -268,7 +267,8 @@ def fetch_timeline(
             f"{BASE_URL}/api/timeline?page={page}"
             f"&date_from={date_from}&date_to={date_to}"
         )
-        logger.info("listing page %s/%s", page, last_page if last_page > 1 else "?")
+        logger.info("listing page %s/%s", page,
+                    last_page if last_page > 1 else "?")
         payload = client.get(url, json_mode=True)
         last_page = int(unwrap(payload.get("last_page") or 1))
         grouped = payload.get("data") or {}
@@ -311,8 +311,10 @@ def is_tracked(title: str, url: str, tags: List[str]) -> bool:
 
 
 def target_tokens(text: str, parties: List[str]) -> List[str]:
-    quotes = [re.sub(r"\s+", " ", q).strip() for q in QUOTED_RE.findall(text or "")]
-    quotes = [q for q in quotes if q.lower() not in {"інформація", "доступ до якої обмежено"}]
+    quotes = [re.sub(r"\s+", " ", q).strip()
+              for q in QUOTED_RE.findall(text or "")]
+    quotes = [q for q in quotes if q.lower() not in {
+        "інформація", "доступ до якої обмежено"}]
     focus = quotes[-2:] if quotes else (parties or [])[-2:]
     return party_tokens(focus, "")
 
@@ -322,15 +324,18 @@ def step_signature(url: str, text: str) -> Tuple[str, str]:
 
 
 def case_key_for_item(item: Dict[str, Any]) -> str:
-    cases = [i for i in (item.get("case_numbers") or []) if is_concentration_id(i)]
-    apps = [i for i in (item.get("application_ids") or []) if is_concentration_id(i)]
+    cases = [i for i in (item.get("case_numbers") or [])
+             if is_concentration_id(i)]
+    apps = [i for i in (item.get("application_ids") or [])
+            if is_concentration_id(i)]
     if cases:
         return "case:" + cases[0]
     if apps:
         return "app:" + apps[0]
     tokens = party_tokens(item.get("parties") or [], "")
     if len(tokens) >= 2:
-        digest = hashlib.sha1("|".join(sorted(tokens[:6])).encode("utf-8")).hexdigest()[:12]
+        digest = hashlib.sha1(
+            "|".join(sorted(tokens[:6])).encode("utf-8")).hexdigest()[:12]
         return "parties:" + digest
     blob = f"{item.get('article_url')}|{item.get('text','')[:80]}"
     return "orphan:" + hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12]
@@ -393,7 +398,8 @@ def apply_step(case: Dict[str, Any], step: Dict[str, Any], item: Dict[str, Any])
     if any(step_signature(s.get("url") or "", s.get("text") or "") == sig for s in case["timeline"]):
         return "duplicate"
     case["timeline"].append(step)
-    case["timeline"].sort(key=lambda s: (s.get("date") or "", KIND_ORDER.get(s.get("kind") or "", 9)))
+    case["timeline"].sort(key=lambda s: (
+        s.get("date") or "", KIND_ORDER.get(s.get("kind") or "", 9)))
     merge_ids(case, item)
     d = item.get("date") or ""
     if d and (not case.get("first_seen") or d < case["first_seen"]):
@@ -438,7 +444,8 @@ class CaseStore:
                 continue
             self.by_key[key] = doc
             for step in doc.get("timeline") or []:
-                self.claimed.add(step_signature(step.get("url") or "", step.get("text") or ""))
+                self.claimed.add(step_signature(
+                    step.get("url") or "", step.get("text") or ""))
 
     def find_by_app(self, app_id: str) -> Optional[Dict[str, Any]]:
         for case in self.by_key.values():
@@ -476,7 +483,8 @@ class CaseStore:
         for key in list(self.dirty):
             doc = dict(self.by_key[key])
             doc.pop("_id", None)
-            self.collection.update_one({"key": key}, {"$set": doc}, upsert=True)
+            self.collection.update_one(
+                {"key": key}, {"$set": doc}, upsert=True)
             n += 1
         self.dirty.clear()
         return n
@@ -504,7 +512,8 @@ def match_same_day_target(store: CaseStore, item: Dict[str, Any]) -> Optional[Di
     if not candidates:
         return None
 
-    item_tgt = set(target_tokens(item.get("text") or "", item.get("parties") or []))
+    item_tgt = set(target_tokens(item.get("text")
+                   or "", item.get("parties") or []))
     if not item_tgt:
         return None
 
@@ -578,7 +587,8 @@ def flatten_article(art: Dict[str, Any]) -> List[Dict[str, Any]]:
     )
     items = list(art.get("items") or [])
     if kind == "commitments" and (art.get("full_text") or "").strip():
-        row = item_from_text(re.sub(r"\s+", " ", art["full_text"])[:4000], kind, 0)
+        row = item_from_text(
+            re.sub(r"\s+", " ", art["full_text"])[:4000], kind, 0)
         items = [row] if row else items
 
     out: List[Dict[str, Any]] = []
@@ -614,10 +624,13 @@ def match_to_deal(
     item: Dict[str, Any],
     open_deals: List[Dict[str, Any]],
 ) -> Tuple[Optional[str], Optional[str], bool]:
-    parties = ", ".join(case.get("parties") or item.get("parties") or []) or "-"
-    ids_list = (case.get("application_ids") or []) + (case.get("case_numbers") or [])
+    parties = ", ".join(case.get("parties")
+                        or item.get("parties") or []) or "-"
+    ids_list = (case.get("application_ids") or []) + \
+        (case.get("case_numbers") or [])
     if not ids_list:
-        ids_list = (item.get("application_ids") or []) + (item.get("case_numbers") or [])
+        ids_list = (item.get("application_ids") or []) + \
+            (item.get("case_numbers") or [])
     ids = ", ".join(ids_list) or "-"
     text = (item.get("text") or case.get("title") or "")[:1200]
     deal_id: Optional[str] = None
@@ -653,10 +666,43 @@ def match_to_deal(
             logger.info("  Deal match regex: no match")
 
     if deal_id and not get_deal_by_id(deal_id):
-        logger.warning("  deal_id=%s matched but deal doc missing — skip email", deal_id)
+        logger.warning(
+            "  deal_id=%s matched but deal doc missing — skip email", deal_id)
         return deal_id, match_type, matched_by_regex
 
     return deal_id, match_type, matched_by_regex
+
+
+def match_to_deal_partial(
+    case: Dict[str, Any],
+    item: Dict[str, Any],
+    open_deals: List[Dict[str, Any]],
+) -> Optional[Tuple[str, str]]:
+    """One-side LLM match after FRMD and FRRMD fail. Returns (deal_id, side) or None."""
+    parties = ", ".join(case.get("parties")
+                        or item.get("parties") or []) or "-"
+    ids_list = (case.get("application_ids") or []) + \
+        (case.get("case_numbers") or [])
+    if not ids_list:
+        ids_list = (item.get("application_ids") or []) + \
+            (item.get("case_numbers") or [])
+    ids = ", ".join(ids_list) or "-"
+    text = (item.get("text") or case.get("title") or "")[:1200]
+    try:
+        return llm_match_partial_deal(
+            regulator_name="Ukraine AMCU",
+            case_sections={
+                "PARTIES": parties,
+                "APPLICATION / CASE NUMBERS": ids,
+                "ITEM TEXT (Ukrainian)": text or "-",
+            },
+            source_label="the AMCU concentration item",
+            source_label_step1="the AMCU concentration item (acquirer or target)",
+            deals=open_deals,
+        )
+    except Exception as exc:
+        logger.warning("  Partial deal match failed: %s", exc)
+        return None
 
 
 def build_case_email(
@@ -671,17 +717,22 @@ def build_case_email(
     if deal_match and matched_by_regex:
         subject = apply_regex_match_subject(subject, True)
     url = item.get("article_url") or ""
-    parties = ", ".join(case.get("parties") or item.get("parties") or []) or "—"
-    app_ids = ", ".join(case.get("application_ids") or item.get("application_ids") or []) or "—"
-    case_nos = ", ".join(case.get("case_numbers") or item.get("case_numbers") or []) or "—"
+    parties = ", ".join(case.get("parties")
+                        or item.get("parties") or []) or "—"
+    app_ids = ", ".join(case.get("application_ids")
+                        or item.get("application_ids") or []) or "—"
+    case_nos = ", ".join(case.get("case_numbers")
+                         or item.get("case_numbers") or []) or "—"
     link = (
         f'<a href="{escape_html(url)}" target="_blank" '
         f'style="color:#0ea5e9;font-weight:600;">View AMCU article &rarr;</a>'
         if url else "—"
     )
     if deal_match:
-        target = deal_match.get("target") or deal_match.get("target_name") or "N/A"
-        acquirer = deal_match.get("acquirer") or deal_match.get("acquire_name") or "N/A"
+        target = deal_match.get("target") or deal_match.get(
+            "target_name") or "N/A"
+        acquirer = deal_match.get("acquirer") or deal_match.get(
+            "acquire_name") or "N/A"
         deal_id = deal_match.get("deal_id") or case.get("deal_id") or "N/A"
         banner = f"""
 <div style="background:#dbeafe;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #2563eb;">
@@ -753,6 +804,7 @@ def send_case_email(
     deal_match: Optional[Dict[str, Any]] = None,
     *,
     matched_by_regex: bool = False,
+    partial_side: Optional[str] = None,
 ) -> bool:
     webhook_url = os.getenv("N8N_WEBHOOK_ONLY_ME", "")
     if not webhook_url:
@@ -761,6 +813,8 @@ def send_case_email(
     subject, html = build_case_email(
         case, item, event_type, deal_match, matched_by_regex=matched_by_regex
     )
+    if partial_side:
+        subject = apply_partial_match_subject(subject, partial_side)
     payload = {
         "subject": subject,
         "html": html,
@@ -768,7 +822,11 @@ def send_case_email(
         "source": "ukraine_amcu",
         "is_new_case": event_type == "new",
         "is_unmatched": deal_match is None,
-        "deal_id": (deal_match or {}).get("deal_id") or case.get("deal_id") or "",
+        "deal_id": (
+            ""
+            if partial_side
+            else ((deal_match or {}).get("deal_id") or case.get("deal_id") or "")
+        ),
         "case_key": case.get("key") or "",
     }
     logger.info("[TEST] Sending to %s | %s", TEST_RECIPIENT, subject)
@@ -796,7 +854,8 @@ def maybe_email_case(
         if deal_match:
             logger.info("  Reusing stored deal_id=%s", deal_id)
         else:
-            logger.warning("  stored deal_id=%s missing deal doc — no email", deal_id)
+            logger.warning(
+                "  stored deal_id=%s missing deal doc — no email", deal_id)
             stats["email_skipped"] += 1
             return
     elif not mailer.get("no_deal_match"):
@@ -822,6 +881,27 @@ def maybe_email_case(
         except Exception as exc:
             logger.warning("email failed: %s", exc)
         return
+
+    if not mailer.get("no_deal_match"):
+        partial_match = match_to_deal_partial(
+            case, item, mailer.get("open_deals") or []
+        )
+        if partial_match:
+            _partial_deal_id, partial_side = partial_match
+            logger.info(
+                "  Partial match (deal_id=%s side=%s) "
+                "— sending FRPMD email, not storing deal_id",
+                _partial_deal_id, partial_side,
+            )
+            try:
+                if send_case_email(
+                    case, item, event_type, None, partial_side=partial_side
+                ):
+                    stats["emails_sent"] += 1
+                    stats["partial_matched_email"] += 1
+            except Exception as exc:
+                logger.warning("email failed: %s", exc)
+            return
 
     if is_fully_redacted(item.get("text") or "", item.get("parties") or []):
         stats["email_skipped"] += 1
@@ -871,7 +951,8 @@ def process_item(
     if found is None and item.get("step_kind") in LINKER_KINDS:
         found = match_same_day_target(store, item)
         if found is None:
-            found = llm_match_open_case(store, item, linker_candidates(store, item))
+            found = llm_match_open_case(
+                store, item, linker_candidates(store, item))
 
     if found is not None:
         result = apply_step(found, step, item)
@@ -879,11 +960,13 @@ def process_item(
         store.upsert(found)
         if result == "closed":
             stats["closed"] += 1
-            logger.info("CLOSE %s [%s] %s", found["key"], step.get("status_hint"), (item.get("text") or "")[:80])
+            logger.info("CLOSE %s [%s] %s", found["key"], step.get(
+                "status_hint"), (item.get("text") or "")[:80])
             maybe_email_case(mailer, store, found, item, "update", stats)
         elif result == "updated":
             stats["updated"] += 1
-            logger.info("UPDATE %s [%s] %s", found["key"], step.get("kind"), (item.get("text") or "")[:80])
+            logger.info("UPDATE %s [%s] %s", found["key"], step.get(
+                "kind"), (item.get("text") or "")[:80])
             if item.get("step_kind") in EMAIL_UPDATE_KINDS:
                 maybe_email_case(mailer, store, found, item, "update", stats)
         else:
@@ -892,7 +975,8 @@ def process_item(
 
     kind = item.get("step_kind") or ""
     same_day_open = linker_candidates(store, item)
-    redacted = is_fully_redacted(item.get("text") or "", item.get("parties") or [])
+    redacted = is_fully_redacted(
+        item.get("text") or "", item.get("parties") or [])
 
     if kind == "decision" and item.get("status_hint") in CLOSE_STATUSES:
         if same_day_open and not redacted:
@@ -926,7 +1010,8 @@ def process_item(
         store.claimed.add(sig)
         store.upsert(doc)
         stats["new_open"] += 1
-        logger.info("NEW %s is_open=%s %s", key, doc["is_open"], (item.get("text") or "")[:80])
+        logger.info("NEW %s is_open=%s %s", key,
+                    doc["is_open"], (item.get("text") or "")[:80])
         maybe_email_case(mailer, store, doc, item, "new", stats)
         return
 
@@ -1008,13 +1093,18 @@ def mark_seen(collection, url: str, kind: str, dry_run: bool) -> None:
 
 def wipe_ukraine_collections(cases_coll, seen_coll, *, dry_run: bool) -> Tuple[int, int]:
     if dry_run:
-        n_cases = cases_coll.count_documents({}) if cases_coll is not None else 0
+        n_cases = cases_coll.count_documents(
+            {}) if cases_coll is not None else 0
         n_seen = seen_coll.count_documents({}) if seen_coll is not None else 0
-        logger.info("dry-run wipe would delete %s cases and %s seen urls", n_cases, n_seen)
+        logger.info(
+            "dry-run wipe would delete %s cases and %s seen urls", n_cases, n_seen)
         return n_cases, n_seen
-    n_cases = cases_coll.delete_many({}).deleted_count if cases_coll is not None else 0
-    n_seen = seen_coll.delete_many({}).deleted_count if seen_coll is not None else 0
-    logger.info("wiped %s ukraine_cases and %s ukraine_amcu_seen", n_cases, n_seen)
+    n_cases = cases_coll.delete_many(
+        {}).deleted_count if cases_coll is not None else 0
+    n_seen = seen_coll.delete_many(
+        {}).deleted_count if seen_coll is not None else 0
+    logger.info("wiped %s ukraine_cases and %s ukraine_amcu_seen",
+                n_cases, n_seen)
     return n_cases, n_seen
 
 
@@ -1052,6 +1142,7 @@ def run_ukraine_amcu_cases(
             "written": 0,
             "emails_sent": 0,
             "deal_matched_email": 0,
+            "partial_matched_email": 0,
             "usa_related_email": 0,
             "email_skipped": 0,
         }
@@ -1099,7 +1190,8 @@ def run_ukraine_amcu_cases(
         "open_deals": open_deals,
     }
     if backfill:
-        logger.info("email skipped (backfill) — recipient would be %s", TEST_RECIPIENT)
+        logger.info(
+            "email skipped (backfill) — recipient would be %s", TEST_RECIPIENT)
     elif dry_run:
         logger.info("email skipped (dry-run)")
     else:
@@ -1124,11 +1216,13 @@ def run_ukraine_amcu_cases(
     parsed: List[Dict[str, Any]] = []
     for i, meta in enumerate(relevant, 1):
         url = meta.get("url") or ""
-        kind = classify_article(meta["title"], url, [t["name"] for t in meta["tags"]])
+        kind = classify_article(meta["title"], url, [
+                                t["name"] for t in meta["tags"]])
         if url in already:
             stats["skipped_seen"] += 1
             continue
-        logger.info("[%s/%s] %s %s", i, len(relevant), kind, (meta.get("title") or "")[:70])
+        logger.info("[%s/%s] %s %s", i, len(relevant),
+                    kind, (meta.get("title") or "")[:70])
         try:
             html = client.get(url)
             art = parse_article_html(html, meta)
@@ -1138,7 +1232,8 @@ def run_ukraine_amcu_cases(
             stats["fetched"] += 1
         except Exception as exc:
             logger.error("FAIL %s: %s", url, exc)
-            parsed.append({**meta, "kind": kind, "items": [], "full_text": "", "error": str(exc)})
+            parsed.append({**meta, "kind": kind, "items": [],
+                          "full_text": "", "error": str(exc)})
         client._sleep()
 
     # Newest sitting first (last listing record first). Same day: agenda
@@ -1150,7 +1245,8 @@ def run_ukraine_amcu_cases(
         ),
         reverse=True,
     )
-    logger.info("processing %s articles newest → oldest (same-day agenda before decisions)", len(parsed))
+    logger.info(
+        "processing %s articles newest → oldest (same-day agenda before decisions)", len(parsed))
 
     for art in parsed:
         kind = art.get("kind") or ""
@@ -1176,12 +1272,17 @@ def run_ukraine_amcu_cases(
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Ukraine AMCU merger case tracker")
-    p.add_argument("--backfill", action="store_true", help="Scrape from 2026-01-01")
+    p.add_argument("--backfill", action="store_true",
+                   help="Scrape from 2026-01-01")
     p.add_argument("--dry-run", action="store_true", help="No MongoDB writes")
-    p.add_argument("--no-deal-match", action="store_true", help="Do not run deal_id matching")
-    p.add_argument("--force", action="store_true", help="Re-process URLs already in ukraine_amcu_seen")
-    p.add_argument("--wipe", action="store_true", help="Delete ukraine_cases and ukraine_amcu_seen before running")
-    p.add_argument("--max-pages", type=int, default=None, help="Cap timeline pages")
+    p.add_argument("--no-deal-match", action="store_true",
+                   help="Do not run deal_id matching")
+    p.add_argument("--force", action="store_true",
+                   help="Re-process URLs already in ukraine_amcu_seen")
+    p.add_argument("--wipe", action="store_true",
+                   help="Delete ukraine_cases and ukraine_amcu_seen before running")
+    p.add_argument("--max-pages", type=int, default=None,
+                   help="Cap timeline pages")
     args = p.parse_args()
     run_ukraine_amcu_cases(
         backfill=args.backfill,
