@@ -12,7 +12,8 @@ What it does:
 2. For each record:
    - Runs LLM deal matching against open/unknown deals
      → Match found: updates deal_id in DB, sends [FRMD] email
-     → No match: runs USA-relation check
+     → No match: one-side FRPMD check, then USA-relation check
+       → Partial match: sends [FRPMD-A]/[FRPMD-T] email (no deal_id stored)
        → USA-related: sends [FRUD] email
    - Sets reanalyzed_at on the record (prevents double-processing)
 3. Existing translations (pursue_en etc.) are reused — no re-translation.
@@ -44,6 +45,7 @@ from bundeskartellamt_initial_proxy import (
     generate_matched_email,
     generate_usa_related_email,
     get_german_cases_collection,
+    match_deal_partial,
     match_deal_with_llm,
     parse_llm_match,
     send_email_via_webhook,
@@ -229,7 +231,7 @@ def reanalyze(cutoff_str: str, dry_run: bool) -> Dict[str, Any]:
         logger.info("No unanalyzed records found. Nothing to do.")
         return {"success": True, "total": 0, "matched": 0, "usa_related": 0, "errors": 0}
 
-    stats = {"total": len(records), "matched": 0, "usa_related": 0, "errors": 0}
+    stats = {"total": len(records), "matched": 0, "matched_partial": 0, "usa_related": 0, "errors": 0}
 
     logger.info(f"[STEP 3] Processing {len(records)} records...")
 
@@ -282,6 +284,33 @@ def reanalyze(cutoff_str: str, dry_run: bool) -> Dict[str, Any]:
             stats["matched"] += 1
             continue
 
+        partial_match = None
+        try:
+            partial_match = match_deal_partial(pursue_en, deals)
+        except Exception as exc:
+            logger.exception(f"  {fn}: Partial match error: {exc}")
+            error_items.append({
+                "file_number": fn, "error": str(exc), "step": "match_deal_partial"
+            })
+            stats["errors"] += 1
+
+        if partial_match:
+            _partial_deal_id, partial_side = partial_match
+            stats["matched_partial"] = stats.get("matched_partial", 0) + 1
+            logger.info(
+                f"  {fn}: Partial match → deal_id={_partial_deal_id} "
+                f"side={partial_side} (not storing deal_id)"
+            )
+            update_record_after_analysis(gc_collection, fn, None, dry_run)
+            subject, html = generate_usa_related_email(
+                record, partial_side=partial_side)
+            if dry_run:
+                logger.info(f"  [DRY-RUN] Would send FRPMD email: {subject}")
+            else:
+                send_email_via_webhook(subject, html, fn)
+                logger.info(f"  Sent FRPMD email: {subject}")
+            continue
+
         # --- No deal match: check USA relation ---
         logger.info(f"  {fn}: No deal match — checking USA relation...")
         is_usa = False
@@ -331,6 +360,7 @@ def reanalyze(cutoff_str: str, dry_run: bool) -> Dict[str, Any]:
     logger.info(f"  Cutoff date            : {cutoff_str}")
     logger.info(f"  Total records found    : {stats['total']}")
     logger.info(f"  Deal matched + emailed : {stats['matched']}")
+    logger.info(f"  Partial one-side + emailed : {stats.get('matched_partial', 0)}")
     logger.info(f"  USA-related + emailed  : {stats['usa_related']}")
     logger.info(f"  Errors                 : {stats['errors']}")
     logger.info(f"  Dry-run                : {dry_run}")
@@ -342,6 +372,7 @@ def reanalyze(cutoff_str: str, dry_run: bool) -> Dict[str, Any]:
         "cutoff_date": cutoff_str,
         "total": stats["total"],
         "matched": stats["matched"],
+        "matched_partial": stats.get("matched_partial", 0),
         "usa_related": stats["usa_related"],
         "errors": stats["errors"],
         "dry_run": dry_run,

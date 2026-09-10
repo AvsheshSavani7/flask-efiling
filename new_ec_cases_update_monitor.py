@@ -61,10 +61,10 @@ import time
 import traceback
 
 from ec_html_scraper import parse_case_html
-from new_ec_cases_html import match_case_to_deal
+from new_ec_cases_html import match_case_to_deal, match_case_to_deal_partial
 from deal_match_regex import apply_regex_match_subject, regex_match_ec_deal
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
@@ -830,6 +830,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
     closed_count = 0
     llm_match_count = 0
     regex_match_count = 0
+    partial_match_count = 0
     total = 0
 
     logger.info("=" * 60)
@@ -1138,47 +1139,88 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
                                 step="send_email_via_webhook",
                             )
                     else:
-                        logger.info(
-                            f"[STEP 4.20] [{case_number}] No match -> LLM Call #2: USA check (companies={companies})...")
-                        try:
-                            is_usa = verify_usa_relation(
-                                company_details=companies, case_type="EC")
-                            logger.info(
-                                f"[STEP 4.21] [{case_number}] USA check result: {is_usa}")
-                        except Exception as e:
-                            logger.exception(
-                                f"[STEP 4.22] [{case_number}] USA check error: {e}")
-                            collect_error(
-                                error_items,
-                                str(e),
-                                case_number=case_number,
-                                step="verify_usa_relation",
-                            )
-                            is_usa = False
+                        partial_match = None
+                        if deals and companies:
+                            try:
+                                partial_match = match_case_to_deal_partial(
+                                    companies, deals)
+                            except Exception as e:
+                                logger.exception(
+                                    f"[STEP 4.19c] [{case_number}] Partial deal match error: {e}")
+                                collect_error(
+                                    error_items,
+                                    str(e),
+                                    case_number=case_number,
+                                    step="match_case_to_deal_partial",
+                                )
 
-                        if is_usa:
+                        if partial_match:
+                            _partial_deal_id, partial_side = partial_match
+                            partial_match_count += 1
                             logger.info(
-                                f"[STEP 4.23] [{case_number}] USA-related case detected — sending email")
+                                "[STEP 4.19c] [%s] Partial match (deal_id=%s side=%s) "
+                                "— sending FRPMD email, not storing deal_id",
+                                case_number, _partial_deal_id, partial_side,
+                            )
                             email_html = generate_update_email_html(
                                 new_data, differences)
                             banner = _build_usa_banner(case_number)
                             email_html = email_html.replace(
                                 "{BANNER_PLACEHOLDER}", banner)
-
-                            companies_str = " / ".join(
-                                companies) if companies else "N/A"
                             subject = build_subject("ec_merger", "update")
+                            subject = apply_partial_match_subject(
+                                subject, partial_side)
                             if not send_email_via_webhook(
-                                    subject, email_html, case_number, case_title, changed_fields=changed_names):
+                                    subject, email_html, case_number, case_title,
+                                    changed_fields=changed_names):
                                 collect_error(
                                     error_items,
-                                    "Failed to send USA-related update notification email",
+                                    "Failed to send FRPMD update notification email",
                                     case_number=case_number,
                                     step="send_email_via_webhook",
                                 )
                         else:
                             logger.info(
-                                f"[STEP 4.24] [{case_number}] Not matched, not USA-related — no email")
+                                f"[STEP 4.20] [{case_number}] No match -> LLM Call #2: USA check (companies={companies})...")
+                            try:
+                                is_usa = verify_usa_relation(
+                                    company_details=companies, case_type="EC")
+                                logger.info(
+                                    f"[STEP 4.21] [{case_number}] USA check result: {is_usa}")
+                            except Exception as e:
+                                logger.exception(
+                                    f"[STEP 4.22] [{case_number}] USA check error: {e}")
+                                collect_error(
+                                    error_items,
+                                    str(e),
+                                    case_number=case_number,
+                                    step="verify_usa_relation",
+                                )
+                                is_usa = False
+
+                            if is_usa:
+                                logger.info(
+                                    f"[STEP 4.23] [{case_number}] USA-related case detected — sending email")
+                                email_html = generate_update_email_html(
+                                    new_data, differences)
+                                banner = _build_usa_banner(case_number)
+                                email_html = email_html.replace(
+                                    "{BANNER_PLACEHOLDER}", banner)
+
+                                companies_str = " / ".join(
+                                    companies) if companies else "N/A"
+                                subject = build_subject("ec_merger", "update")
+                                if not send_email_via_webhook(
+                                        subject, email_html, case_number, case_title, changed_fields=changed_names):
+                                    collect_error(
+                                        error_items,
+                                        "Failed to send USA-related update notification email",
+                                        case_number=case_number,
+                                        step="send_email_via_webhook",
+                                    )
+                            else:
+                                logger.info(
+                                    f"[STEP 4.24] [{case_number}] Not matched, not USA-related — no email")
 
                 if not update_case_document(collection, case_doc,
                                             new_data, extra_fields or None):
@@ -1213,6 +1255,7 @@ def run(headed: bool = False, max_cases: Optional[int] = None):
         logger.info(f"  Cases closed (is_open=false)  : {closed_count}")
         logger.info(f"  LLM deal matches             : {llm_match_count}")
         logger.info(f"  Regex fallback matches       : {regex_match_count}")
+        logger.info(f"  Partial one-side matches     : {partial_match_count}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")
         logger.info("=" * 60)

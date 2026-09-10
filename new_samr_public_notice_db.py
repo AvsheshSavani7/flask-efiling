@@ -10,7 +10,7 @@ import sys
 import traceback
 from logging.handlers import RotatingFileHandler
 from openai import OpenAI
-from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_llm import llm_match_deal_id, llm_match_partial_deal, fetch_open_deals
 from deal_match_regex import apply_regex_match_subject, regex_match_samr_deal
 import anthropic
 from bs4 import BeautifulSoup
@@ -24,9 +24,9 @@ from html import escape as escape_html
 from llm_verification_service import verify_usa_relation
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from n8n_email_service import post_email_payload, resolve_webhook_url
-from typing import Any
+from typing import Any, Optional, Tuple
 
 # Configuration
 # CUTOFF_DATE = datetime.datetime.now().replace(
@@ -439,6 +439,27 @@ def match_deal_with_llm(title_en, title_cn):
     )
 
 
+def match_deal_with_llm_partial(title_en, title_cn) -> Optional[Tuple[str, str]]:
+    """One-side LLM match after FRMD and FRRMD fail. Returns (deal_id, side) or None."""
+    global deals
+    if not deals:
+        logger.warning("Deals list is empty, reloading from MongoDB...")
+        load_deals()
+    if not deals:
+        logger.warning("No deals with company names found")
+        return None
+    return llm_match_partial_deal(
+        regulator_name="SAMR China Public Notice",
+        case_sections={
+            "TITLE (English translation)": title_en,
+            "TITLE (Original Chinese)": title_cn,
+        },
+        source_label="the public notice title",
+        source_label_step1="the public notice title (acquirer or target)",
+        deals=deals,
+    )
+
+
 def convert_datetime_to_string(obj):
     """Recursively convert datetime objects to strings for JSON serialization."""
     if isinstance(obj, datetime.datetime):
@@ -646,9 +667,13 @@ def generate_unmatched_samr_email_html(record: dict) -> tuple:
     return subject, html_email
 
 
-def send_unmatched_samr_email_via_webhook(record: dict) -> bool:
+def send_unmatched_samr_email_via_webhook(
+    record: dict, partial_side: Optional[str] = None,
+) -> bool:
     try:
         subject, html_email = generate_unmatched_samr_email_html(record)
+        if partial_side:
+            subject = apply_partial_match_subject(subject, partial_side)
         logger.info(f"Generated email subject: {subject}")
 
         webhook_url = resolve_webhook_url(subject)
@@ -706,6 +731,7 @@ def main(headless=True):
     translated = 0
     llm_match_count = 0
     regex_match_count = 0
+    partial_match_count = 0
     logger.info("=" * 60)
     logger.info("[STEP 1] Starting SAMR Public Notice Register")
     logger.info(f"Log file: {LOG_FILE}")
@@ -916,38 +942,71 @@ def main(headless=True):
                         logger.warning(
                             f"  Match returned deal_id={deal_id} but deal not found in loaded deals")
                 else:
+                    partial_match = None
                     try:
-                        company_details = title_en if title_en and title_en != "[Translation failed]" else title_cn
-                        is_usa_related = verify_usa_relation(
-                            company_details=company_details,
-                            case_type="CHINA",
-                        )
-                        if is_usa_related:
-                            logger.info(
-                                "  USA-related case detected - sending email notification")
-                            try:
-                                send_unmatched_samr_email_via_webhook(record)
-                            except Exception as e:
-                                logger.exception(
-                                    f"  Error sending USA email: {e}")
-                                collect_error(
-                                    error_items,
-                                    str(e),
-                                    step="send_email",
-                                    context={
-                                        "title": title_en[:80], "url": url},
-                                )
-                        else:
-                            logger.info("  Not USA-related - no action taken")
+                        partial_match = match_deal_with_llm_partial(
+                            title_en, title_cn)
                     except Exception as e:
-                        logger.exception(
-                            f"  Error verifying USA relation: {e}")
+                        logger.exception(f"  Partial deal matching failed: {e}")
                         collect_error(
                             error_items,
                             str(e),
-                            step="verify_usa_relation",
+                            step="match_deal_with_llm_partial",
                             context={"title": title_en[:80], "url": url},
                         )
+
+                    if partial_match:
+                        _partial_deal_id, partial_side = partial_match
+                        partial_match_count += 1
+                        logger.info(
+                            "  Partial match (deal_id=%s side=%s) "
+                            "— sending FRPMD email, not storing deal_id",
+                            _partial_deal_id, partial_side,
+                        )
+                        try:
+                            send_unmatched_samr_email_via_webhook(
+                                record, partial_side=partial_side)
+                        except Exception as e:
+                            logger.exception(f"  Error sending FRPMD email: {e}")
+                            collect_error(
+                                error_items,
+                                str(e),
+                                step="send_email",
+                                context={"title": title_en[:80], "url": url},
+                            )
+                    else:
+                        try:
+                            company_details = title_en if title_en and title_en != "[Translation failed]" else title_cn
+                            is_usa_related = verify_usa_relation(
+                                company_details=company_details,
+                                case_type="CHINA",
+                            )
+                            if is_usa_related:
+                                logger.info(
+                                    "  USA-related case detected - sending email notification")
+                                try:
+                                    send_unmatched_samr_email_via_webhook(record)
+                                except Exception as e:
+                                    logger.exception(
+                                        f"  Error sending USA email: {e}")
+                                    collect_error(
+                                        error_items,
+                                        str(e),
+                                        step="send_email",
+                                        context={
+                                            "title": title_en[:80], "url": url},
+                                    )
+                            else:
+                                logger.info("  Not USA-related - no action taken")
+                        except Exception as e:
+                            logger.exception(
+                                f"  Error verifying USA relation: {e}")
+                            collect_error(
+                                error_items,
+                                str(e),
+                                step="verify_usa_relation",
+                                context={"title": title_en[:80], "url": url},
+                            )
 
                 save_to_samr_cases(samr_case_doc)
             except Exception as e:
@@ -999,6 +1058,7 @@ def main(headless=True):
         logger.info(f"  Total matches found          : {len(matched_data)}")
         logger.info(f"  LLM deal matches             : {llm_match_count}")
         logger.info(f"  Regex fallback matches       : {regex_match_count}")
+        logger.info(f"  Partial one-side matches     : {partial_match_count}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")
         logger.info("=" * 60)

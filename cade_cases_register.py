@@ -26,11 +26,11 @@ from mongodb_connection import (
     init_mongodb_connection,
     is_connected,
 )
-from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_llm import llm_match_deal_id, llm_match_partial_deal, fetch_open_deals
 from deal_match_regex import regex_match_cade_deal
 from html import escape as escape_html
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from n8n_email_service import post_email_payload
 from cade_document_summariser import (
     apply_summariser_pending_flags,
@@ -967,6 +967,23 @@ def match_case_to_deal(
     )
 
 
+def match_case_to_deal_partial(
+    interessados_text: str,
+    translated_text: str,
+    deals: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Tuple[str, str]]:
+    """One-side LLM match after FRMD and FRRMD fail. Returns (deal_id, side) or None."""
+    return llm_match_partial_deal(
+        regulator_name="CADE Brazil",
+        case_sections={
+            "INTERESSADOS TEXT (translated to English)": translated_text,
+            "ORIGINAL TEXT (Portuguese)": interessados_text,
+        },
+        source_label="the interessados text",
+        deals=deals,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Email helpers
 # ---------------------------------------------------------------------------
@@ -996,6 +1013,7 @@ def generate_update_email_html(
     deal: Optional[Dict[str, Any]],
     matched_by_regex: bool = False,
     event_type: str = "update",
+    partial_side: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Subject + HTML for a new-case or update bulk email (history table, no doc table)."""
     process = case_data.get("process", "N/A")
@@ -1055,6 +1073,8 @@ def generate_update_email_html(
     subject = build_subject("cade", subject_kind, deal)
     if matched_by_regex:
         subject = subject.replace("[FRMD]", "[FRRMD]")
+    elif partial_side:
+        subject = apply_partial_match_subject(subject, partial_side)
 
     banner_title = (
         "CADE Brazil – New Case" if is_new else "CADE Brazil – Case Updated"
@@ -1132,12 +1152,16 @@ def send_matched_email(
     })
 
 
-def send_usa_related_email(case_data: Dict[str, Any]) -> bool:
+def send_usa_related_email(
+    case_data: Dict[str, Any],
+    partial_side: Optional[str] = None,
+) -> bool:
     process = case_data.get("process", "N/A")
     detail_url = case_data.get("detail_url", "")
     changes = _bulk_email_changes(case_data)
     subject, html = generate_update_email_html(
         case_data, changes, None, event_type="new",
+        partial_side=partial_side,
     )
     return _post_email_payload({
         "subject": subject,
@@ -1186,6 +1210,7 @@ def run_cade_cases_register(
     new_cases: List[Dict[str, Any]] = []
     llm_match_count = 0
     regex_match_count = 0
+    partial_match_count = 0
     frmd_jobs: List[Dict[str, Any]] = []
 
     try:
@@ -1408,42 +1433,41 @@ def run_cade_cases_register(
                             # FRMD emails are sent per document after insert
                             # (see frmd_jobs / summarise_cade_cases_parallel).
                         else:
-                            is_usa = False
+                            partial_match = None
                             if interessados_text:
                                 try:
-                                    company_details = (
-                                        f"Process: {autuacao.get('process', '')}\n"
-                                        f"Type: {autuacao.get('type', '')}\n"
-                                        f"Registration Date: {autuacao.get('registration_date', '')}\n"
-                                        f"Interested Parties (PT): {interessados_text}\n"
-                                        f"Interested Parties (EN): {translated}\n"
-                                        f"Detail URL: {detail_url}"
+                                    partial_match = match_case_to_deal_partial(
+                                        interessados_text, translated,
+                                        deals=open_deals,
                                     )
-                                    is_usa = bool(verify_usa_relation(
-                                        company_details=company_details,
-                                        case_type="BRAZIL",
-                                    ))
                                 except Exception as e:
                                     logger.exception(
-                                        f"[STEP 2.12] Error verifying USA relation: {e}")
+                                        f"[STEP 2.10c] Error during partial deal matching: {e}")
                                     collect_error(
                                         error_items,
                                         str(e),
-                                        step="verify_usa_relation",
+                                        step="match_case_to_deal_partial",
                                         context={
                                             "detail_url": detail_url,
                                             "process": process_num,
                                         },
                                     )
 
-                            if is_usa:
+                            if partial_match:
+                                _partial_deal_id, partial_side = partial_match
+                                partial_match_count += 1
                                 logger.info(
-                                    "[STEP 2.13] USA-related (unmatched) — sending email")
+                                    "[STEP 2.11c] Partial match (deal_id=%s side=%s) "
+                                    "— sending FRPMD email, not storing deal_id",
+                                    _partial_deal_id, partial_side,
+                                )
                                 if not test_mode:
-                                    if not send_usa_related_email(case_doc):
+                                    if not send_usa_related_email(
+                                        case_doc, partial_side=partial_side,
+                                    ):
                                         collect_error(
                                             error_items,
-                                            "Failed to send USA-related email",
+                                            "Failed to send FRPMD email",
                                             step="send_email",
                                             context={
                                                 "detail_url": detail_url,
@@ -1451,8 +1475,51 @@ def run_cade_cases_register(
                                             },
                                         )
                             else:
-                                logger.info(
-                                    "[STEP 2.14] No match, not USA-related — saving record only")
+                                is_usa = False
+                                if interessados_text:
+                                    try:
+                                        company_details = (
+                                            f"Process: {autuacao.get('process', '')}\n"
+                                            f"Type: {autuacao.get('type', '')}\n"
+                                            f"Registration Date: {autuacao.get('registration_date', '')}\n"
+                                            f"Interested Parties (PT): {interessados_text}\n"
+                                            f"Interested Parties (EN): {translated}\n"
+                                            f"Detail URL: {detail_url}"
+                                        )
+                                        is_usa = bool(verify_usa_relation(
+                                            company_details=company_details,
+                                            case_type="BRAZIL",
+                                        ))
+                                    except Exception as e:
+                                        logger.exception(
+                                            f"[STEP 2.12] Error verifying USA relation: {e}")
+                                        collect_error(
+                                            error_items,
+                                            str(e),
+                                            step="verify_usa_relation",
+                                            context={
+                                                "detail_url": detail_url,
+                                                "process": process_num,
+                                            },
+                                        )
+
+                                if is_usa:
+                                    logger.info(
+                                        "[STEP 2.13] USA-related (unmatched) — sending email")
+                                    if not test_mode:
+                                        if not send_usa_related_email(case_doc):
+                                            collect_error(
+                                                error_items,
+                                                "Failed to send USA-related email",
+                                                step="send_email",
+                                                context={
+                                                    "detail_url": detail_url,
+                                                    "process": process_num,
+                                                },
+                                            )
+                                else:
+                                    logger.info(
+                                        "[STEP 2.14] No match, not USA-related — saving record only")
 
                         inserted_id = insert_case(collection, case_doc)
                         if inserted_id:
@@ -1566,6 +1633,7 @@ def run_cade_cases_register(
         logger.info(f"[STEP 2.23] New cases inserted           : {len(new_cases)}")
         logger.info(f"[STEP 2.23a] LLM deal matches            : {llm_match_count}")
         logger.info(f"[STEP 2.23b] Regex fallback matches      : {regex_match_count}")
+        logger.info(f"[STEP 2.23c] Partial one-side matches    : {partial_match_count}")
         logger.info(
             f"[STEP 2.24] Errors encountered           : {len(error_items)}")
         logger.info(f"[STEP 2.25] Total time                   : {elapsed}s")

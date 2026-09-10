@@ -17,7 +17,7 @@ import time
 from datetime import date, datetime, timezone, timedelta
 from html import escape as escape_html
 from logging.handlers import RotatingFileHandler
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from bs4 import BeautifulSoup
@@ -31,12 +31,12 @@ from mongodb_connection import (
     init_mongodb_connection,
     is_connected,
 )
-from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_llm import llm_match_deal_id, llm_match_partial_deal, fetch_open_deals
 from deal_match_regex import regex_match_ftc_deal
 from llm_verification_service import verify_usa_relation
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
@@ -338,6 +338,19 @@ def match_case_to_deal(title: str, deals: Optional[List[Dict[str, Any]]] = None)
     )
 
 
+def match_case_to_deal_partial(
+    title: str, deals: Optional[List[Dict[str, Any]]] = None
+) -> Optional[Tuple[str, str]]:
+    """One-side LLM match after FRMD and FRRMD fail. Returns (deal_id, side) or None."""
+    return llm_match_partial_deal(
+        regulator_name="FTC Early Termination",
+        case_sections={"FTC EARLY TERMINATION NOTICE TITLE TO MATCH": title},
+        source_label="the FTC title",
+        source_label_step1="the FTC title (acquirer or target)",
+        deals=deals,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Email helpers
 # ---------------------------------------------------------------------------
@@ -412,11 +425,16 @@ def send_new_case_email(
     return _post_email_payload(payload)
 
 
-def send_unmatched_usa_related_email(case_info: Dict[str, Any]) -> bool:
+def send_unmatched_usa_related_email(
+    case_info: Dict[str, Any],
+    partial_side: Optional[str] = None,
+) -> bool:
     case_id = case_info.get("case_id", "N/A")
     title = case_info.get("title", "N/A")
     title_clean = title_without_case_id_prefix(case_id, title)
     subject = build_subject("ftc", "new")
+    if partial_side:
+        subject = apply_partial_match_subject(subject, partial_side)
     detail_url = case_info.get("detail_url", "")
     date_str = format_notice_date_for_display(case_info.get("date"))
     acquiring = case_info.get("acquiring_party", "")
@@ -504,10 +522,10 @@ def _process_ftc_case(
     Handle a new FTC early termination case.
 
     Test mode  — directly insert, no LLM calls or emails.
-    Live mode  — LLM match -> regex fallback -> USA check -> email -> insert.
+    Live mode  — LLM match -> regex fallback -> partial match -> USA check -> email -> insert.
 
     Returns (backup_dict_or_None, match_type_str_or_None) where match_type is
-    "llm", "regex", or None (no match / test mode).
+    "llm", "regex", "partial", or None (no match / test mode).
     """
     case_id = case_info.get("case_id", "")
     title = case_info.get("parties_text") or case_info.get("title", "")
@@ -556,36 +574,70 @@ def _process_ftc_case(
                     },
                 )
         else:
+            partial_match = None
             try:
-                case_details_str = prepare_case_payload_for_llm(case_info)
-                is_usa = bool(
-                    verify_usa_relation(
-                        company_details=case_details_str, case_type="FTC"
-                    )
-                )
+                partial_match = match_case_to_deal_partial(
+                    title, deals=open_deals)
             except Exception as e:
-                logger.exception(f"Error verifying USA relation: {e}")
+                logger.exception(f"Error during partial deal matching: {e}")
                 collect_error(
                     error_items,
                     str(e),
-                    step="verify_usa_relation",
+                    step="match_case_to_deal_partial",
                     context={"case_id": case_id},
                 )
-                is_usa = False
 
-            if is_usa:
+            if partial_match:
+                _partial_deal_id, partial_side = partial_match
+                match_type = "partial"
                 logger.info(
-                    "  Case appears USA-related (unmatched); sending email")
-                if not send_unmatched_usa_related_email(case_info):
+                    "  Partial match (deal_id=%s side=%s) "
+                    "— sending FRPMD email, not storing deal_id",
+                    _partial_deal_id, partial_side,
+                )
+                if not send_unmatched_usa_related_email(
+                    case_info, partial_side=partial_side,
+                ):
                     collect_error(
                         error_items,
-                        "Failed to send USA-related email",
+                        "Failed to send FRPMD email",
                         step="send_email",
                         context={
                             "case_id": case_id,
                             "detail_url": case_info.get("detail_url"),
                         },
                     )
+            else:
+                try:
+                    case_details_str = prepare_case_payload_for_llm(case_info)
+                    is_usa = bool(
+                        verify_usa_relation(
+                            company_details=case_details_str, case_type="FTC"
+                        )
+                    )
+                except Exception as e:
+                    logger.exception(f"Error verifying USA relation: {e}")
+                    collect_error(
+                        error_items,
+                        str(e),
+                        step="verify_usa_relation",
+                        context={"case_id": case_id},
+                    )
+                    is_usa = False
+
+                if is_usa:
+                    logger.info(
+                        "  Case appears USA-related (unmatched); sending email")
+                    if not send_unmatched_usa_related_email(case_info):
+                        collect_error(
+                            error_items,
+                            "Failed to send USA-related email",
+                            step="send_email",
+                            context={
+                                "case_id": case_id,
+                                "detail_url": case_info.get("detail_url"),
+                            },
+                        )
 
     inserted_id = insert_case(collection, case_info)
     if inserted_id:
@@ -615,7 +667,7 @@ def run_ftc_cases_scraper(test_mode: bool = False):
 
     Test mode  — paginate ALL pages; directly insert into DB
                  (no LLM calls, no emails).
-    Live mode  — first page only; deal match -> USA check -> email -> insert.
+    Live mode  — first page only; deal match -> regex -> partial -> USA check -> email -> insert.
     """
     global LOG_FILE
     LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
@@ -627,6 +679,7 @@ def run_ftc_cases_scraper(test_mode: bool = False):
     filtered_items: List[Dict[str, Any]] = []
     llm_match_count = 0
     regex_match_count = 0
+    partial_match_count = 0
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"
 
     logger.info("=" * 60)
@@ -785,6 +838,8 @@ def run_ftc_cases_scraper(test_mode: bool = False):
                     llm_match_count += 1
                 elif match_type == "regex":
                     regex_match_count += 1
+                elif match_type == "partial":
+                    partial_match_count += 1
 
             except Exception as e:
                 logger.exception(f"Error processing item #{idx}: {e}")
@@ -838,6 +893,7 @@ def run_ftc_cases_scraper(test_mode: bool = False):
         logger.info(f"New cases inserted         : {len(new_cases)}")
         logger.info(f"LLM deal matches           : {llm_match_count}")
         logger.info(f"Regex fallback matches     : {regex_match_count}")
+        logger.info(f"Partial one-side matches   : {partial_match_count}")
         logger.info(f"Errors encountered         : {len(error_items)}")
         logger.info(f"Total time                 : {elapsed}s")
         logger.info("=" * 60)

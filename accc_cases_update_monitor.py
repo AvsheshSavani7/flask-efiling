@@ -20,12 +20,12 @@ from mongodb_connection import (
     is_connected,
 )
 from llm_verification_service import verify_usa_relation
-from accc_cases_register import match_case_to_deal
+from accc_cases_register import match_case_to_deal, match_case_to_deal_partial
 from deal_match_regex import apply_regex_match_subject, regex_match_deal_by_title
 from deal_match_llm import fetch_open_deals
 from log_utils import cleanup_old_logs, refresh_log_file
 from scraper_error_utils import collect_error, send_error_summary
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from n8n_email_service import post_email_payload, resolve_webhook_url
 
 
@@ -937,6 +937,7 @@ def send_update_email(
     changes: List[Tuple[str, Any, Any, str]],
     is_usa: bool = False,
     matched_by_regex: bool = False,
+    partial_side: Optional[str] = None,
 ) -> bool:
     try:
         html = generate_update_email_html(
@@ -947,6 +948,8 @@ def send_update_email(
 
         subject = build_subject("accc", "update", deal)
         subject = apply_regex_match_subject(subject, matched_by_regex)
+        if partial_side:
+            subject = apply_partial_match_subject(subject, partial_side)
 
         payload = {
             "subject": subject,
@@ -1045,6 +1048,7 @@ def process_accc_cases_updates():
 
         llm_match_count = 0
         regex_match_count = 0
+        partial_match_count = 0
 
         cursor = cases_collection.find(
             {"acquisition_status": {"$regex": "^under assessment$", "$options": "i"}}
@@ -1256,6 +1260,49 @@ def process_accc_cases_updates():
                             )
                         continue
 
+                    partial_match = None
+                    try:
+                        partial_match = match_case_to_deal_partial(
+                            title, deals=open_deals)
+                    except Exception as e:
+                        logger.exception(
+                            f"Error during partial deal matching: {e}")
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="match_case_to_deal_partial",
+                            case_number=case_number,
+                        )
+
+                    if partial_match:
+                        _partial_deal_id, partial_side = partial_match
+                        partial_match_count += 1
+                        logger.info(
+                            "  Partial match (deal_id=%s side=%s) "
+                            "— sending FRPMD email, not storing deal_id",
+                            _partial_deal_id, partial_side,
+                        )
+                        if not send_update_email(
+                            case_doc, current_case, None, changes,
+                            partial_side=partial_side,
+                        ):
+                            collect_error(
+                                error_items,
+                                "Failed to send FRPMD update email",
+                                step="send_email",
+                                case_number=case_number,
+                            )
+                        if not update_case_document(
+                            cases_collection, case_doc, current_case
+                        ):
+                            collect_error(
+                                error_items,
+                                "Failed to update case document",
+                                step="update_case",
+                                case_number=case_number,
+                            )
+                        continue
+
                     try:
                         case_details_str = f"""
 Case number: {case_number}
@@ -1349,6 +1396,7 @@ URL: {url}
         logger.info(f"  Cases with changes           : {total_changed}")
         logger.info(f"  LLM deal matches             : {llm_match_count}")
         logger.info(f"  Regex fallback matches       : {regex_match_count}")
+        logger.info(f"  Partial one-side matches     : {partial_match_count}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")
         logger.info("=" * 60)

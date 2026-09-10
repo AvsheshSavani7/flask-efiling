@@ -22,6 +22,7 @@ send_report_email(report_type, payload, org_id=None, deal_id=None)
 Supported report_types (foreign regulatory):
   "foreign_regulatory_matched_deal"  — case matched to a deal [FRMD]
   "foreign_regulatory_us_deal"       — US-related case, no deal match [FRUD]
+                                      also one-side partial match [FRPMD-A]/[FRPMD-T]
   "foreign_regulatory_regex_match_deal" — case matched to a deal by regex [FRRMD]
 
 MongoDB collections (Deal_DB)
@@ -110,6 +111,8 @@ def post_email_payload(
     # Org-aware send — triggered by subject tag
     if "[FRRMD]" in subj:
         report_type = "foreign_regulatory_regex_match_deal"
+    elif "[FRPMD-A]" in subj or "[FRPMD-T]" in subj:
+        report_type = "foreign_regulatory_us_deal"
     elif "[FRMD]" in subj:
         report_type = "foreign_regulatory_matched_deal"
     elif "[FRUD]" in subj:

@@ -13,12 +13,12 @@ from bson import ObjectId
 from bs4 import BeautifulSoup
 from html import escape as escape_html
 from openai import OpenAI
-from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_llm import llm_match_deal_id, llm_match_partial_deal, fetch_open_deals
 from pymongo import MongoClient
 from typing import Any, Dict, List, Optional, Tuple
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from n8n_email_service import post_email_payload
 
 # ---------------------------------------------------------------------------
@@ -458,6 +458,26 @@ def match_title_with_deals(title):
         regulator_name="UK CMA",
         case_sections={"CASE TITLE": title},
         source_label="the UK CMA case text (title)",
+        deals=deals,
+    )
+
+
+def match_title_with_deals_partial(title):
+    """One-side LLM match after FRMD and FRRMD fail. Returns (deal_id, side) or None."""
+    global deals
+    if not deals:
+        print("⚠️ Deals list is empty, reloading...")
+        load_deals()
+
+    if not deals:
+        print("⚠️ No deals with company names found")
+        return None
+
+    return llm_match_partial_deal(
+        regulator_name="UK CMA",
+        case_sections={"CASE TITLE": title},
+        source_label="the UK CMA case text (title)",
+        source_label_step1="the UK CMA case text (title) (acquirer or target)",
         deals=deals,
     )
 
@@ -918,40 +938,80 @@ def process_case(db_record, error_items: List[Dict[str, Any]], match_stats: Opti
                 print(f"  ➖ No deal match for: {case_info['title'][:60]}")
                 print(
                     f"STEP 1.5.20: No deal match for: {case_info['title'][:60]}")
+                partial_match = None
                 try:
-                    is_usa = verify_usa_relation(case_info["title"])
-                    print(f"STEP 1.5.21: USA relation: {is_usa}")
-                    if is_usa:
-                        print(f"  🇺🇸 USA-related - sending update email")
-                        print(f"STEP 1.5.22: Sending update email")
-                        subj, html = generate_update_email_html(
-                            case_info, changes)
-                        if not send_email_via_webhook(subj, html, {
-                            "title": case_info["title"],
-                            "url": detail_url,
-                            "is_update": True,
-                            "usa_related": True,
-                        }):
-                            collect_error(
-                                error_items,
-                                "Failed to send USA-related update email",
-                                step="send_email",
-                                context={
-                                    "title": title[:80], "detail_url": detail_url},
-                            )
-                        print(f"STEP 1.5.23: Email sent: {subj}")
-                    else:
-                        print(f"  ℹ️ Not USA-related - no email, updating DB only")
+                    partial_match = match_title_with_deals_partial(
+                        case_info["title"])
                 except Exception as e:
-                    logger.exception(f"  Error checking USA relation: {e}")
-                    print(f"STEP 1.5.24: Error checking USA relation: {e}")
+                    logger.exception(f"Error during partial deal matching: {e}")
                     collect_error(
                         error_items,
                         str(e),
-                        step="verify_usa_relation",
+                        step="match_title_with_deals_partial",
                         context={"title": title[:80],
                                  "detail_url": detail_url},
                     )
+
+                if partial_match:
+                    _partial_deal_id, partial_side = partial_match
+                    if match_stats is not None:
+                        match_stats["partial"] += 1
+                    print(
+                        f"  🔍 Partial match (deal_id={_partial_deal_id} "
+                        f"side={partial_side}) — sending FRPMD email, not storing deal_id"
+                    )
+                    subj, html = generate_update_email_html(
+                        case_info, changes)
+                    subj = apply_partial_match_subject(subj, partial_side)
+                    if not send_email_via_webhook(subj, html, {
+                        "title": case_info["title"],
+                        "url": detail_url,
+                        "is_update": True,
+                        "usa_related": True,
+                    }):
+                        collect_error(
+                            error_items,
+                            "Failed to send FRPMD update email",
+                            step="send_email",
+                            context={
+                                "title": title[:80], "detail_url": detail_url},
+                        )
+                    print(f"STEP 1.5.20b: FRPMD email sent: {subj}")
+                else:
+                    try:
+                        is_usa = verify_usa_relation(case_info["title"])
+                        print(f"STEP 1.5.21: USA relation: {is_usa}")
+                        if is_usa:
+                            print(f"  🇺🇸 USA-related - sending update email")
+                            print(f"STEP 1.5.22: Sending update email")
+                            subj, html = generate_update_email_html(
+                                case_info, changes)
+                            if not send_email_via_webhook(subj, html, {
+                                "title": case_info["title"],
+                                "url": detail_url,
+                                "is_update": True,
+                                "usa_related": True,
+                            }):
+                                collect_error(
+                                    error_items,
+                                    "Failed to send USA-related update email",
+                                    step="send_email",
+                                    context={
+                                        "title": title[:80], "detail_url": detail_url},
+                                )
+                            print(f"STEP 1.5.23: Email sent: {subj}")
+                        else:
+                            print(f"  ℹ️ Not USA-related - no email, updating DB only")
+                    except Exception as e:
+                        logger.exception(f"  Error checking USA relation: {e}")
+                        print(f"STEP 1.5.24: Error checking USA relation: {e}")
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="verify_usa_relation",
+                            context={"title": title[:80],
+                                     "detail_url": detail_url},
+                        )
 
         update_fields = {
             "title": scraped.get("title") or title,
@@ -1001,7 +1061,7 @@ def main():
     error_items: List[Dict[str, Any]] = []
     updated_count = 0
     unchanged_count = 0
-    match_stats = {"llm": 0, "regex": 0}
+    match_stats = {"llm": 0, "regex": 0, "partial": 0}
     open_cases: List[Dict[str, Any]] = []
     logger.info("=" * 60)
     logger.info("STEP 1: Starting UK CMA Cases Update Monitor")
@@ -1081,6 +1141,8 @@ def main():
             f"STEP 1.6.5a: LLM deal matches            : {match_stats['llm']}")
         logger.info(
             f"STEP 1.6.5b: Regex fallback matches      : {match_stats['regex']}")
+        logger.info(
+            f"STEP 1.6.5c: Partial one-side matches    : {match_stats['partial']}")
         logger.info(
             f"STEP 1.6.6: Cases unchanged              : {unchanged_count}")
         logger.info(

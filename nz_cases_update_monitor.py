@@ -23,7 +23,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from openai import OpenAI
 from playwright.sync_api import sync_playwright
-from nz_comcom_case_register_to_db import match_case_to_deal, regex_match_nz_deal
+from nz_comcom_case_register_to_db import match_case_to_deal, match_case_to_deal_partial, regex_match_nz_deal
 from deal_match_llm import fetch_open_deals
 
 from llm_verification_service import verify_usa_relation
@@ -37,7 +37,7 @@ from mongodb_connection import (
 )
 
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
@@ -741,11 +741,17 @@ def send_nz_update_email_via_webhook(
         return False
 
 
-def send_unmatched_nz_usa_email_via_webhook(case_info: Dict[str, Any], changes: List[Tuple[str, Any, Any, str]]) -> bool:
+def send_unmatched_nz_usa_email_via_webhook(
+    case_info: Dict[str, Any],
+    changes: List[Tuple[str, Any, Any, str]],
+    partial_side: Optional[str] = None,
+) -> bool:
     """Send USA-related unmatched NZ case email via webhook."""
     try:
         subject, html_email = generate_unmatched_nz_usa_email_html(
             case_info, changes)
+        if partial_side:
+            subject = apply_partial_match_subject(subject, partial_side)
         payload = {
             "subject": subject,
             "html": html_email,
@@ -804,6 +810,7 @@ def run():
     total_updated = 0
     llm_match_count = 0
     regex_match_count = 0
+    partial_match_count = 0
 
     logger.info("=" * 60)
     logger.info("Starting NZ Cases Update Monitor")
@@ -1075,44 +1082,79 @@ def run():
                                 else:
                                     updated_case["deal_id"] = deal_id
                             else:
-                                is_usa = False
+                                partial_match = None
                                 try:
-                                    nz_details = {
-                                        "title": title,
-                                        "parties": parties,
-                                        "description": description,
-                                        "case_details": updated_case.get("case_details"),
-                                    }
-                                    is_usa = bool(verify_usa_relation(
-                                        company_details=nz_details, case_type="NZ"))
+                                    partial_match = match_case_to_deal_partial(
+                                        title or "", parties, description or "", deals)
                                 except Exception as e:
                                     logger.exception(
-                                        f"[STEP 2.19] USA check error: {e}")
+                                        f"[STEP 2.18b] Partial deal matching error: {e}")
                                     collect_error(
                                         error_items,
                                         str(e),
-                                        step="verify_usa_relation",
+                                        step="match_case_to_deal_partial",
                                         case_number=case_number or None,
                                         context={"detail_url": detail_url},
                                     )
 
-                                logger.info(f"[STEP 2.19] is_usa: {is_usa}")
-                                if is_usa:
+                                if partial_match:
+                                    _partial_deal_id, partial_side = partial_match
+                                    partial_match_count += 1
                                     logger.info(
-                                        f"[STEP 2.20] USA-related – sending email and updating")
+                                        "[STEP 2.18b] Partial match (deal_id=%s side=%s) "
+                                        "— sending FRPMD email, not storing deal_id",
+                                        _partial_deal_id, partial_side,
+                                    )
                                     if not send_unmatched_nz_usa_email_via_webhook(
-                                        updated_case, changes
+                                        updated_case, changes,
+                                        partial_side=partial_side,
                                     ):
                                         collect_error(
                                             error_items,
-                                            "Failed to send USA-related email",
+                                            "Failed to send FRPMD email",
                                             step="send_email",
                                             case_number=case_number or None,
                                             context={"detail_url": detail_url},
                                         )
                                 else:
-                                    logger.info(
-                                        f"[STEP 2.21] Not USA-related – updating only")
+                                    is_usa = False
+                                    try:
+                                        nz_details = {
+                                            "title": title,
+                                            "parties": parties,
+                                            "description": description,
+                                            "case_details": updated_case.get("case_details"),
+                                        }
+                                        is_usa = bool(verify_usa_relation(
+                                            company_details=nz_details, case_type="NZ"))
+                                    except Exception as e:
+                                        logger.exception(
+                                            f"[STEP 2.19] USA check error: {e}")
+                                        collect_error(
+                                            error_items,
+                                            str(e),
+                                            step="verify_usa_relation",
+                                            case_number=case_number or None,
+                                            context={"detail_url": detail_url},
+                                        )
+
+                                    logger.info(f"[STEP 2.19] is_usa: {is_usa}")
+                                    if is_usa:
+                                        logger.info(
+                                            f"[STEP 2.20] USA-related – sending email and updating")
+                                        if not send_unmatched_nz_usa_email_via_webhook(
+                                            updated_case, changes
+                                        ):
+                                            collect_error(
+                                                error_items,
+                                                "Failed to send USA-related email",
+                                                step="send_email",
+                                                case_number=case_number or None,
+                                                context={"detail_url": detail_url},
+                                            )
+                                    else:
+                                        logger.info(
+                                            f"[STEP 2.21] Not USA-related – updating only")
 
                         if update_nz_case_document(nz_collection, case_doc["_id"], updated_case):
                             total_updated += 1
@@ -1165,6 +1207,8 @@ def run():
             f"[STEP 2.25a] LLM deal matches            : {llm_match_count}")
         logger.info(
             f"[STEP 2.25b] Regex fallback matches      : {regex_match_count}")
+        logger.info(
+            f"[STEP 2.25c] Partial one-side matches    : {partial_match_count}")
         logger.info(
             f"[STEP 2.26] Errors encountered           : {len(error_items)}")
         logger.info(f"[STEP 2.27] Total time                   : {elapsed}s")

@@ -24,7 +24,7 @@ from logging.handlers import RotatingFileHandler
 import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
-from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_llm import llm_match_deal_id, llm_match_partial_deal, fetch_open_deals
 from deal_match_regex import regex_match_bka_deal
 from dotenv import load_dotenv
 from datetime import datetime, date, timedelta, timezone
@@ -37,7 +37,7 @@ from html import escape as escape_html
 from llm_verification_service import verify_country_relation
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
@@ -453,6 +453,20 @@ def match_deal_with_llm(pursue_en: str, deals: List[Dict]) -> Optional[str]:
     )
 
 
+def match_deal_partial(
+    pursue_en: str, deals: List[Dict]
+) -> Optional[Tuple[str, str]]:
+    """One-side LLM match after FRMD and FRRMD fail. Returns (deal_id, side) or None."""
+    if not pursue_en or pursue_en == "[Translation failed]":
+        return None
+    return llm_match_partial_deal(
+        regulator_name="German Bundeskartellamt (Laufende Verfahren)",
+        case_sections={"TRANSLATED TEXT": pursue_en},
+        source_label="the German case text",
+        deals=deals if deals else None,
+    )
+
+
 def parse_llm_match(result: str, deal_by_id: Dict) -> Tuple[Optional[Dict], str, str]:
     """Look up deal dict by deal_id. Returns (deal_match, '', '') or (None, '', '')."""
     if not result or result.strip().lower() == "none":
@@ -524,12 +538,16 @@ def generate_matched_email(record: Dict, deal: Dict) -> Tuple[str, str]:
     return subject, html
 
 
-def generate_usa_related_email(record: Dict) -> Tuple[str, str]:
+def generate_usa_related_email(
+    record: Dict, partial_side: Optional[str] = None
+) -> Tuple[str, str]:
     fn = record.get("file_number", "N/A")
     pursue_en = record.get("pursue_en", "N/A")
     file_number = record.get("file_number", "N/A")
 
     subject = build_subject("bundeskartellamt", "new")
+    if partial_side:
+        subject = apply_partial_match_subject(subject, partial_side)
 
     usa_banner = """
 <div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
@@ -583,7 +601,7 @@ def main():
     error_items: List[Dict[str, Any]] = []
     all_raw_records: List[Dict] = []
     stats = {"new": 0, "skipped": 0, "matched": 0,
-             "regex_matched": 0, "usa_related": 0, "saved": 0}
+             "regex_matched": 0, "partial_matched": 0, "usa_related": 0, "saved": 0}
     cutoff = CUTOFF_DATE.date() if isinstance(
         CUTOFF_DATE, datetime) else CUTOFF_DATE
     logger.info("=" * 60)
@@ -680,6 +698,7 @@ def main():
 
                 deal_match = None
                 matched_by_regex = False
+                partial_match = None
 
                 if pursue_en and pursue_en != "[Translation failed]":
                     try:
@@ -719,30 +738,50 @@ def main():
                     logger.info(
                         f"  Matched: deal_id={deal_match.get('deal_id')}")
                 else:
-                    logger.info(f"  No deal match")
                     try:
-                        company_details = {
-                            "today_date": datetime.now().strftime("%Y-%m-%d"),
-                            "record": record,
-                        }
-                        is_usa = verify_country_relation(
-                            company_details=company_details, country="USA", case_type="GERMANY"
-                        )
+                        partial_match = match_deal_partial(pursue_en, deals)
                     except Exception as e:
-                        logger.exception(f"USA check failed: {e}")
+                        logger.exception(f"Partial match failed: {e}")
                         collect_error(
                             error_items,
                             str(e),
-                            step="verify_country_relation",
+                            step="match_deal_partial",
                             context={"file_number": fn},
                         )
-                        is_usa = False
+                        partial_match = None
 
-                    if is_usa:
+                    if partial_match:
+                        _partial_deal_id, _partial_side = partial_match
                         logger.info(
-                            f"  USA-related (notify only if new insert)")
+                            "  Partial match (deal_id=%s side=%s) "
+                            "— FRPMD email on first insert, not storing deal_id",
+                            _partial_deal_id, _partial_side,
+                        )
                     else:
-                        logger.info(f"  Not USA-related → silent save")
+                        logger.info(f"  No deal match")
+                        try:
+                            company_details = {
+                                "today_date": datetime.now().strftime("%Y-%m-%d"),
+                                "record": record,
+                            }
+                            is_usa = verify_country_relation(
+                                company_details=company_details, country="USA", case_type="GERMANY"
+                            )
+                        except Exception as e:
+                            logger.exception(f"USA check failed: {e}")
+                            collect_error(
+                                error_items,
+                                str(e),
+                                step="verify_country_relation",
+                                context={"file_number": fn},
+                            )
+                            is_usa = False
+
+                        if is_usa:
+                            logger.info(
+                                f"  USA-related (notify only if new insert)")
+                        else:
+                            logger.info(f"  Not USA-related → silent save")
 
                 doc_id, inserted_new = upsert_german_case(
                     gc_collection, record)
@@ -768,6 +807,20 @@ def main():
                                 collect_error(
                                     error_items,
                                     "Failed to send matched-case email",
+                                    step="send_email",
+                                    context={"file_number": fn},
+                                )
+                        elif partial_match:
+                            _partial_deal_id, partial_side = partial_match
+                            logger.info(
+                                f"  Sending [FRPMD] email (first insert)")
+                            subject, html = generate_usa_related_email(
+                                record, partial_side=partial_side)
+                            stats["partial_matched"] += 1
+                            if not send_email_via_webhook(subject, html, fn):
+                                collect_error(
+                                    error_items,
+                                    "Failed to send FRPMD email",
                                     step="send_email",
                                     context={"file_number": fn},
                                 )
@@ -833,6 +886,8 @@ def main():
         logger.info(f"  Deal matches (LLM)           : {stats['matched']}")
         logger.info(
             f"  Deal matches (regex)         : {stats['regex_matched']}")
+        logger.info(
+            f"  Partial one-side matches     : {stats['partial_matched']}")
         logger.info(f"  USA-related                  : {stats['usa_related']}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")

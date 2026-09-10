@@ -12,7 +12,7 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
 
 import requests
@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from playwright.sync_api import sync_playwright
 
-from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_llm import llm_match_deal_id, llm_match_partial_deal, fetch_open_deals
 from deal_match_regex import regex_match_nz_deal
 from llm_verification_service import verify_usa_relation
 from scraper_error_utils import collect_error, send_error_summary
@@ -34,7 +34,7 @@ from mongodb_connection import (
 )
 
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
@@ -186,6 +186,26 @@ def match_case_to_deal(
     )
 
 
+def match_case_to_deal_partial(
+    title: str,
+    parties: str,
+    description: str,
+    deals: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Tuple[str, str]]:
+    """One-side LLM match after FRMD and FRRMD fail. Returns (deal_id, side) or None."""
+    return llm_match_partial_deal(
+        regulator_name="NZ Commerce Commission",
+        case_sections={
+            "CASE TITLE": title,
+            "PARTIES": parties,
+            "DESCRIPTION": description,
+        },
+        source_label="the NZ case text (title, parties, description)",
+        source_label_step1="the NZ case text (title, parties, description) (acquirer or target)",
+        deals=deals,
+    )
+
+
 def _post_webhook(payload: Dict[str, Any]) -> bool:
     logger.info(f"   Sending email: {payload.get('subject', 'N/A')}")
     return post_email_payload(payload)
@@ -236,7 +256,10 @@ def send_nz_new_case_matched_email(
     return _post_webhook(payload)
 
 
-def send_unmatched_nz_usa_email_via_webhook(case_info: Dict[str, Any]) -> bool:
+def send_unmatched_nz_usa_email_via_webhook(
+    case_info: Dict[str, Any],
+    partial_side: Optional[str] = None,
+) -> bool:
     """Send USA-related unmatched NZ case email via webhook."""
     details = case_info.get("case_details") or {}
     case_number = details.get("Case number", "N/A")
@@ -247,6 +270,8 @@ def send_unmatched_nz_usa_email_via_webhook(case_info: Dict[str, Any]) -> bool:
     detail_url = case_info.get("detail_url", "")
 
     subject = build_subject("nz_comcom", "new")
+    if partial_side:
+        subject = apply_partial_match_subject(subject, partial_side)
     html = f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -545,6 +570,7 @@ def run():
     updated = 0
     llm_match_count = 0
     regex_match_count = 0
+    partial_match_count = 0
     env_flag = os.getenv("NZ_CASES_TEST_MODE", "").lower()
     test_mode = env_flag in ("1", "true", "yes", "y")
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"
@@ -681,43 +707,78 @@ def run():
                                         context={"detail_url": detail_url},
                                     )
                         else:
-                            is_usa = False
+                            partial_match = None
                             try:
-                                nz_details = {
-                                    "title": title,
-                                    "parties": parties,
-                                    "description": description,
-                                    "case_details": doc.get("case_details"),
-                                    "detail_url": detail_url,
-                                    "tag": doc.get("tag", ""),
-                                    "status": doc.get("status", ""),
-                                }
-                                is_usa = bool(
-                                    verify_usa_relation(
-                                        company_details=nz_details, case_type="NZ")
-                                )
+                                partial_match = match_case_to_deal_partial(
+                                    title or "", parties, description or "", deals)
                             except Exception as e:
-                                logger.exception(f"[STEP 2.6] USA verification error: {e}")
+                                logger.exception(
+                                    f"[STEP 2.5c] Partial deal matching error: {e}")
                                 collect_error(
                                     error_items,
                                     str(e),
-                                    step="verify_usa_relation",
+                                    step="match_case_to_deal_partial",
                                     case_number=case_number or None,
                                     context={"title": title, "detail_url": detail_url},
                                 )
-                                is_usa = False
 
-                            if is_usa:
-                                logger.info("[STEP 2.7] USA-related (unmatched)")
+                            if partial_match:
+                                _partial_deal_id, partial_side = partial_match
+                                partial_match_count += 1
+                                logger.info(
+                                    "[STEP 2.5c] Partial match (deal_id=%s side=%s) "
+                                    "— sending FRPMD email, not storing deal_id",
+                                    _partial_deal_id, partial_side,
+                                )
                                 if not test_mode:
-                                    if not send_unmatched_nz_usa_email_via_webhook(doc):
+                                    if not send_unmatched_nz_usa_email_via_webhook(
+                                        doc, partial_side=partial_side,
+                                    ):
                                         collect_error(
                                             error_items,
-                                            "Failed to send USA-related email",
+                                            "Failed to send FRPMD email",
                                             step="send_email",
                                             case_number=case_number or None,
                                             context={"detail_url": detail_url},
                                         )
+                            else:
+                                is_usa = False
+                                try:
+                                    nz_details = {
+                                        "title": title,
+                                        "parties": parties,
+                                        "description": description,
+                                        "case_details": doc.get("case_details"),
+                                        "detail_url": detail_url,
+                                        "tag": doc.get("tag", ""),
+                                        "status": doc.get("status", ""),
+                                    }
+                                    is_usa = bool(
+                                        verify_usa_relation(
+                                            company_details=nz_details, case_type="NZ")
+                                    )
+                                except Exception as e:
+                                    logger.exception(f"[STEP 2.6] USA verification error: {e}")
+                                    collect_error(
+                                        error_items,
+                                        str(e),
+                                        step="verify_usa_relation",
+                                        case_number=case_number or None,
+                                        context={"title": title, "detail_url": detail_url},
+                                    )
+                                    is_usa = False
+
+                                if is_usa:
+                                    logger.info("[STEP 2.7] USA-related (unmatched)")
+                                    if not test_mode:
+                                        if not send_unmatched_nz_usa_email_via_webhook(doc):
+                                            collect_error(
+                                                error_items,
+                                                "Failed to send USA-related email",
+                                                step="send_email",
+                                                case_number=case_number or None,
+                                                context={"detail_url": detail_url},
+                                            )
 
                         try:
                             if test_mode:
@@ -780,6 +841,7 @@ def run():
         logger.info(f"[STEP 2.15] Skipped (already in DB)      : {skipped}")
         logger.info(f"[STEP 2.15a] LLM deal matches            : {llm_match_count}")
         logger.info(f"[STEP 2.15b] Regex fallback matches      : {regex_match_count}")
+        logger.info(f"[STEP 2.15c] Partial one-side matches    : {partial_match_count}")
         logger.info(
             f"[STEP 2.16] Errors encountered           : {len(error_items)}")
         logger.info(f"[STEP 2.17] Total time                   : {elapsed}s")

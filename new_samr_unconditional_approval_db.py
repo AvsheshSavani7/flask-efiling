@@ -10,7 +10,7 @@ import sys
 import traceback
 from logging.handlers import RotatingFileHandler
 from openai import OpenAI
-from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_llm import llm_match_deal_id, llm_match_partial_deal, fetch_open_deals
 from deal_match_regex import apply_regex_match_subject, regex_match_samr_deal
 from bs4 import BeautifulSoup
 import re
@@ -25,7 +25,7 @@ from html import escape as escape_html
 from llm_verification_service import verify_usa_relation
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from n8n_email_service import post_email_payload
 from typing import Any, Optional, Tuple
 
@@ -119,6 +119,7 @@ all_extracted_records = []
 matched_data = []
 llm_match_count = 0
 regex_match_count = 0
+partial_match_count = 0
 
 
 # ---------------------------------------------------------------------------
@@ -626,6 +627,28 @@ def match_samr_case_to_deals(samr_case) -> Tuple[Optional[dict], bool]:
     return None, False
 
 
+def match_samr_case_to_deals_partial(samr_case) -> Optional[Tuple[str, str]]:
+    """One-side LLM match after FRMD and FRRMD fail. Returns (deal_id, side) or None."""
+    global deals
+    if not deals:
+        load_deals()
+    if not deals:
+        return None
+
+    title_en = samr_case.get("title_en", "")
+    title_cn = samr_case.get("title_cn", "")
+    return llm_match_partial_deal(
+        regulator_name="SAMR China",
+        case_sections={
+            "TITLE (English)": title_en,
+            "TITLE (Chinese)": title_cn,
+        },
+        source_label="the public notice title",
+        source_label_step1="the public notice title (acquirer or target)",
+        deals=deals,
+    )
+
+
 def convert_datetime_to_string(obj):
     if isinstance(obj, datetime.datetime):
         return obj.isoformat()
@@ -857,10 +880,14 @@ def generate_unmatched_unconditional_email_html(samr_case, unconditional_data, u
     return subject, html_email
 
 
-def send_unmatched_unconditional_email_via_webhook(samr_case, unconditional_data, usa_companies):
+def send_unmatched_unconditional_email_via_webhook(
+    samr_case, unconditional_data, usa_companies, partial_side: Optional[str] = None,
+):
     try:
         subject, html_email = generate_unmatched_unconditional_email_html(
             samr_case, unconditional_data, usa_companies)
+        if partial_side:
+            subject = apply_partial_match_subject(subject, partial_side)
         logger.info(f"Generated email subject: {subject}")
 
         payload = {
@@ -956,7 +983,8 @@ def process_table_row(table_row, samr_cases_list, listing_record, error_items: l
     2. If matched → set is_open=false, add unconditional node
        a. If samr_case has deal_id → email "unconditionally closed"
        b. If no deal_id → LLM match against deals → email if matched
-       c. If no deal match → check USA-related → email if yes
+       c. If no both-sides match → one-side FRPMD (unmatched body, no deal_id)
+       d. If no FRPMD → check USA-related → email if yes
     3. If not matched → skip (no samr_cases record to link to)
     """
     row_label = f"Row {table_row['serial']}: {table_row['case_name_en'][:50]}"
@@ -1061,46 +1089,77 @@ def process_table_row(table_row, samr_cases_list, listing_record, error_items: l
                 "unconditional": unconditional_data,
             })
         else:
-            # Case C: no deal match → check USA-related
-            logger.info("  No deal match. Checking USA relation...")
-            update_samr_case_unconditional(matched_case, unconditional_data)
-
+            # Case C: no both-sides match → FRPMD, then USA-related
+            logger.info("  No deal match. Trying one-side FRPMD match...")
+            global partial_match_count
+            partial_match = None
             try:
-                company_details = f"""
+                partial_match = match_samr_case_to_deals_partial(matched_case)
+            except Exception as e:
+                logger.exception(f"  Partial deal match failed for {row_label}: {e}")
+                if error_items is not None:
+                    collect_error(
+                        error_items,
+                        str(e),
+                        step="match_samr_case_to_deals_partial",
+                        context={
+                            "title": case_title[:80],
+                            "url": listing_record.get("url", ""),
+                        },
+                    )
+
+            if partial_match:
+                _partial_deal_id, partial_side = partial_match
+                partial_match_count += 1
+                logger.info(
+                    "  Partial match (deal_id=%s side=%s) "
+                    "— sending FRPMD email, not storing deal_id",
+                    _partial_deal_id, partial_side,
+                )
+                update_samr_case_unconditional(matched_case, unconditional_data)
+                send_unmatched_unconditional_email_via_webhook(
+                    matched_case, unconditional_data, [],
+                    partial_side=partial_side)
+            else:
+                logger.info("  No deal match. Checking USA relation...")
+                update_samr_case_unconditional(matched_case, unconditional_data)
+
+                try:
+                    company_details = f"""
 Title (EN): {matched_case.get('title_en', '')}
 Title (CN): {matched_case.get('title_cn', '')}
 Operators (EN): {table_row['operators_en']}
 Operators (CN): {table_row['operators_cn']}
 """.strip()
 
-                usa_companies = verify_usa_relation(
-                    company_details=company_details,
-                    case_type="CHINA-UNCONDITIONAL",
-                )
-
-                if isinstance(usa_companies, bool):
-                    usa_companies = []
-                elif not isinstance(usa_companies, list):
-                    usa_companies = []
-
-                if usa_companies:
-                    logger.info(f"  USA-related: {usa_companies}")
-                    send_unmatched_unconditional_email_via_webhook(
-                        matched_case, unconditional_data, usa_companies)
-                else:
-                    logger.info("  Not USA-related – no email")
-            except Exception as e:
-                logger.exception(f"  Error verifying USA relation: {e}")
-                if error_items is not None:
-                    collect_error(
-                        error_items,
-                        str(e),
-                        step="verify_usa_relation",
-                        context={
-                            "title": case_title[:80],
-                            "url": listing_record.get("url", ""),
-                        },
+                    usa_companies = verify_usa_relation(
+                        company_details=company_details,
+                        case_type="CHINA-UNCONDITIONAL",
                     )
+
+                    if isinstance(usa_companies, bool):
+                        usa_companies = []
+                    elif not isinstance(usa_companies, list):
+                        usa_companies = []
+
+                    if usa_companies:
+                        logger.info(f"  USA-related: {usa_companies}")
+                        send_unmatched_unconditional_email_via_webhook(
+                            matched_case, unconditional_data, usa_companies)
+                    else:
+                        logger.info("  Not USA-related – no email")
+                except Exception as e:
+                    logger.exception(f"  Error verifying USA relation: {e}")
+                    if error_items is not None:
+                        collect_error(
+                            error_items,
+                            str(e),
+                            step="verify_usa_relation",
+                            context={
+                                "title": case_title[:80],
+                                "url": listing_record.get("url", ""),
+                            },
+                        )
 
 
 # ---------------------------------------------------------------------------
@@ -1110,7 +1169,7 @@ Operators (CN): {table_row['operators_cn']}
 def main(headless=True):
     global LOG_FILE
     LOG_FILE = refresh_log_file(logger, LOG_FILE, _get_log_file)
-    global all_extracted_records, matched_data, deals, llm_match_count, regex_match_count
+    global all_extracted_records, matched_data, deals, llm_match_count, regex_match_count, partial_match_count
     run_start = datetime.datetime.now()
     error_items: list[dict[str, Any]] = []
 
@@ -1121,6 +1180,7 @@ def main(headless=True):
     translated = 0
     llm_match_count = 0
     regex_match_count = 0
+    partial_match_count = 0
     logger.info("=" * 60)
     logger.info("Starting SAMR Unconditional Cases Register")
     logger.info(f"Log file: {LOG_FILE}")
@@ -1330,6 +1390,7 @@ def main(headless=True):
         logger.info(f"  Total matches found          : {len(matched_data)}")
         logger.info(f"  LLM deal matches             : {llm_match_count}")
         logger.info(f"  Regex fallback matches       : {regex_match_count}")
+        logger.info(f"  Partial one-side matches     : {partial_match_count}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")
         logger.info("=" * 60)

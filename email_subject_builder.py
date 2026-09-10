@@ -11,6 +11,8 @@ Subject formats:
                   target = target_ticker, else target_name/target, else "Unknown"
                   acquirer = acquirer_ticker, else acquirer/acquire_name (omit if absent)
   Unmatched (FRUD): "{Agency} - {Event Label} - [FRUD]"
+  Partial (FRPMD):  "{Agency} - {Event Label} - [FRPMD-A]" or "[FRPMD-T]"
+                    same unmatched body as FRUD; tag set by apply_partial_match_subject
 """
 
 from typing import Optional
@@ -126,3 +128,20 @@ def build_subject(
         return f"{prefix}{agency} - {label} - [FRMD]"
     else:
         return f"{agency} - {label} - [FRUD]"
+
+
+def partial_match_tag(side: str) -> str:
+    """[FRPMD-A] for acquirer side, [FRPMD-T] for target side."""
+    if (side or "").lower().startswith("acquir"):
+        return "[FRPMD-A]"
+    return "[FRPMD-T]"
+
+
+def apply_partial_match_subject(subject: str, side: str) -> str:
+    """Replace [FRUD] (or [FRMD]) with [FRPMD-A] / [FRPMD-T]."""
+    tag = partial_match_tag(side)
+    if "[FRUD]" in (subject or ""):
+        return subject.replace("[FRUD]", tag)
+    if "[FRMD]" in (subject or ""):
+        return subject.replace("[FRMD]", tag)
+    return subject

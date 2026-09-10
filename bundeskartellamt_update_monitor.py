@@ -40,12 +40,12 @@ from mongodb_connection import (
 )
 from html import escape as escape_html
 from llm_verification_service import verify_country_relation
-from bundeskartellamt_initial_proxy import match_deal_with_llm
+from bundeskartellamt_initial_proxy import match_deal_partial, match_deal_with_llm
 from deal_match_regex import regex_match_bka_deal
 from deal_match_llm import fetch_open_deals
 from scraper_error_utils import collect_error, send_error_summary
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
@@ -434,7 +434,8 @@ def _build_case_info_html(stored: Dict) -> str:
 
 
 def generate_update_email(stored: Dict, changes: List[Tuple[str, str, str]],
-                          deal: Optional[Dict]) -> Tuple[str, str]:
+                          deal: Optional[Dict],
+                          partial_side: Optional[str] = None) -> Tuple[str, str]:
     fn = stored.get("file_number", "N/A")
     change_summary = ", ".join(FIELD_LABELS.get(f, f) for f, _, _ in changes)
 
@@ -454,6 +455,8 @@ def generate_update_email(stored: Dict, changes: List[Tuple[str, str, str]],
         prefix = "[FRUD]"
         pursue_en = stored.get("pursue_en", "N/A")
         subject = build_subject("bundeskartellamt", "update")
+        if partial_side:
+            subject = apply_partial_match_subject(subject, partial_side)
         banner = """
 <div style="background:#fef3c7;border-radius:6px;padding:14px 20px;margin-bottom:18px;border-left:4px solid #f59e0b;">
   <div style="font-weight:800;color:#92400e;">USA-Related (Unmatched)</div>
@@ -516,7 +519,8 @@ def main():
     run_start = time.time()
     error_items: List[Dict[str, Any]] = []
     stats = {"checked": 0, "unchanged": 0, "updated": 0, "not_found": 0,
-             "email_sent": 0, "matched_new": 0, "regex_matched_new": 0, "usa_related": 0}
+             "email_sent": 0, "matched_new": 0, "regex_matched_new": 0,
+             "partial_matched_new": 0, "usa_related": 0}
     logger.info("=" * 60)
     logger.info("[STEP 1] Starting Germany Cases Update Monitor")
     logger.info(f"Log file: {LOG_FILE}")
@@ -709,44 +713,78 @@ def main():
                                          "deal_id": deal_match.get("deal_id")},
                             )
                     else:
-                        logger.info(f"  No deal match")
+                        partial_match = None
                         try:
-                            company_details = {
-                                "today_date": datetime.now().strftime("%Y-%m-%d"),
-                                "record": merged,
-                            }
-                            is_usa = verify_country_relation(
-                                company_details=company_details, country="USA", case_type="GERMANY"
-                            )
+                            partial_match = match_deal_partial(pursue_en, deals)
                         except Exception as e:
-                            logger.exception(f"USA check failed: {e}")
+                            logger.exception(f"Partial match failed: {e}")
                             collect_error(
                                 error_items,
                                 str(e),
-                                step="verify_country_relation",
+                                step="match_deal_partial",
                                 context={"file_number": fn},
                             )
-                            is_usa = False
 
-                        if is_usa:
+                        if partial_match:
+                            _partial_deal_id, partial_side = partial_match
                             logger.info(
-                                f"  USA-related → sending [FRUD] update email")
+                                "  Partial match (deal_id=%s side=%s) "
+                                "— sending FRPMD email, not storing deal_id",
+                                _partial_deal_id, partial_side,
+                            )
                             subject, html = generate_update_email(
-                                merged, changes, None)
+                                merged, changes, None, partial_side=partial_side)
                             stats["email_sent"] += 1
-                            stats["usa_related"] += 1
+                            stats["partial_matched_new"] += 1
                             if not send_email_via_webhook(
                                 subject, html, fn,
                                 changed_fields=changed_field_names,
                             ):
                                 collect_error(
                                     error_items,
-                                    "Failed to send USA-related update email",
+                                    "Failed to send FRPMD update email",
                                     step="send_email",
                                     context={"file_number": fn},
                                 )
                         else:
-                            logger.info(f"  Not USA-related → silent update")
+                            logger.info(f"  No deal match")
+                            try:
+                                company_details = {
+                                    "today_date": datetime.now().strftime("%Y-%m-%d"),
+                                    "record": merged,
+                                }
+                                is_usa = verify_country_relation(
+                                    company_details=company_details, country="USA", case_type="GERMANY"
+                                )
+                            except Exception as e:
+                                logger.exception(f"USA check failed: {e}")
+                                collect_error(
+                                    error_items,
+                                    str(e),
+                                    step="verify_country_relation",
+                                    context={"file_number": fn},
+                                )
+                                is_usa = False
+
+                            if is_usa:
+                                logger.info(
+                                    f"  USA-related → sending [FRUD] update email")
+                                subject, html = generate_update_email(
+                                    merged, changes, None)
+                                stats["email_sent"] += 1
+                                stats["usa_related"] += 1
+                                if not send_email_via_webhook(
+                                    subject, html, fn,
+                                    changed_fields=changed_field_names,
+                                ):
+                                    collect_error(
+                                        error_items,
+                                        "Failed to send USA-related update email",
+                                        step="send_email",
+                                        context={"file_number": fn},
+                                    )
+                            else:
+                                logger.info(f"  Not USA-related → silent update")
 
                 if update_fields and doc_id:
                     ok = update_german_case(
@@ -803,6 +841,8 @@ def main():
         logger.info(f"  New deal matches (LLM)       : {stats['matched_new']}")
         logger.info(
             f"  New deal matches (regex)     : {stats['regex_matched_new']}")
+        logger.info(
+            f"  Partial one-side matches     : {stats['partial_matched_new']}")
         logger.info(f"  USA-related                  : {stats['usa_related']}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")

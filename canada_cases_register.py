@@ -10,10 +10,11 @@ Flow:
 2. Parse rows and filter by CUTOFF_DATE (3 days ago) + concluded_date == "Ongoing"
 3. For each new row:
    - Check if already exists in canada_cases (skip if yes)
-   - LLM call #1: Try to match with existing deals
+   - LLM call #1: Try to match with existing deals (FRMD → FRRMD → FRPMD)
    - LLM call #2 (if no match): Check if USA-related
    - Insert ALL cases into DB (matched, USA-related, or neither) with is_open=True
    - Send rich HTML email notifications for matched / USA-related cases
+     (FRPMD uses unmatched body; does not store deal_id)
 """
 
 
@@ -24,7 +25,7 @@ from mongodb_connection import (
     init_mongodb_connection,
     is_connected,
 )
-from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_llm import llm_match_deal_id, llm_match_partial_deal, fetch_open_deals
 from deal_match_regex import regex_match_canada_deal
 from llm_verification_service import verify_usa_relation
 from scraper_error_utils import collect_error, send_error_summary
@@ -44,7 +45,7 @@ import sys
 
 
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
@@ -281,6 +282,17 @@ def match_case_to_deal(parties: str, deals=None) -> Optional[str]:
     )
 
 
+def match_case_to_deal_partial(parties: str, deals=None) -> Optional[Tuple[str, str]]:
+    """One-side LLM match after FRMD and FRRMD fail. Returns (deal_id, side) or None."""
+    return llm_match_partial_deal(
+        regulator_name="Canada Competition Bureau",
+        case_sections={"PARTIES STRING": parties},
+        source_label="the parties string",
+        source_label_step1="the parties string (acquirer or target)",
+        deals=deals,
+    )
+
+
 def generate_matched_case_email_html(
     case_info: Dict[str, Any], deal: Dict[str, Any]
 ) -> str:
@@ -452,6 +464,7 @@ def run_canada_cases_register(headless: bool = True):
     new_cases: List[Dict[str, Any]] = []
     llm_match_count = 0
     regex_match_count = 0
+    partial_match_count = 0
     logger.info("=" * 60)
     logger.info(f"[STEP 1] Starting Canada Cases Register")
     logger.info(f"Log file: {LOG_FILE}")
@@ -627,47 +640,83 @@ def run_canada_cases_register(headless: bool = True):
                                     "parties": parties[:80], "deal_id": matched_deal_id},
                             )
                 else:
-                    logger.info(
-                        f"[STEP 1.14] LLM Call #2: Checking if USA-related...")
+                    partial_match = None
                     try:
-                        details_for_llm = (
-                            f"Parties: {parties}\n"
-                            f"Industry (NAICS): {row['industry']}\n"
-                            f"Outcome: {row['outcome']}\n"
-                            f"Opened Date: {opened_date}\n"
-                            f"Concluded Date: {row['concluded_date']}"
-                        )
-                        is_usa = verify_usa_relation(
-                            company_details=details_for_llm,
-                            case_type="CANADA",
-                        )
+                        partial_match = match_case_to_deal_partial(
+                            parties, deals=open_deals)
                     except Exception as e:
                         logger.exception(
-                            f"[STEP 1.15] USA relation check error: {e}")
+                            f"[STEP 1.13b] Partial deal matching error: {e}")
                         collect_error(
                             error_items,
                             str(e),
-                            step="verify_usa_relation",
+                            step="match_case_to_deal_partial",
                             context={"parties": parties[:80]},
                         )
-                        is_usa = False
 
-                    if is_usa:
-                        logger.info(f"[STEP 1.16] Case is USA-related")
+                    if partial_match:
+                        _partial_deal_id, partial_side = partial_match
+                        partial_match_count += 1
+                        logger.info(
+                            "[STEP 1.13b] Partial match (deal_id=%s side=%s) "
+                            "— sending FRPMD email, not storing deal_id",
+                            _partial_deal_id, partial_side,
+                        )
                         subject = build_subject("canada", "new")
+                        subject = apply_partial_match_subject(
+                            subject, partial_side)
                         html_email = generate_usa_related_email_html(case_info)
                         if not send_email_via_webhook(
                             subject, html_email, case_info, usa_related=True
                         ):
                             collect_error(
                                 error_items,
-                                "Failed to send USA-related email",
+                                "Failed to send FRPMD email",
                                 step="send_email",
                                 context={"parties": parties[:80]},
                             )
                     else:
                         logger.info(
-                            f"[STEP 1.17] Not matched and not USA-related")
+                            f"[STEP 1.14] LLM Call #2: Checking if USA-related...")
+                        try:
+                            details_for_llm = (
+                                f"Parties: {parties}\n"
+                                f"Industry (NAICS): {row['industry']}\n"
+                                f"Outcome: {row['outcome']}\n"
+                                f"Opened Date: {opened_date}\n"
+                                f"Concluded Date: {row['concluded_date']}"
+                            )
+                            is_usa = verify_usa_relation(
+                                company_details=details_for_llm,
+                                case_type="CANADA",
+                            )
+                        except Exception as e:
+                            logger.exception(
+                                f"[STEP 1.15] USA relation check error: {e}")
+                            collect_error(
+                                error_items,
+                                str(e),
+                                step="verify_usa_relation",
+                                context={"parties": parties[:80]},
+                            )
+                            is_usa = False
+
+                        if is_usa:
+                            logger.info(f"[STEP 1.16] Case is USA-related")
+                            subject = build_subject("canada", "new")
+                            html_email = generate_usa_related_email_html(case_info)
+                            if not send_email_via_webhook(
+                                subject, html_email, case_info, usa_related=True
+                            ):
+                                collect_error(
+                                    error_items,
+                                    "Failed to send USA-related email",
+                                    step="send_email",
+                                    context={"parties": parties[:80]},
+                                )
+                        else:
+                            logger.info(
+                                f"[STEP 1.17] Not matched and not USA-related")
 
                 inserted_id = insert_case(collection, case_info)
                 if inserted_id:
@@ -723,6 +772,7 @@ def run_canada_cases_register(headless: bool = True):
         logger.info(f"  New cases inserted           : {len(new_cases)}")
         logger.info(f"  LLM deal matches             : {llm_match_count}")
         logger.info(f"  Regex fallback matches       : {regex_match_count}")
+        logger.info(f"  Partial one-side matches     : {partial_match_count}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")
         logger.info("=" * 60)

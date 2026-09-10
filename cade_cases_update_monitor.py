@@ -30,6 +30,7 @@ from mongodb_connection import (
 from cade_cases_register import (
     generate_update_email_html,
     match_case_to_deal,
+    match_case_to_deal_partial,
     regex_match_cade_deal,
 )
 from deal_match_llm import fetch_open_deals
@@ -1086,9 +1087,13 @@ def send_update_email(
     changes: List[Tuple[str, Any, Any, str]],
     deal: Optional[Dict[str, Any]],
     matched_by_regex: bool = False,
+    partial_side: Optional[str] = None,
 ) -> bool:
     subject, html = generate_update_email_html(
-        case_data, changes, deal, matched_by_regex=matched_by_regex)
+        case_data, changes, deal,
+        matched_by_regex=matched_by_regex,
+        partial_side=partial_side,
+    )
     print(f"    📤 Sending email: {subject}")
     return _post_email_payload({
         "subject": subject,
@@ -1125,6 +1130,7 @@ def process_brazil_cases_updates(headless: bool = True):
     total_changed = 0
     llm_match_count = 0
     regex_match_count = 0
+    partial_match_count = 0
     summariser_pool: Optional[_ImmediateFrmdSummariser] = None
     cases_collection = None
 
@@ -1509,44 +1515,83 @@ def process_brazil_cases_updates(headless: bool = True):
                                     )
                                 )
                         else:
-                            is_usa = False
+                            partial_match = None
                             if interessados_text:
                                 try:
-                                    company_details = (
-                                        f"Process: {process_num}\n"
-                                        f"Type: {live_type}\n"
-                                        f"Registration Date: {case_doc.get('registration_date', '')}\n"
-                                        f"Interested Parties (PT): {interessados_text}\n"
-                                        f"Interested Parties (EN): {case_doc.get('interessados_en', '')}\n"
-                                        f"Detail URL: {detail_url}"
+                                    partial_match = match_case_to_deal_partial(
+                                        interessados_text, translated_text,
+                                        deals=open_deals,
                                     )
-                                    is_usa = bool(verify_usa_relation(
-                                        company_details=company_details,
-                                        case_type="BRAZIL",
-                                    ))
                                 except Exception as e:
                                     logger.exception(
-                                        f"[STEP 2.18] Error verifying USA relation: {e}")
+                                        f"[STEP 2.15c] Error during partial deal matching: {e}")
                                     collect_error(
                                         error_items,
                                         str(e),
-                                        step="verify_usa_relation",
+                                        step="match_case_to_deal_partial",
                                         context={"process": process_num,
                                                  "detail_url": detail_url},
                                     )
 
-                            if is_usa:
+                            if partial_match:
+                                _partial_deal_id, partial_side = partial_match
+                                partial_match_count += 1
                                 logger.info(
-                                    "[STEP 2.19] USA-related — sending email")
+                                    "[STEP 2.16c] Partial match (deal_id=%s side=%s) "
+                                    "— sending FRPMD email, not storing deal_id",
+                                    _partial_deal_id, partial_side,
+                                )
                                 _enrich_notified_changes(context, changes)
-                                if not send_update_email(case_doc, changes, None):
+                                if not send_update_email(
+                                    case_doc, changes, None,
+                                    partial_side=partial_side,
+                                ):
                                     collect_error(
                                         error_items,
-                                        "Failed to send update email",
+                                        "Failed to send FRPMD update email",
                                         step="send_email",
                                         context={"process": process_num,
                                                  "detail_url": detail_url},
                                     )
+                            else:
+                                is_usa = False
+                                if interessados_text:
+                                    try:
+                                        company_details = (
+                                            f"Process: {process_num}\n"
+                                            f"Type: {live_type}\n"
+                                            f"Registration Date: {case_doc.get('registration_date', '')}\n"
+                                            f"Interested Parties (PT): {interessados_text}\n"
+                                            f"Interested Parties (EN): {case_doc.get('interessados_en', '')}\n"
+                                            f"Detail URL: {detail_url}"
+                                        )
+                                        is_usa = bool(verify_usa_relation(
+                                            company_details=company_details,
+                                            case_type="BRAZIL",
+                                        ))
+                                    except Exception as e:
+                                        logger.exception(
+                                            f"[STEP 2.18] Error verifying USA relation: {e}")
+                                        collect_error(
+                                            error_items,
+                                            str(e),
+                                            step="verify_usa_relation",
+                                            context={"process": process_num,
+                                                     "detail_url": detail_url},
+                                        )
+
+                                if is_usa:
+                                    logger.info(
+                                        "[STEP 2.19] USA-related — sending email")
+                                    _enrich_notified_changes(context, changes)
+                                    if not send_update_email(case_doc, changes, None):
+                                        collect_error(
+                                            error_items,
+                                            "Failed to send update email",
+                                            step="send_email",
+                                            context={"process": process_num,
+                                                     "detail_url": detail_url},
+                                        )
 
                             if not update_case_in_db(
                                 cases_collection, case_doc, changes,
@@ -1633,6 +1678,8 @@ def process_brazil_cases_updates(headless: bool = True):
             f"[STEP 2.24a] LLM deal matches            : {llm_match_count}")
         logger.info(
             f"[STEP 2.24b] Regex fallback matches      : {regex_match_count}")
+        logger.info(
+            f"[STEP 2.24c] Partial one-side matches    : {partial_match_count}")
         logger.info(
             f"[STEP 2.25] Errors encountered           : {len(error_items)}")
         logger.info(f"[STEP 2.26] Total time                   : {elapsed}s")

@@ -21,7 +21,7 @@ from mongodb_connection import (
     is_connected,
 )
 from llm_verification_service import verify_usa_relation
-from canada_cases_register import match_case_to_deal, regex_match_canada_deal
+from canada_cases_register import match_case_to_deal, match_case_to_deal_partial, regex_match_canada_deal
 from deal_match_llm import fetch_open_deals
 from scraper_error_utils import collect_error, send_error_summary
 import os
@@ -39,7 +39,7 @@ from openai import OpenAI
 
 
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
@@ -371,6 +371,7 @@ def send_update_email(
     deal: Optional[Dict[str, Any]],
     changes: List[Tuple[str, Any, Any]],
     matched_by_regex: bool = False,
+    partial_side: Optional[str] = None,
 ) -> bool:
     """Send update email via n8n webhook."""
     try:
@@ -384,6 +385,8 @@ def send_update_email(
             deal_id = str(deal.get("_id")) if deal.get("_id") else None
         else:
             subject = build_subject("canada", "update")
+            if partial_side:
+                subject = apply_partial_match_subject(subject, partial_side)
             deal_id = None
 
         payload = {
@@ -439,6 +442,7 @@ def process_canada_cases_updates():
     total_changed = 0
     llm_match_count = 0
     regex_match_count = 0
+    partial_match_count = 0
     logger.info("=" * 60)
     logger.info(f"[STEP 1] Starting Canada Cases Update Monitor")
     logger.info(f"Log file: {LOG_FILE}")
@@ -624,45 +628,78 @@ def process_canada_cases_updates():
                             )
                         new_case_data["deal_id"] = matched_deal_id
                     else:
-                        logger.info("  No deal match; checking if USA-related...")
+                        partial_match = None
                         try:
-                            details_for_llm = (
-                                f"Parties: {parties}\n"
-                                f"Industry (NAICS): {case_doc.get('industry', '')}\n"
-                                f"Outcome: {new_row.get('outcome', '')}\n"
-                                f"Opened Date: {opened_date}\n"
-                                f"Concluded Date: {new_row.get('concluded_date', '')}"
-                            )
-                            is_usa = verify_usa_relation(
-                                company_details=details_for_llm,
-                                case_type="CANADA",
-                            )
-                            logger.info(
-                                f"[STEP 1.20] details_for_llm: {details_for_llm}")
+                            partial_match = match_case_to_deal_partial(
+                                parties, deals=open_deals)
                         except Exception as e:
                             logger.exception(
-                                f"[STEP 1.21] USA relation check error: {e}")
+                                f"[STEP 1.19b] Partial deal matching error: {e}")
                             collect_error(
                                 error_items,
                                 str(e),
-                                step="verify_usa_relation",
+                                step="match_case_to_deal_partial",
                                 context={"parties": parties[:80]},
                             )
-                            is_usa = False
 
-                        if is_usa:
+                        if partial_match:
+                            _partial_deal_id, partial_side = partial_match
+                            partial_match_count += 1
                             logger.info(
-                                f"[STEP 1.22] Case is USA-related; sending update email")
-                            if not send_update_email(case_doc, new_row, None, differences):
+                                "[STEP 1.19b] Partial match (deal_id=%s side=%s) "
+                                "— sending FRPMD email, not storing deal_id",
+                                _partial_deal_id, partial_side,
+                            )
+                            if not send_update_email(
+                                case_doc, new_row, None, differences,
+                                partial_side=partial_side,
+                            ):
                                 collect_error(
                                     error_items,
-                                    "Failed to send USA-related update email",
+                                    "Failed to send FRPMD update email",
                                     step="send_email",
                                     context={"parties": parties[:80]},
                                 )
                         else:
-                            logger.info(
-                                f"[STEP 1.23] Not USA-related; updating DB only (no email)")
+                            logger.info("  No deal match; checking if USA-related...")
+                            try:
+                                details_for_llm = (
+                                    f"Parties: {parties}\n"
+                                    f"Industry (NAICS): {case_doc.get('industry', '')}\n"
+                                    f"Outcome: {new_row.get('outcome', '')}\n"
+                                    f"Opened Date: {opened_date}\n"
+                                    f"Concluded Date: {new_row.get('concluded_date', '')}"
+                                )
+                                is_usa = verify_usa_relation(
+                                    company_details=details_for_llm,
+                                    case_type="CANADA",
+                                )
+                                logger.info(
+                                    f"[STEP 1.20] details_for_llm: {details_for_llm}")
+                            except Exception as e:
+                                logger.exception(
+                                    f"[STEP 1.21] USA relation check error: {e}")
+                                collect_error(
+                                    error_items,
+                                    str(e),
+                                    step="verify_usa_relation",
+                                    context={"parties": parties[:80]},
+                                )
+                                is_usa = False
+
+                            if is_usa:
+                                logger.info(
+                                    f"[STEP 1.22] Case is USA-related; sending update email")
+                                if not send_update_email(case_doc, new_row, None, differences):
+                                    collect_error(
+                                        error_items,
+                                        "Failed to send USA-related update email",
+                                        step="send_email",
+                                        context={"parties": parties[:80]},
+                                    )
+                            else:
+                                logger.info(
+                                    f"[STEP 1.23] Not USA-related; updating DB only (no email)")
 
                 new_concluded = (new_row.get("concluded_date") or "").strip().lower()
                 new_outcome = (new_row.get("outcome") or "").strip().lower()
@@ -705,6 +742,7 @@ def process_canada_cases_updates():
         logger.info(f"[STEP 1.28] Cases with changes           : {total_changed}")
         logger.info(f"[STEP 1.28a] LLM deal matches            : {llm_match_count}")
         logger.info(f"[STEP 1.28b] Regex fallback matches      : {regex_match_count}")
+        logger.info(f"[STEP 1.28c] Partial one-side matches    : {partial_match_count}")
         logger.info(
             f"[STEP 1.29] Errors encountered           : {len(error_items)}")
         logger.info(f"[STEP 1.30] Total time                   : {elapsed}s")

@@ -41,7 +41,7 @@ from mongodb_connection import (
     is_connected,
 )
 from openai import OpenAI
-from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_llm import llm_match_deal_id, llm_match_partial_deal, fetch_open_deals
 from deal_match_regex import apply_regex_match_subject, regex_match_fs_deal
 from dotenv import load_dotenv
 from bson import ObjectId
@@ -61,7 +61,7 @@ import traceback
 
 from fs_html_scraper import parse_case_html
 from log_utils import cleanup_old_logs, refresh_log_file
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from n8n_email_service import post_email_payload
 
 load_dotenv(".env")
@@ -496,6 +496,21 @@ def match_case_to_deal(
         deals=deals if deals else None,
     )
 
+
+def match_case_to_deal_partial(
+    case_companies: List[str],
+    deals: List[Dict[str, Any]],
+) -> Optional[Tuple[str, str]]:
+    """One-side LLM match after FRMD and FRRMD fail. Returns (deal_id, side) or None."""
+    if not case_companies:
+        return None
+    return llm_match_partial_deal(
+        regulator_name="EC Foreign Subsidies",
+        case_sections={"CASE COMPANIES (from case title)": " / ".join(case_companies)},
+        source_label="the EC Foreign Subsidies case companies",
+        deals=deals if deals else None,
+    )
+
 def send_email_via_webhook(
     subject: str,
     html_content: str,
@@ -706,11 +721,17 @@ def generate_matched_email(case: Dict[str, Any], deal: Dict[str, Any], companies
     return subject, html
 
 
-def generate_usa_email(case: Dict[str, Any], companies: List[str]) -> Tuple[str, str]:
+def generate_usa_email(
+    case: Dict[str, Any],
+    companies: List[str],
+    partial_side: Optional[str] = None,
+) -> Tuple[str, str]:
     case_num = case.get("case_number", "N/A")
     companies_str = " / ".join(companies) if companies else "N/A"
 
     subject = build_subject("ec_fs", "new")
+    if partial_side:
+        subject = apply_partial_match_subject(subject, partial_side)
 
     usa_banner = (
         '<div style="background:#fef3c7;border-radius:6px;padding:16px 22px;'
@@ -747,6 +768,7 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
     skipped_count = 0
     llm_match_count = 0
     regex_match_count = 0
+    partial_match_count = 0
     visited_urls: Set[str] = set()
 
     logger.info("=" * 60)
@@ -1010,6 +1032,58 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
                             logger.warning(
                                 f"[STEP 3.19] [{case_num}] deal_id={matched_deal_id} returned but deal not found anywhere; falling through to USA check")
 
+                    # --- LLM #1b: one-side FRPMD ---
+                    partial_match = None
+                    if deals and companies:
+                        try:
+                            partial_match = match_case_to_deal_partial(
+                                companies, deals)
+                        except Exception as e:
+                            logger.exception(
+                                f"[STEP 3.19c] [{case_num}] Partial deal match error: {e}")
+                            collect_error(
+                                error_items,
+                                str(e),
+                                case_number=case_num,
+                                step="match_case_to_deal_partial",
+                            )
+
+                    if partial_match:
+                        _partial_deal_id, partial_side = partial_match
+                        partial_match_count += 1
+                        logger.info(
+                            "[STEP 3.19c] [%s] Partial match (deal_id=%s side=%s) "
+                            "— sending FRPMD email, not storing deal_id",
+                            case_num, _partial_deal_id, partial_side,
+                        )
+                        subject, html_email = generate_usa_email(
+                            case, companies, partial_side=partial_side)
+                        if not send_email_via_webhook(
+                                subject, html_email, case_num, case_title):
+                            collect_error(
+                                error_items,
+                                "Failed to send FRPMD notification email",
+                                case_number=case_num,
+                                step="send_email_via_webhook",
+                            )
+                        case_doc = {
+                            **case,
+                            "is_open": True,
+                            "created_at": now_iso,
+                            "updated_at": now_iso,
+                        }
+                        inserted_id = insert_case(collection, case_doc)
+                        if inserted_id:
+                            new_count += 1
+                        else:
+                            collect_error(
+                                error_items,
+                                "Failed to insert FRPMD case into DB",
+                                case_number=case_num,
+                                step="insert_case",
+                            )
+                        continue
+
                     # --- LLM #2: USA check ---
                     logger.info(
                         f"  [{case_num}] LLM Call #2: USA-related check (companies={companies})...")
@@ -1119,6 +1193,7 @@ def run(start_url: str, max_pages: Optional[int], headed: bool):
             f"[STEP 3.29] Skipped (already in DB)      : {skipped_count}")
         logger.info(f"  LLM deal matches             : {llm_match_count}")
         logger.info(f"  Regex fallback matches       : {regex_match_count}")
+        logger.info(f"  Partial one-side matches     : {partial_match_count}")
         logger.info(
             f"[STEP 3.30] Errors encountered           : {len(error_items)}")
         logger.info(f"[STEP 3.31] Total time                   : {elapsed}s")

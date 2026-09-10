@@ -5,12 +5,12 @@ from mongodb_connection import (
     init_mongodb_connection,
     is_connected,
 )
-from deal_match_llm import llm_match_deal_id, fetch_open_deals
+from deal_match_llm import llm_match_deal_id, llm_match_partial_deal, fetch_open_deals
 from deal_match_regex import regex_match_deal_by_title
 from llm_verification_service import verify_usa_relation
 from log_utils import cleanup_old_logs, refresh_log_file
 from scraper_error_utils import collect_error, send_error_summary
-from email_subject_builder import build_subject
+from email_subject_builder import apply_partial_match_subject, build_subject
 from n8n_email_service import post_email_payload
 import os
 import json
@@ -18,7 +18,7 @@ import sys
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import time
 
@@ -277,6 +277,19 @@ def match_case_to_deal(title: str, deals: Optional[List[Dict[str, Any]]] = None)
     )
 
 
+def match_case_to_deal_partial(
+    title: str, deals: Optional[List[Dict[str, Any]]] = None
+) -> Optional[Tuple[str, str]]:
+    """One-side LLM match after FRMD and FRRMD fail. Returns (deal_id, side) or None."""
+    return llm_match_partial_deal(
+        regulator_name="ACCC Australia",
+        case_sections={"ACCC CASE TITLE TO MATCH": title},
+        source_label="the ACCC title",
+        source_label_step1="the ACCC title (acquirer or target / vendors)",
+        deals=deals,
+    )
+
+
 def _post_email_payload(payload: Dict[str, Any]) -> bool:
     return post_email_payload(payload)
 
@@ -342,10 +355,15 @@ def send_new_case_email(
     return _post_email_payload(payload)
 
 
-def send_unmatched_usa_related_email(case_info: Dict[str, Any]) -> bool:
+def send_unmatched_usa_related_email(
+    case_info: Dict[str, Any],
+    partial_side: Optional[str] = None,
+) -> bool:
     case_number = case_info.get("case_number", "N/A")
     title = case_info.get("title", "N/A")
     subject = build_subject("accc", "new")
+    if partial_side:
+        subject = apply_partial_match_subject(subject, partial_side)
     url = case_info.get("url", "")
     notification_date = case_info.get("effective_notification_date", "")
     acquisition_status = case_info.get("acquisition_status", "")
@@ -757,6 +775,7 @@ def run_accc_cases_register(test_mode: bool = False):
     new_cases: List[Dict[str, Any]] = []
     llm_match_count = 0
     regex_match_count = 0
+    partial_match_count = 0
     mode_label = "TEST MODE" if test_mode else "LIVE MODE"
     logger.info("=" * 60)
     logger.info(f"[STEP 1] Starting ACCC Cases Register ({mode_label})")
@@ -976,38 +995,71 @@ def run_accc_cases_register(test_mode: bool = False):
                                         context={"url": url},
                                     )
                             else:
+                                partial_match = None
                                 try:
-                                    case_details_str = prepare_case_payload_for_llm(
-                                        case_info)
-                                    is_usa = bool(
-                                        verify_usa_relation(
-                                            company_details=case_details_str,
-                                            case_type="ACCC",
-                                        )
-                                    )
+                                    partial_match = match_case_to_deal_partial(
+                                        case_title, deals=deals)
                                 except Exception as e:
                                     logger.exception(
-                                        f"Error verifying USA relation: {e}")
+                                        f"Error during partial deal matching: {e}")
                                     collect_error(
                                         error_items,
                                         str(e),
-                                        step="verify_usa_relation",
+                                        step="match_case_to_deal_partial",
                                         case_number=case_number,
                                     )
-                                    is_usa = False
 
-                                if is_usa:
+                                if partial_match:
+                                    _partial_deal_id, partial_side = partial_match
+                                    partial_match_count += 1
                                     logger.info(
-                                        "  Case appears USA-related (unmatched); sending email"
+                                        "  Partial match (deal_id=%s side=%s) "
+                                        "— sending FRPMD email, not storing deal_id",
+                                        _partial_deal_id, partial_side,
                                     )
-                                    if not send_unmatched_usa_related_email(case_info):
+                                    if not send_unmatched_usa_related_email(
+                                        case_info, partial_side=partial_side,
+                                    ):
                                         collect_error(
                                             error_items,
-                                            "Failed to send USA-related email",
+                                            "Failed to send FRPMD email",
                                             step="send_email",
                                             case_number=case_number,
                                             context={"url": url},
                                         )
+                                else:
+                                    try:
+                                        case_details_str = prepare_case_payload_for_llm(
+                                            case_info)
+                                        is_usa = bool(
+                                            verify_usa_relation(
+                                                company_details=case_details_str,
+                                                case_type="ACCC",
+                                            )
+                                        )
+                                    except Exception as e:
+                                        logger.exception(
+                                            f"Error verifying USA relation: {e}")
+                                        collect_error(
+                                            error_items,
+                                            str(e),
+                                            step="verify_usa_relation",
+                                            case_number=case_number,
+                                        )
+                                        is_usa = False
+
+                                    if is_usa:
+                                        logger.info(
+                                            "  Case appears USA-related (unmatched); sending email"
+                                        )
+                                        if not send_unmatched_usa_related_email(case_info):
+                                            collect_error(
+                                                error_items,
+                                                "Failed to send USA-related email",
+                                                step="send_email",
+                                                case_number=case_number,
+                                                context={"url": url},
+                                            )
 
                             inserted_id = insert_case(collection, case_info)
                             if inserted_id:
@@ -1073,6 +1125,7 @@ def run_accc_cases_register(test_mode: bool = False):
         logger.info(f"  Total cases checked          : {len(items)}")
         logger.info(f"  LLM deal matches             : {llm_match_count}")
         logger.info(f"  Regex fallback matches       : {regex_match_count}")
+        logger.info(f"  Partial one-side matches     : {partial_match_count}")
         logger.info(f"  New cases inserted           : {len(new_cases)}")
         logger.info(f"  Errors encountered           : {len(error_items)}")
         logger.info(f"  Total time                   : {elapsed}s")
