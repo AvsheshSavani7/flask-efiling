@@ -45,6 +45,8 @@ from chile_fne_cases_register import run_chile_fne_cases_register
 from taiwan_ftc_cases_register import run_taiwan_ftc_cases_register
 from taiwan_ftc_update_monitor import run_taiwan_ftc_update_monitor
 from ukraine_amcu_cases import run_ukraine_amcu_cases
+from de_doi_public_info_watch import run as de_doi_public_info_watch_run
+from ma_doi_public_hearings_watch import run as ma_doi_public_hearings_watch_run
 from canada_cases_register import run_canada_cases_register
 from canada_cases_update_monitor import process_canada_cases_updates
 from comesa_cases_register import run_comesa_cases_register
@@ -246,6 +248,8 @@ def home():
             "/cpuc-scraper": "GET/POST - Scrape CPUC Documents table via Playwright, download PDFs, run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/cpuc_dockets.json (params: docket_number, headless, test_mode, save_json, cutoff_days)",
             "/va-puc-scraper": "GET/POST - Scrape VA SCC/PUC Breeze documents API, download PDFs via residential proxy, run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/va_puc_dockets.json (params: docket_number, no_proxy, test_mode, save_json, cutoff_days)",
             "/ohio-puc-scraper": "GET/POST - Scrape Ohio PUC (PUCO DIS) docket entries via headed browser + residential proxy, download PDFs (OCR fallback), run tier1/2/3 analysis. Omit docket_number to run all active dockets from docket_engine/ohio_puc_dockets.json (params: docket_number, no_proxy, test_mode, save_json)",
+            "/de-doi-public-info-watch": "GET - Watch Delaware DOI Current public hearings/meetings/sessions for Brighthouse or Aquarian (query: dry_run, test_email; logs: /logs?script=de_doi_public_info_watch)",
+            "/ma-doi-public-hearings-watch": "GET - Watch Massachusetts DOI top monthly hearing schedules for Brighthouse or Aquarian (query: dry_run, test_email, headless; logs: /logs?script=ma_doi_public_hearings_watch)",
             "/system-check": "GET - Check system dependencies for document extraction",
             "/health": "GET - Health check endpoint"
         },
@@ -3174,6 +3178,8 @@ KNOWN_LOG_SCRIPTS = {
     "docket_entry_analyzer",
     "va_puc_scraper",
     "ohio_puc_scraper",
+    "de_doi_public_info_watch",
+    "ma_doi_public_hearings_watch",
 }
 
 
@@ -3699,6 +3705,160 @@ def ukraine_amcu_scraper_endpoint():
 
     except Exception as e:
         logger.error(f"Error starting Ukraine AMCU scraper: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/de-doi-public-info-watch', methods=['GET'])
+def de_doi_public_info_watch_endpoint():
+    """
+    Watch Delaware DOI Current public hearings, meetings, and information
+    sessions for Brighthouse or Aquarian. Matching items are emailed via
+    send_direct_email and stored in the insurance collection.
+    Process runs in background - returns immediately.
+
+    Query parameters:
+        dry_run: string (optional, "true" or "false", default: "false")
+                 Parse and match only — no DB writes or emails.
+        test_email: string (optional, "true" or "false", default: "false")
+                    When true, emails go only to avshesh.savani@teqnodux.com
+                    via send_direct_email (N8N_WEBHOOK_ONLY_ME).
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        dry_run = request.args.get(
+            "dry_run", "false").lower() in ("true", "1", "yes")
+        test_email = request.args.get(
+            "test_email", "false").lower() in ("true", "1", "yes")
+
+        def run_watch():
+            try:
+                logger.info(
+                    "Starting Delaware DOI public info watch in background "
+                    "(dry_run=%s test_email=%s)",
+                    dry_run, test_email,
+                )
+                de_doi_public_info_watch_run(
+                    dry_run=dry_run, test_mode=test_email)
+                logger.info(
+                    "Delaware DOI public info watch completed successfully")
+            except Exception:
+                logger.exception(
+                    "Error in background Delaware DOI public info watch")
+
+        if dry_run:
+            task_name = "de-doi-public-info-watch-dry-run"
+        elif test_email:
+            task_name = "de-doi-public-info-watch-test-email"
+        else:
+            task_name = "de-doi-public-info-watch"
+        submitted, msg = submit_unique_task(
+            task_name, run_watch, script_file="de_doi_public_info_watch.py")
+        if not submitted:
+            return jsonify({
+                "success": False,
+                "error": msg,
+                "status": "already_running",
+            }), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running",
+            "dry_run": dry_run,
+            "test_email": test_email,
+        }), 200
+
+    except Exception as e:
+        logger.error(
+            "Error starting Delaware DOI public info watch: %s", str(e))
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/ma-doi-public-hearings-watch', methods=['GET'])
+def ma_doi_public_hearings_watch_endpoint():
+    """
+    Watch Massachusetts DOI top featured monthly Public Hearing Schedule
+    links (not Table of Contents / year archives). Matching Case rows are
+    emailed via send_direct_email and stored in the insurance collection.
+    Process runs in background - returns immediately.
+
+    Query parameters:
+        dry_run: string (optional, "true" or "false", default: "false")
+                 Parse and match only — no DB writes or emails.
+        test_email: string (optional, "true" or "false", default: "false")
+                    When true, emails go only to avshesh.savani@teqnodux.com
+                    via send_direct_email (N8N_WEBHOOK_ONLY_ME).
+        headless: string (optional, "true" or "false", default: "true")
+
+    Returns:
+    {
+        "success": bool,
+        "message": "string",
+        "status": "string"
+    }
+    """
+    try:
+        dry_run = request.args.get(
+            "dry_run", "false").lower() in ("true", "1", "yes")
+        test_email = request.args.get(
+            "test_email", "false").lower() in ("true", "1", "yes")
+        headless = request.args.get(
+            "headless", "true").lower() in ("true", "1", "yes")
+
+        def run_watch():
+            try:
+                logger.info(
+                    "Starting Massachusetts DOI public hearings watch "
+                    "(dry_run=%s test_email=%s headless=%s)",
+                    dry_run, test_email, headless,
+                )
+                ma_doi_public_hearings_watch_run(
+                    dry_run=dry_run, test_mode=test_email, headless=headless)
+                logger.info(
+                    "Massachusetts DOI public hearings watch completed successfully")
+            except Exception:
+                logger.exception(
+                    "Error in background Massachusetts DOI public hearings watch")
+
+        if dry_run:
+            task_name = "ma-doi-public-hearings-watch-dry-run"
+        elif test_email:
+            task_name = "ma-doi-public-hearings-watch-test-email"
+        else:
+            task_name = "ma-doi-public-hearings-watch"
+        submitted, msg = submit_unique_task(
+            task_name, run_watch, script_file="ma_doi_public_hearings_watch.py")
+        if not submitted:
+            return jsonify({
+                "success": False,
+                "error": msg,
+                "status": "already_running",
+            }), 409
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "status": "running",
+            "dry_run": dry_run,
+            "test_email": test_email,
+            "headless": headless,
+        }), 200
+
+    except Exception as e:
+        logger.error(
+            "Error starting Massachusetts DOI public hearings watch: %s", str(e))
         return jsonify({
             "success": False,
             "error": str(e)
